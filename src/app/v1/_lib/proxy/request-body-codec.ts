@@ -8,8 +8,8 @@
  *
  * 运行时为 Node.js（route.ts: `runtime = "nodejs"`）。`node:zlib` 自 Node 22.15 起
  * 原生提供 zstd 同步解压（gzip/deflate/br 更早即有），无需第三方依赖。该最低版本要求
- * 由 package.json 的 `engines` 字段声明；生产镜像（deploy/Dockerfile 的 node:trixie-slim）
- * 运行 Node 24+，满足要求。
+ * 由 package.json 的 `engines` 字段声明；生产镜像（deploy/Dockerfile 的
+ * node:26-trixie-slim）满足要求。
  *
  * 注意：解压在 `ProxySession.fromContext` 内、鉴权 guard 之前同步执行（与既有的请求体
  * `JSON.parse` 一致）。单层编码 + maxOutputBytes 输出上限将其最坏开销限定为单次有界解压。
@@ -156,7 +156,7 @@ function bufferToArrayBuffer(buf: Buffer): ArrayBuffer {
  * 按 `content-encoding` 解压入站请求体。
  *
  * - 无编码 / identity / 空体：原样返回（decoded=false）。
- * - 含不支持的编码：不解压、原样返回（decoded=false）并告警，由上层透传给上游。
+ * - 含不支持的编码：按 415 拒绝，避免代理在无法解析请求语义时继续转发。
  * - 支持的编码：逐层反向解压；超过上限抛 413，损坏流抛 400。
  */
 export function decodeRequestBody(
@@ -180,7 +180,13 @@ export function decodeRequestBody(
     };
   }
 
-  // 空体：不可能是有效压缩流，在层数/支持集校验之前直接透传，避免对安全的空请求误报 400。
+  const unsupported = encodings.filter((enc) => !SUPPORTED_ENCODINGS.has(enc));
+  if (unsupported.length > 0) {
+    throw new ProxyError(`Unsupported content-encoding: ${unsupported.join(", ")}.`, 415);
+  }
+
+  // 空体：不可能是有效压缩流。支持的编码头在空体上保持既有透传语义；未知编码仍在
+  // 上面的边界校验中 fail closed，避免同一 header 因 body 长度不同产生权限差异。
   if (originalByteLength === 0) {
     const buffer = toArrayBuffer(input);
     return {
@@ -198,23 +204,6 @@ export function decodeRequestBody(
       `Too many content-encoding layers (${encodings.length}); at most ${MAX_CONTENT_ENCODING_LAYERS} are allowed.`,
       400
     );
-  }
-
-  const unsupported = encodings.filter((enc) => !SUPPORTED_ENCODINGS.has(enc));
-  if (unsupported.length > 0) {
-    // 透传：不解压、保留原始字节与 content-encoding 头，交给上游处理。
-    logger.warn("[decodeRequestBody] Unsupported content-encoding, passing through untouched", {
-      contentEncoding,
-      unsupported,
-    });
-    const buffer = toArrayBuffer(input);
-    return {
-      buffer,
-      decoded: false,
-      encoding: null,
-      originalByteLength,
-      decodedByteLength: buffer.byteLength,
-    };
   }
 
   // 解压前先按压缩体本身字节数拒绝过大输入（鉴权前防放大，见 MAX_COMPRESSED_REQUEST_BYTES）。

@@ -29,7 +29,7 @@ import {
   type OpenAIImageRequestMetadata,
   parseOpenAIImageMultipartMetadata,
 } from "./openai-image-compat";
-import { decodeRequestBody } from "./request-body-codec";
+import { decodeRequestBody, parseContentEncoding } from "./request-body-codec";
 
 /**
  * Classification of an auth failure, used to decide whether to record the
@@ -1178,6 +1178,12 @@ async function parseRequestBody(c: Context): Promise<RequestBodyResult> {
   const contentType = c.req.header("content-type") ?? null;
   const contentEncoding = c.req.header("content-encoding") ?? null;
   const pathname = new URL(c.req.url).pathname;
+  const isMultipartFormData = isOpenAIImageMultipartContentType(contentType);
+
+  if (isMultipartFormData && parseContentEncoding(contentEncoding).length > 0) {
+    throw new ProxyError("Encoded multipart request bodies are not supported.", 415);
+  }
+
   // 原始（可能被压缩的）入站字节：用于截断检测与 multipart 透传。
   const rawBodyBuffer = await c.req.raw.clone().arrayBuffer();
   const receivedBodyBytes = rawBodyBuffer.byteLength;
@@ -1207,7 +1213,7 @@ async function parseRequestBody(c: Context): Promise<RequestBodyResult> {
   let requestBodyLogNote: string | undefined;
   let imageRequestMetadata: OpenAIImageRequestMetadata | null = null;
 
-  if (getOpenAIImageEndpoint(pathname) && isOpenAIImageMultipartContentType(contentType)) {
+  if (getOpenAIImageEndpoint(pathname) && isMultipartFormData) {
     // 图片 multipart 请求保留 sidecar metadata，并为过滤/敏感词提供文本字段视图。
     // multipart 请求体不会被 content-encoding 压缩，按原始字节透传。
     imageRequestMetadata = await parseOpenAIImageMultipartMetadata(

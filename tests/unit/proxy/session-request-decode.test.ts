@@ -115,7 +115,7 @@ describe("ProxySession.fromContext request body decompression", () => {
     expect(session.headers.get("content-encoding")).toBeNull();
   });
 
-  it("preserves content-encoding for unsupported encodings (transparent passthrough)", async () => {
+  it("surfaces a ProxyError(415) for unsupported content encodings", async () => {
     const payload = JSON.stringify({ model: "gpt-5-codex", input: "exotic" });
     const ctx = makeContext(
       "https://hub.test/v1/responses",
@@ -123,10 +123,10 @@ describe("ProxySession.fromContext request body decompression", () => {
       encoder.encode(payload)
     );
 
-    const session = await ProxySession.fromContext(ctx);
-
-    // We could not decode it, so we must not strip the header: forward as-is.
-    expect(session.headers.get("content-encoding")).toBe("snappy");
+    await expect(ProxySession.fromContext(ctx)).rejects.toMatchObject({
+      statusCode: 415,
+      message: "Unsupported content-encoding: snappy.",
+    });
   });
 
   it("surfaces a ProxyError(400) when a declared-compressed body is corrupt", async () => {

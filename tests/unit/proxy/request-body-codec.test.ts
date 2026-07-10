@@ -124,11 +124,16 @@ describe("decodeRequestBody", () => {
     expect(result.decodedByteLength).toBe(0);
   });
 
-  it("passes through unsupported encodings untouched", () => {
-    const result = decodeRequestBody(raw(), "snappy");
-    expect(result.decoded).toBe(false);
-    expect(result.encoding).toBeNull();
-    expect(decodedText(result)).toBe(SAMPLE);
+  it("rejects unsupported encodings with ProxyError(415)", () => {
+    expect(() => decodeRequestBody(raw(), "snappy")).toThrowError(
+      expect.objectContaining({ statusCode: 415 })
+    );
+  });
+
+  it("rejects unsupported encodings even when the body is empty", () => {
+    expect(() => decodeRequestBody(new Uint8Array(0), "snappy")).toThrowError(
+      expect.objectContaining({ statusCode: 415 })
+    );
   });
 
   it("accepts ArrayBuffer input and returns an independent ArrayBuffer", () => {
@@ -190,12 +195,10 @@ describe("decodeRequestBody", () => {
     }
   });
 
-  it("does not apply the compressed cap to unsupported encodings (still passes through)", () => {
-    // Unsupported encodings are passed through untouched even if larger than the compressed cap.
-    const result = decodeRequestBody(raw(), "snappy", { maxCompressedBytes: 1 });
-    expect(result.decoded).toBe(false);
-    expect(result.encoding).toBeNull();
-    expect(decodedText(result)).toBe(SAMPLE);
+  it("rejects unsupported encodings before applying the compressed-size policy", () => {
+    expect(() => decodeRequestBody(raw(), "snappy", { maxCompressedBytes: 1 })).toThrowError(
+      expect.objectContaining({ statusCode: 415 })
+    );
   });
 
   it("does not apply the compressed cap to an empty body", () => {

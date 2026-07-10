@@ -18,6 +18,20 @@ import { ProxySession } from "@/app/v1/_lib/proxy/session";
 import { findLatestPriceByModel } from "@/repository/model-price";
 import { getSystemSettings } from "@/repository/system-config";
 
+function createContext(request: Request) {
+  return {
+    req: {
+      method: request.method,
+      url: request.url,
+      raw: request,
+      header(name?: string) {
+        if (name) return request.headers.get(name) ?? undefined;
+        return Object.fromEntries(request.headers.entries());
+      },
+    },
+  } as any;
+}
+
 function makeSystemSettings(
   billingModelSource: SystemSettings["billingModelSource"]
 ): SystemSettings {
@@ -160,6 +174,27 @@ describe("ProxySession endpoint policy", () => {
     expect(isRawPassthroughEndpointPolicy(policy)).toBe(false);
     expect(policy.kind).toBe("default");
     expect(policy.trackConcurrentRequests).toBe(true);
+  });
+});
+
+describe("ProxySession encoded multipart handling", () => {
+  it.each([
+    "/v1/images/edits",
+    "/v1/audio/transcriptions",
+  ])("rejects encoded multipart requests with HTTP 415: %s", async (pathname) => {
+    const request = new Request(`http://localhost${pathname}`, {
+      method: "POST",
+      headers: {
+        "content-encoding": "gzip",
+        "content-type": "multipart/form-data; boundary=test-boundary",
+      },
+      body: new Uint8Array([1, 2, 3]),
+    });
+
+    await expect(ProxySession.fromContext(createContext(request))).rejects.toMatchObject({
+      statusCode: 415,
+      message: "Encoded multipart request bodies are not supported.",
+    });
   });
 });
 
