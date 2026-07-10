@@ -236,6 +236,50 @@ delete a fixed-window cost counter. Green and its v2 keys remain intact while it
   durable/cross-process replay. Do not add replay of completed hedge finalizers until each
   `(billingEventId, entity, window)` side effect has its own atomic deduplication contract.
 
+## Final local release evidence (2026-07-11)
+
+The final candidate is built from `0388d407` (`fix: preserve fixed counters on 5h mode changes`),
+which includes the WebSocket upgrade-ownership fix in `8cb09161` and the connecting-socket close
+safety fix in `595387c9`.
+
+```text
+tag=localhost/claude-code-hub:candidate-0.8.10-gpt56-0388d407-20260711
+id=c112e539ad9dbfd13fc77f1482e8e901758943a34e28da2c81819b34ad8938ec
+digest=sha256:a70bd08b3272805b794bedbe1251b77ce5f849a85d649a2a3bee70d9f5b337aa
+size=890255176
+version=0.8.10-gpt56-0388d407
+```
+
+Local quality gates passed after the final code change: production build, Biome, TypeScript, and
+`git diff --check` exited zero; Vitest reported 6,975 passed, 13 skipped, and zero failed. The real
+PostgreSQL/Redis 5-hour reset integration additionally passed 2/2, proving a rolling reset deletes
+both legacy and v2 rolling ZSET/lease keys while preserving fixed 5-hour, daily, weekly, and
+monthly counters.
+
+A fresh PostgreSQL 18 + Redis 7 stack reached 113 migrations with hash
+`21fca0b5d92df94a9f45a440db4fee3d`. Both target indexes were ready and valid. Their OIDs and
+relfilenodes remained `17188/17188` and `17189/17189` after starting a second application instance;
+the GIN size grew only from test ledger inserts. An idle client WebSocket stayed open, and a real
+`/v1/responses` WebSocket completed after the HTTP-only mock rejected the upstream upgrade. Logs
+showed the explicit WebSocket-to-HTTP fallback, and app/PostgreSQL/Redis restart counts stayed zero.
+
+The final billing matrix passed against the fresh stack:
+
+```text
+cold Responses: observed=9016 read=0 write=9016 tier=standard
+hot Responses: observed=9016 read=7936 write=1080 tier=standard
+hot Chat: observed=9016 read=7936 write=1080 tier=standard
+272000 Priority: tier=priority
+272001 Standard: tier=standard_long_context
+272001 Priority: unsupported, cost=0, absent from rolling v2 ZSET
+```
+
+A Toxiproxy rehearsal then switched only new connections from blue `:3001` to green `:3002`.
+The pre-existing blue SSE and WebSocket each delivered all ten frames through
+`response.completed`; new HTTP returned 200, and new SSE/WebSocket connections completed on green.
+Blue, green, PostgreSQL, Redis, and Toxiproxy all remained running with restart count zero. Blue was
+left running throughout the proof.
+
 ## Zero-downtime production runbook
 
 This runbook intentionally leaves the current app running after cutover. Stopping it is a separate
@@ -252,7 +296,7 @@ DB_CONTAINER=claude-code-hub-db
 REDIS_CONTAINER=claude-code-hub-redis
 CLOUDFLARED_CONTAINER=claude-code-hub-cloudflared
 MIGRATOR_IMAGE_ID=d036c689ddf017192772e8d5bd96a7a7ee0ba976c837ec319b501a5b449f54a3
-GREEN_IMAGE_ID=<final-verified-image-id>
+GREEN_IMAGE_ID=c112e539ad9dbfd13fc77f1482e8e901758943a34e28da2c81819b34ad8938ec
 GREEN_CONTAINER=claude-code-hub-green-<release-sha>
 GREEN_ORIGIN=app-green-<release-sha>:3000
 ```
@@ -269,7 +313,8 @@ cache cleanup during the overlap.
 
 1. Capture container IDs, image IDs, `StartedAt`, `RestartCount`, health, network aliases, and the
    current cloudflared configuration version.
-2. Confirm `/api/v1/health` and the external health endpoint are 200 and report the blue version.
+2. Confirm `/api/health/ready` and the external health endpoint are 200; readiness must report the
+   immutable blue version plus database, Redis, and proxy component status.
 3. Confirm PostgreSQL has 104 migrations through 0103, zero ungranted locks, zero lock waiters, and
    no old transaction.
 4. Capture `message_request` and `usage_ledger` row counts, numeric totals, and ordered-COPY SHA-256
