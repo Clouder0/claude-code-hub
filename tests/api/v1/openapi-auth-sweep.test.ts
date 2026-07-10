@@ -4,7 +4,7 @@
  *   - operations declared `x-required-access: public` are reachable without auth
  *     (any status other than 401 is accepted; the contract test already
  *     validates the spec-level metadata)
- *   - operations declared `x-required-access: read` or `admin` return 401 with
+ *   - operations declared `x-required-access: read`, `web`, or `admin` return 401 with
  *     the `auth.missing` problem+json envelope when called without credentials
  *
  * The companion `openapi-tier-sweep.test.ts` uses mocked auth to verify that
@@ -16,7 +16,7 @@ import { describe, expect, test } from "vitest";
 import { callV1Route } from "./test-utils";
 
 type Operation = {
-  "x-required-access"?: "public" | "read" | "admin";
+  "x-required-access"?: "public" | "read" | "web" | "admin";
   operationId?: string;
   security?: unknown[];
 };
@@ -83,7 +83,7 @@ describe("v1 OpenAPI live auth sweep", () => {
         continue;
       }
 
-      if (op.tier === "read" || op.tier === "admin") {
+      if (op.tier === "read" || op.tier === "web" || op.tier === "admin") {
         if (status !== 401) {
           failures.push(
             `${label}: protected endpoint returned ${status} (expected 401 without auth)`

@@ -8,7 +8,11 @@ const findUsageLogsStatsMock = vi.fn();
 const exportStatusStore = new Map<string, unknown>();
 const exportResultStore = new Map<string, string>();
 
-vi.mock("@/lib/auth", () => ({ getSession: getSessionMock }));
+vi.mock("@/lib/auth", () => ({
+  getSession: getSessionMock,
+  hasAdminAuthority: (session: { user?: { role?: string } } | null | undefined) =>
+    session?.user?.role === "admin",
+}));
 
 vi.mock("@/lib/utils/timezone", () => ({
   resolveSystemTimezone: vi.fn(async () => "Asia/Shanghai"),

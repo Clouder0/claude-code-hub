@@ -1,10 +1,10 @@
-import { ApiError } from "@/lib/api-client/v1/errors";
+import { isAdminForbidden } from "@/lib/api-client/v1/errors";
 import type { SystemSettings } from "@/types/system-config";
 import { apiGet, apiPut, toActionResult } from "./_compat";
 
 export function getSystemSettings() {
   return apiGet<SystemSettings>("/api/v1/system/settings").catch((error: unknown) => {
-    if (error instanceof ApiError && error.status === 403 && error.errorCode === "auth.forbidden") {
+    if (isAdminForbidden(error)) {
       return apiGet<SystemSettings>("/api/v1/system/display-settings");
     }
     throw error;

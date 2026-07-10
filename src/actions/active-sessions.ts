@@ -1,6 +1,6 @@
 "use server";
 
-import { getSession } from "@/lib/auth";
+import { getSession, hasAdminAuthority } from "@/lib/auth";
 import {
   getActiveSessionsCache,
   getSessionDetailsCache,
@@ -163,7 +163,7 @@ export async function getActiveSessions(): Promise<ActionResult<ActiveSessionInf
       };
     }
 
-    const isAdmin = authSession.user.role === "admin";
+    const isAdmin = hasAdminAuthority(authSession);
     const currentUserId = authSession.user.id;
 
     // 1. 尝试从缓存获取
@@ -328,7 +328,7 @@ export async function getAllSessions(
       };
     }
 
-    const isAdmin = authSession.user.role === "admin";
+    const isAdmin = hasAdminAuthority(authSession);
     const currentUserId = authSession.user.id;
 
     // 1. 尝试从缓存获取（使用不同的 key）
@@ -527,7 +527,7 @@ export async function getSessionMessages(sessionId: string): Promise<ActionResul
       };
     }
 
-    const isAdmin = authSession.user.role === "admin";
+    const isAdmin = hasAdminAuthority(authSession);
     const currentUserId = authSession.user.id;
 
     // 1. 获取 session 统计数据以验证所有权
@@ -597,7 +597,7 @@ export async function hasSessionMessages(
       };
     }
 
-    const isAdmin = authSession.user.role === "admin";
+    const isAdmin = hasAdminAuthority(authSession);
     const currentUserId = authSession.user.id;
 
     // 检查 Session 所有权（需要从数据库获取 userId）
@@ -691,7 +691,7 @@ export async function getSessionDetails(
       };
     }
 
-    const isAdmin = authSession.user.role === "admin";
+    const isAdmin = hasAdminAuthority(authSession);
     const currentUserId = authSession.user.id;
 
     // 1. 尝试从缓存获取统计数据
@@ -953,7 +953,7 @@ export async function getSessionRequests(
       };
     }
 
-    const isAdmin = authSession.user.role === "admin";
+    const isAdmin = hasAdminAuthority(authSession);
     const currentUserId = authSession.user.id;
 
     // 1. 验证 Session 所有权
@@ -1022,7 +1022,7 @@ export async function terminateActiveSession(sessionId: string): Promise<ActionR
       };
     }
 
-    const isAdmin = authSession.user.role === "admin";
+    const isAdmin = hasAdminAuthority(authSession);
     const currentUserId = authSession.user.id;
 
     // 1. 获取 session 统计数据以验证所有权
@@ -1116,7 +1116,7 @@ export async function terminateActiveSessionsBatch(
       };
     }
 
-    const isAdmin = authSession.user.role === "admin";
+    const isAdmin = hasAdminAuthority(authSession);
     const currentUserId = authSession.user.id;
 
     const uniqueSessionIds = Array.from(new Set(sessionIds));

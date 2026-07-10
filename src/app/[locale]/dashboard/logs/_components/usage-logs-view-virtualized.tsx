@@ -12,7 +12,7 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/component
 import { Switch } from "@/components/ui/switch";
 import { useFullscreen } from "@/hooks/use-fullscreen";
 import { useRouter } from "@/i18n/routing";
-import { getKeys } from "@/lib/api-client/v1/actions/keys";
+import { getOwnKeys } from "@/lib/api-client/v1/actions/keys";
 import type { OverviewData } from "@/lib/api-client/v1/actions/overview";
 import { getOverviewData } from "@/lib/api-client/v1/actions/overview";
 import { getProviders } from "@/lib/api-client/v1/actions/providers";
@@ -146,7 +146,7 @@ function UsageLogsViewContent({
 
   const { data: keysResult, isLoading: isKeysLoading } = useQuery({
     queryKey: ["usage-log-keys", userId],
-    queryFn: () => getKeys(userId),
+    queryFn: getOwnKeys,
     enabled: !isAdmin && initialKeys === undefined,
   });
 

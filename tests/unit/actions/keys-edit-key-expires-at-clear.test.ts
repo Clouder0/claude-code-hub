@@ -3,6 +3,8 @@ import { beforeEach, describe, expect, test, vi } from "vitest";
 const getSessionMock = vi.fn();
 vi.mock("@/lib/auth", () => ({
   getSession: getSessionMock,
+  hasAdminAuthority: (session: { user?: { role?: string } } | null | undefined) =>
+    session?.user?.role === "admin",
 }));
 
 vi.mock("next/cache", () => ({
@@ -103,6 +105,16 @@ describe("editKey: expiresAt 清除/不更新语义", () => {
 
     const updatePayload = updateKeyMock.mock.calls[0]?.[1] as Record<string, unknown>;
     expect(Object.hasOwn(updatePayload, "expires_at")).toBe(false);
+  });
+
+  test("只修改 name 时不应重置其他 Key 字段", async () => {
+    const { editKey } = await import("@/actions/keys");
+
+    const res = await editKey(1, { name: "k2" });
+
+    expect(res.ok).toBe(true);
+    const updatePayload = updateKeyMock.mock.calls[0]?.[1] as Record<string, unknown>;
+    expect(updatePayload).toEqual({ name: "k2" });
   });
 
   test("携带 expiresAt=undefined 时应清除 expires_at（写入 null）", async () => {

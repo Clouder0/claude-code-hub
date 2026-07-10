@@ -2185,7 +2185,7 @@ export interface paths {
         };
         /**
          * List current user
-         * @description Returns the current user in the legacy users-page list shape.
+         * @description Returns the current Web user in the legacy users-page list shape.
          */
         get: operations["getUsersSelf"];
         put?: never;
@@ -2495,7 +2495,11 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get?: never;
+        /**
+         * List own keys
+         * @description Lists keys owned by the current Web user. The target user always comes from the authenticated session.
+         */
+        get: operations["getUsersSelfKeys"];
         put?: never;
         /**
          * Create own key
@@ -2577,7 +2581,7 @@ export interface paths {
         };
         /**
          * Get key
-         * @description Gets one key view through the existing key limit usage guard.
+         * @description Gets one key view. Effective admins may read any key; Web users may read only their own keys.
          */
         get: operations["getKeysByKeyid"];
         put?: never;
@@ -2645,7 +2649,7 @@ export interface paths {
         };
         /**
          * Get key quota usage
-         * @description Returns key quota usage for the quota dialog.
+         * @description Returns key quota usage. Effective admins may read any key; Web users may read only their own keys.
          */
         get: operations["getKeysByKeyidQuota"];
         put?: never;
@@ -2671,7 +2675,7 @@ export interface paths {
         head?: never;
         /**
          * Patch one key limit
-         * @description Updates one key limit field without overwriting the rest of the key.
+         * @description Updates one key limit field without overwriting the rest. Effective admins may update any key; Web users may update only their own keys.
          */
         patch: operations["patchKeysByKeyidLimitsByField"];
         trace?: never;
@@ -2745,7 +2749,7 @@ export interface paths {
         };
         /**
          * Get usage log filter options
-         * @description Returns admin-scoped cached model, status-code, and endpoint filter options.
+         * @description Returns filter options scoped to the effective caller's visible logs.
          */
         get: operations["getUsageLogsFilterOptions"];
         put?: never;
@@ -2765,7 +2769,7 @@ export interface paths {
         };
         /**
          * List usage log models
-         * @description Returns distinct model values used in admin-visible logs.
+         * @description Returns distinct model values scoped to the effective caller's visible logs.
          */
         get: operations["getUsageLogsModels"];
         put?: never;
@@ -2785,7 +2789,7 @@ export interface paths {
         };
         /**
          * List usage log status codes
-         * @description Returns distinct status codes used in admin-visible logs.
+         * @description Returns distinct status codes scoped to the effective caller's visible logs.
          */
         get: operations["getUsageLogsStatusCodes"];
         put?: never;
@@ -2805,7 +2809,7 @@ export interface paths {
         };
         /**
          * List usage log endpoints
-         * @description Returns distinct endpoint values used in admin-visible logs.
+         * @description Returns distinct endpoint values scoped to the effective caller's visible logs.
          */
         get: operations["getUsageLogsEndpoints"];
         put?: never;
@@ -32935,6 +32939,180 @@ export interface operations {
                 content: {
                     "application/json": {
                         [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Invalid request. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": {
+                        /** @description Stable problem type URI or URN. */
+                        type: string;
+                        /** @description Short problem title. */
+                        title: string;
+                        /** @description HTTP status code. */
+                        status: number;
+                        /** @description Human-readable error detail. */
+                        detail: string;
+                        /** @description Request path that produced the problem. */
+                        instance: string;
+                        /** @description Application error code for frontend i18n. */
+                        errorCode: string;
+                        /** @description Optional i18n parameters. */
+                        errorParams?: {
+                            [key: string]: unknown;
+                        };
+                        /** @description Optional request trace identifier. */
+                        traceId?: string;
+                        /** @description Validation failure details. */
+                        invalidParams?: {
+                            /** @description Path to the invalid input field. */
+                            path: (string | number)[];
+                            /** @description Machine-readable validation error code. */
+                            code: string;
+                            /** @description Validation error message. */
+                            message: string;
+                        }[];
+                    };
+                };
+            };
+            /** @description Authentication required. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": {
+                        /** @description Stable problem type URI or URN. */
+                        type: string;
+                        /** @description Short problem title. */
+                        title: string;
+                        /** @description HTTP status code. */
+                        status: number;
+                        /** @description Human-readable error detail. */
+                        detail: string;
+                        /** @description Request path that produced the problem. */
+                        instance: string;
+                        /** @description Application error code for frontend i18n. */
+                        errorCode: string;
+                        /** @description Optional i18n parameters. */
+                        errorParams?: {
+                            [key: string]: unknown;
+                        };
+                        /** @description Optional request trace identifier. */
+                        traceId?: string;
+                        /** @description Validation failure details. */
+                        invalidParams?: {
+                            /** @description Path to the invalid input field. */
+                            path: (string | number)[];
+                            /** @description Machine-readable validation error code. */
+                            code: string;
+                            /** @description Validation error message. */
+                            message: string;
+                        }[];
+                    };
+                };
+            };
+            /** @description Access denied. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": {
+                        /** @description Stable problem type URI or URN. */
+                        type: string;
+                        /** @description Short problem title. */
+                        title: string;
+                        /** @description HTTP status code. */
+                        status: number;
+                        /** @description Human-readable error detail. */
+                        detail: string;
+                        /** @description Request path that produced the problem. */
+                        instance: string;
+                        /** @description Application error code for frontend i18n. */
+                        errorCode: string;
+                        /** @description Optional i18n parameters. */
+                        errorParams?: {
+                            [key: string]: unknown;
+                        };
+                        /** @description Optional request trace identifier. */
+                        traceId?: string;
+                        /** @description Validation failure details. */
+                        invalidParams?: {
+                            /** @description Path to the invalid input field. */
+                            path: (string | number)[];
+                            /** @description Machine-readable validation error code. */
+                            code: string;
+                            /** @description Validation error message. */
+                            message: string;
+                        }[];
+                    };
+                };
+            };
+            /** @description Key not found. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": {
+                        /** @description Stable problem type URI or URN. */
+                        type: string;
+                        /** @description Short problem title. */
+                        title: string;
+                        /** @description HTTP status code. */
+                        status: number;
+                        /** @description Human-readable error detail. */
+                        detail: string;
+                        /** @description Request path that produced the problem. */
+                        instance: string;
+                        /** @description Application error code for frontend i18n. */
+                        errorCode: string;
+                        /** @description Optional i18n parameters. */
+                        errorParams?: {
+                            [key: string]: unknown;
+                        };
+                        /** @description Optional request trace identifier. */
+                        traceId?: string;
+                        /** @description Validation failure details. */
+                        invalidParams?: {
+                            /** @description Path to the invalid input field. */
+                            path: (string | number)[];
+                            /** @description Machine-readable validation error code. */
+                            code: string;
+                            /** @description Validation error message. */
+                            message: string;
+                        }[];
+                    };
+                };
+            };
+        };
+    };
+    getUsersSelfKeys: {
+        parameters: {
+            query?: {
+                /** @description Optional statistics expansion. */
+                include?: "statistics";
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Own key list. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @description Keys for the user. */
+                        items: unknown[];
                     };
                 };
             };

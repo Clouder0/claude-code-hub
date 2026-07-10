@@ -1490,17 +1490,20 @@ export async function findUsageLogsWithDetails(filters: UsageLogFilters): Promis
 /**
  * 获取所有使用过的模型列表（用于筛选器）
  */
-export async function getUsedModels(): Promise<string[]> {
+export async function getUsedModels(userId?: number): Promise<string[]> {
+  const conditions = [
+    isNull(messageRequest.deletedAt),
+    sql`${messageRequest.model} IS NOT NULL`,
+    sql`btrim(${messageRequest.model}) <> ''`,
+  ];
+  if (userId !== undefined) {
+    conditions.push(eq(messageRequest.userId, userId));
+  }
+
   const results = await db
     .selectDistinct({ model: messageRequest.model })
     .from(messageRequest)
-    .where(
-      and(
-        isNull(messageRequest.deletedAt),
-        sql`${messageRequest.model} IS NOT NULL`,
-        sql`btrim(${messageRequest.model}) <> ''`
-      )
-    )
+    .where(and(...conditions))
     .orderBy(messageRequest.model);
 
   return results.map((r) => r.model).filter(isNonBlankString);
@@ -1513,11 +1516,19 @@ function isNonBlankString(value: string | null): value is string {
 /**
  * 获取所有使用过的状态码列表（用于筛选器）
  */
-export async function getUsedStatusCodes(): Promise<number[]> {
+export async function getUsedStatusCodes(userId?: number): Promise<number[]> {
+  const conditions = [
+    isNull(messageRequest.deletedAt),
+    sql`${messageRequest.statusCode} IS NOT NULL`,
+  ];
+  if (userId !== undefined) {
+    conditions.push(eq(messageRequest.userId, userId));
+  }
+
   const results = await db
     .selectDistinct({ statusCode: messageRequest.statusCode })
     .from(messageRequest)
-    .where(and(isNull(messageRequest.deletedAt), sql`${messageRequest.statusCode} IS NOT NULL`))
+    .where(and(...conditions))
     .orderBy(messageRequest.statusCode);
 
   return results.map((r) => r.statusCode).filter((c): c is number => c !== null);
@@ -1526,11 +1537,19 @@ export async function getUsedStatusCodes(): Promise<number[]> {
 /**
  * 获取所有使用过的 Endpoint 列表（用于筛选器）
  */
-export async function getUsedEndpoints(): Promise<string[]> {
+export async function getUsedEndpoints(userId?: number): Promise<string[]> {
+  const conditions = [
+    isNull(messageRequest.deletedAt),
+    sql`${messageRequest.endpoint} IS NOT NULL`,
+  ];
+  if (userId !== undefined) {
+    conditions.push(eq(messageRequest.userId, userId));
+  }
+
   const results = await db
     .selectDistinct({ endpoint: messageRequest.endpoint })
     .from(messageRequest)
-    .where(and(isNull(messageRequest.deletedAt), sql`${messageRequest.endpoint} IS NOT NULL`))
+    .where(and(...conditions))
     .orderBy(messageRequest.endpoint);
 
   return results.map((r) => r.endpoint).filter((e): e is string => e !== null);

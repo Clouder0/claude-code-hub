@@ -162,7 +162,7 @@ describe("v1 users endpoints", () => {
     expect(JSON.stringify(detail.json)).not.toContain("fullKey");
   });
 
-  test("returns the current user from a read-tier self list endpoint", async () => {
+  test("returns the current user from a Web-tier self list endpoint", async () => {
     validateAuthTokenMock.mockResolvedValueOnce(userSession);
     getCurrentUserDisplayMock.mockResolvedValueOnce({
       ok: true,
@@ -213,8 +213,41 @@ describe("v1 users endpoints", () => {
     expect(getUsersMock).not.toHaveBeenCalled();
     expect(getUserByIdMock).not.toHaveBeenCalled();
     expect(validateAuthTokenMock).toHaveBeenCalledWith("user-token", {
-      allowReadOnlyAccess: true,
+      allowReadOnlyAccess: false,
     });
+  });
+
+  test("projects a downgraded stored admin as a normal self-service user", async () => {
+    validateAuthTokenMock.mockResolvedValueOnce(adminSession);
+    getCurrentUserDisplayMock.mockResolvedValueOnce({
+      ok: true,
+      data: { ...user(1), role: "admin" },
+    });
+
+    const self = await callV1Route({
+      method: "GET",
+      pathname: "/api/v1/users:self",
+      headers: { Authorization: "Bearer database-admin-key" },
+    });
+
+    expect(self.response.status).toBe(200);
+    expect(self.json.items[0]).toMatchObject({ id: 1, role: "user" });
+  });
+
+  test("does not admit read-only credentials to the self management surface", async () => {
+    validateAuthTokenMock.mockImplementation(
+      async (_token: string, options: { allowReadOnlyAccess?: boolean }) =>
+        options.allowReadOnlyAccess ? userSession : null
+    );
+
+    const self = await callV1Route({
+      method: "GET",
+      pathname: "/api/v1/users:self",
+      headers: { Authorization: "Bearer readonly-token" },
+    });
+
+    expect(self.response.status).toBe(401);
+    expect(getCurrentUserDisplayMock).not.toHaveBeenCalled();
   });
 
   test("does not expose the admin inventory through the read-tier self endpoint", async () => {

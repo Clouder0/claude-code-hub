@@ -3,6 +3,8 @@ import { beforeEach, describe, expect, test, vi } from "vitest";
 
 const validateAuthTokenMock = vi.hoisted(() => vi.fn());
 const addKeyMock = vi.hoisted(() => vi.fn());
+const getKeysMock = vi.hoisted(() => vi.fn());
+const getKeysWithStatisticsMock = vi.hoisted(() => vi.fn());
 
 vi.mock("@/lib/auth", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/auth")>();
@@ -11,6 +13,8 @@ vi.mock("@/lib/auth", async (importOriginal) => {
 
 vi.mock("@/actions/keys", () => ({
   addKey: addKeyMock,
+  getKeys: getKeysMock,
+  getKeysWithStatistics: getKeysWithStatisticsMock,
 }));
 
 const { callV1Route } = await import("../test-utils");
@@ -25,8 +29,8 @@ const userSession = {
   key: { id: 2, userId: 2, key: "user-token", canLoginWebUi: true },
 } as AuthSession;
 
-// Read-tier auth admits canLoginWebUi=false keys as read-only sessions; the
-// self key-creation endpoint must reject them (issue #1259 / privilege fence).
+// Defense-in-depth fixture: self key creation must reject a read-only session
+// even if a direct handler call bypasses the Web-tier middleware.
 const readOnlySession = {
   user: { id: 3, role: "user", isEnabled: true },
   key: { id: 3, userId: 3, key: "readonly-token", canLoginWebUi: false },
@@ -39,6 +43,51 @@ describe("POST /api/v1/users:self/keys", () => {
       ok: true,
       data: { id: 77, generatedKey: "sk-new", name: "self-key" },
     });
+    getKeysMock.mockResolvedValue({
+      ok: true,
+      data: [{ id: 7, userId: 2, name: "own-key", key: "sk-own-secret" }],
+    });
+    getKeysWithStatisticsMock.mockResolvedValue({ ok: true, data: [] });
+  });
+
+  test("lists only the session user's keys through the self endpoint", async () => {
+    validateAuthTokenMock.mockResolvedValue(userSession);
+
+    const listed = await callV1Route({
+      method: "GET",
+      pathname: "/api/v1/users:self/keys",
+      headers: { Authorization: "Bearer user-token" },
+    });
+
+    expect(listed.response.status).toBe(200);
+    expect(listed.json).toEqual({
+      items: [
+        {
+          id: 7,
+          userId: 2,
+          name: "own-key",
+          maskedKey: expect.any(String),
+        },
+      ],
+    });
+    expect(JSON.stringify(listed.json)).not.toContain("sk-own-secret");
+    expect(getKeysMock).toHaveBeenCalledWith(2);
+  });
+
+  test("does not admit read-only credentials to the self key list", async () => {
+    validateAuthTokenMock.mockImplementation(
+      async (_token: string, options: { allowReadOnlyAccess?: boolean }) =>
+        options.allowReadOnlyAccess ? readOnlySession : null
+    );
+
+    const listed = await callV1Route({
+      method: "GET",
+      pathname: "/api/v1/users:self/keys",
+      headers: { Authorization: "Bearer readonly-token" },
+    });
+
+    expect(listed.response.status).toBe(401);
+    expect(getKeysMock).not.toHaveBeenCalled();
   });
 
   test("creates a key for the session user without admin access", async () => {

@@ -10,6 +10,8 @@ const rateLimitGetCurrentCostMock = vi.fn();
 
 vi.mock("@/lib/auth", () => ({
   getSession: () => getSessionMock(),
+  hasAdminAuthority: (session: { user?: { role?: string } } | null | undefined) =>
+    session?.user?.role === "admin",
 }));
 
 vi.mock("@/repository/user", () => ({

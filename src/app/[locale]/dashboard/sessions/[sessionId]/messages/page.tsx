@@ -12,9 +12,8 @@ export default async function SessionMessagesPage({
   const { locale } = await params;
   const session = await getSession();
 
-  // 权限检查：仅 admin 用户可访问
-  if (!session || session.user.role !== "admin") {
-    return redirect({ href: session ? "/dashboard" : "/login", locale });
+  if (!session) {
+    return redirect({ href: "/login", locale });
   }
 
   return <SessionMessagesClient />;

@@ -46,6 +46,28 @@ export async function listUserKeys(c: Context): Promise<Response> {
   return jsonResponse({ items: Array.isArray(result.data) ? result.data.map(sanitizeKey) : [] });
 }
 
+export async function listSelfKeys(c: Context): Promise<Response> {
+  const userId = c.get("auth")?.session?.user.id;
+  if (!userId) {
+    return createProblemResponse({
+      status: 401,
+      instance: new URL(c.req.url).pathname,
+      errorCode: "auth.missing",
+      detail: "Authentication is required.",
+    });
+  }
+
+  const query = KeyListQuerySchema.safeParse({ include: c.req.query("include") });
+  if (!query.success) return fromZodError(query.error, new URL(c.req.url).pathname);
+  const actions = await import("@/actions/keys");
+  const result =
+    query.data.include === "statistics"
+      ? await callAction(c, actions.getKeysWithStatistics, [userId] as never[], c.get("auth"))
+      : await callAction(c, actions.getKeys, [userId] as never[], c.get("auth"));
+  if (!result.ok) return actionError(c, result);
+  return jsonResponse({ items: Array.isArray(result.data) ? result.data.map(sanitizeKey) : [] });
+}
+
 export async function createUserKey(c: Context): Promise<Response> {
   const params = parseUserParams(c);
   if (params instanceof Response) return params;
@@ -80,9 +102,8 @@ export async function createSelfKey(c: Context): Promise<Response> {
       detail: "Authentication is required.",
     });
   }
-  // Read-tier auth admits canLoginWebUi=false keys as read-only sessions; a
-  // key write here would let them mint a Web-UI-capable key. Deny-by-default
-  // (only an explicit canLoginWebUi=true session may proceed).
+  // The Web-tier middleware already rejects read-only credentials. Keep this
+  // explicit guard for direct handler calls and future routing changes.
   if (auth?.session?.key?.canLoginWebUi !== true) {
     return createProblemResponse({
       status: 403,
@@ -122,10 +143,8 @@ export async function getKey(c: Context): Promise<Response> {
   return jsonResponse({ id: params.keyId, limitUsage: result.data });
 }
 
-// U02: write routes relaxed from admin to read tier must re-enforce a full
-// Web-UI session here — read-tier auth admits canLoginWebUi=false keys, and a
-// key write would let a read-only key escalate itself (e.g. PATCH
-// canLoginWebUi). Ownership (self-or-admin) is enforced by the actions.
+// U02: Web-tier middleware rejects read-only credentials. Keep the same fence
+// in the handler so direct calls cannot bypass it; actions enforce ownership.
 function requireKeyWriteSession(c: Context): Response | null {
   const session = c.get("auth")?.session;
   if (!session?.user?.id) {
@@ -136,7 +155,7 @@ function requireKeyWriteSession(c: Context): Response | null {
       detail: "Authentication is required.",
     });
   }
-  if (session.user.role !== "admin" && session.key?.canLoginWebUi !== true) {
+  if (!c.get("auth")?.adminAuthority && session.key?.canLoginWebUi !== true) {
     return createProblemResponse({
       status: 403,
       instance: new URL(c.req.url).pathname,

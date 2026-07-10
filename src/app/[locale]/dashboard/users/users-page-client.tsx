@@ -20,7 +20,7 @@ import type { KeyUsageData } from "@/lib/api-client/v1/actions/users";
 import {
   getAllUserKeyGroups,
   getAllUserTags,
-  getUsers,
+  getCurrentUserDisplayList,
   getUsersBatchCore,
   getUsersUsageBatch,
 } from "@/lib/api-client/v1/actions/users";
@@ -44,13 +44,14 @@ function splitTags(value?: string | null): string[] {
 interface UsersPageClientProps {
   initialUsers?: UserDisplay[];
   currentUser: User;
+  isAdmin: boolean;
 }
 
 export function UsersPageClient(props: UsersPageClientProps) {
   return <UsersPageContent {...props} />;
 }
 
-function UsersPageContent({ currentUser }: UsersPageClientProps) {
+function UsersPageContent({ currentUser, isAdmin }: UsersPageClientProps) {
   const t = useTranslations("dashboard.users");
   const tUserMgmt = useTranslations("dashboard.userManagement");
   const tKeyList = useTranslations("dashboard.keyList");
@@ -58,7 +59,11 @@ function UsersPageContent({ currentUser }: UsersPageClientProps) {
   const tProviderGroup = useTranslations("myUsage.providerGroup");
   const tRestrictions = useTranslations("myUsage.accessRestrictions");
   const queryClient = useQueryClient();
-  const isAdmin = currentUser.role === "admin";
+  const effectiveCurrentUser = useMemo<User>(
+    () =>
+      isAdmin || currentUser.role !== "admin" ? currentUser : { ...currentUser, role: "user" },
+    [currentUser, isAdmin]
+  );
   const [searchTerm, setSearchTerm] = useState("");
   const [tagFilters, setTagFilters] = useState<string[]>([]);
   const [pendingTagFilters, setPendingTagFilters] = useState<string[]>([]);
@@ -139,7 +144,7 @@ function UsersPageContent({ currentUser }: UsersPageClientProps) {
     queryKey,
     queryFn: async ({ pageParam }) => {
       if (!isAdmin) {
-        const users = await getUsers();
+        const users = await getCurrentUserDisplayList();
         return { users, nextCursor: null, hasMore: false };
       }
 
@@ -762,7 +767,7 @@ function UsersPageContent({ currentUser }: UsersPageClientProps) {
             isFetchingNextPage={isFetchingNextPage}
             onLoadMore={fetchNextPage}
             scrollResetKey={scrollResetKey}
-            currentUser={currentUser}
+            currentUser={effectiveCurrentUser}
             currencyCode={systemSettings?.currencyDisplay ?? "USD"}
             onCreateUser={isAdmin ? handleCreateUser : handleCreateKey}
             onAddKey={handleAddKey}

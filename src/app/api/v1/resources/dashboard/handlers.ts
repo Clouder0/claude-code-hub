@@ -30,8 +30,7 @@ export async function getDashboardStatistics(c: Context): Promise<Response> {
 }
 
 export async function getDashboardConcurrentSessions(c: Context): Promise<Response> {
-  const auth = c.get("auth") as { session?: { user?: { role?: string } } } | undefined;
-  if (auth?.session?.user?.role !== "admin") {
+  if (!c.get("auth")?.adminAuthority) {
     const { getSystemSettings } = await import("@/repository/system-config");
     const settings = await getSystemSettings();
     if (!settings.allowGlobalUsageView) {

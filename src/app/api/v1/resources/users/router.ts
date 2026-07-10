@@ -129,11 +129,11 @@ usersRouter.openapi(
   createRoute({
     method: "get",
     path: "/users:self",
-    middleware: requireAuth("read"),
+    middleware: requireAuth("web"),
     tags: ["Users"],
     summary: "List current user",
-    description: "Returns the current user in the legacy users-page list shape.",
-    "x-required-access": "read",
+    description: "Returns the current Web user in the legacy users-page list shape.",
+    "x-required-access": "web",
     security,
     responses: {
       200: {
@@ -395,11 +395,11 @@ usersRouter.openapi(
   createRoute({
     method: "get",
     path: "/users/{id}/limit-usage",
-    middleware: requireAuth("read"),
+    middleware: requireAuth("web"),
     tags: ["Users"],
     summary: "Get user limit usage",
     description: "Returns current per-user RPM and daily cost usage.",
-    "x-required-access": "read",
+    "x-required-access": "web",
     security,
     request: { params: UserIdParamSchema },
     responses: {
@@ -417,11 +417,11 @@ usersRouter.openapi(
   createRoute({
     method: "get",
     path: "/users/{id}/limit-usage:all",
-    middleware: requireAuth("read"),
+    middleware: requireAuth("web"),
     tags: ["Users"],
     summary: "Get all user limit usage",
     description: "Returns all current user cost limit buckets.",
-    "x-required-access": "read",
+    "x-required-access": "web",
     security,
     request: { params: UserIdParamSchema },
     responses: {

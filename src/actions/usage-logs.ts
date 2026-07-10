@@ -1,6 +1,6 @@
 "use server";
 
-import { getSession } from "@/lib/auth";
+import { getSession, hasAdminAuthority } from "@/lib/auth";
 import {
   SESSION_ID_SUGGESTION_LIMIT,
   SESSION_ID_SUGGESTION_MAX_LEN,
@@ -35,12 +35,14 @@ import type { ActionResult } from "./types";
  * 5 分钟 TTL，避免每次筛选器组件挂载时执行 3 次 DISTINCT 全表扫描
  */
 const FILTER_OPTIONS_CACHE_TTL_MS = 5 * 60 * 1000; // 5 分钟
-let filterOptionsCache: {
+type FilterOptionsCacheEntry = {
   models: string[];
   statusCodes: number[];
   endpoints: string[];
   expiresAt: number;
-} | null = null;
+};
+
+let adminFilterOptionsCache: FilterOptionsCacheEntry | null = null;
 
 const USAGE_LOGS_EXPORT_BATCH_SIZE = 500;
 const USAGE_LOGS_EXPORT_JOB_TTL_MS = 15 * 60 * 1000;
@@ -98,7 +100,11 @@ function resolveUsageLogFiltersForSession(
   session: UsageLogsSession,
   filters: Omit<UsageLogFilters, "userId" | "page" | "pageSize">
 ): Omit<UsageLogFilters, "page" | "pageSize"> {
-  return session.user.role === "admin" ? filters : { ...filters, userId: session.user.id };
+  return hasAdminAuthority(session) ? filters : { ...filters, userId: session.user.id };
+}
+
+function resolveUsageLogUserScope(session: UsageLogsSession): number | undefined {
+  return hasAdminAuthority(session) ? undefined : session.user.id;
 }
 
 function toUsageLogsExportStatus(job: UsageLogsExportJobRecord): UsageLogsExportStatus {
@@ -310,8 +316,9 @@ export async function getUsageLogs(
     }
 
     // 如果不是 admin，强制过滤为当前用户
-    const finalFilters: UsageLogFilters =
-      session.user.role === "admin" ? filters : { ...filters, userId: session.user.id };
+    const finalFilters: UsageLogFilters = hasAdminAuthority(session)
+      ? filters
+      : { ...filters, userId: session.user.id };
 
     const result = await findUsageLogsWithDetails(finalFilters);
 
@@ -474,7 +481,7 @@ export async function getModelList(): Promise<ActionResult<string[]>> {
       return { ok: false, error: "未登录" };
     }
 
-    const models = await getUsedModels();
+    const models = await getUsedModels(resolveUsageLogUserScope(session));
     return { ok: true, data: models };
   } catch (error) {
     logger.error("获取模型列表失败:", error);
@@ -492,7 +499,7 @@ export async function getStatusCodeList(): Promise<ActionResult<number[]>> {
       return { ok: false, error: "未登录" };
     }
 
-    const codes = await getUsedStatusCodes();
+    const codes = await getUsedStatusCodes(resolveUsageLogUserScope(session));
     return { ok: true, data: codes };
   } catch (error) {
     logger.error("获取状态码列表失败:", error);
@@ -510,7 +517,7 @@ export async function getEndpointList(): Promise<ActionResult<string[]>> {
       return { ok: false, error: "未登录" };
     }
 
-    const endpoints = await getUsedEndpoints();
+    const endpoints = await getUsedEndpoints(resolveUsageLogUserScope(session));
     return { ok: true, data: endpoints };
   } catch (error) {
     logger.error("获取 Endpoint 列表失败:", error);
@@ -543,16 +550,18 @@ export async function getFilterOptions(): Promise<ActionResult<FilterOptions>> {
     }
 
     const now = Date.now();
+    const userId = resolveUsageLogUserScope(session);
+    const cached = userId === undefined ? adminFilterOptionsCache : null;
 
     // 检查缓存是否有效
-    if (filterOptionsCache && filterOptionsCache.expiresAt > now) {
+    if (cached && cached.expiresAt > now) {
       logger.debug("筛选器选项命中缓存");
       return {
         ok: true,
         data: {
-          models: filterOptionsCache.models,
-          statusCodes: filterOptionsCache.statusCodes,
-          endpoints: filterOptionsCache.endpoints,
+          models: cached.models,
+          statusCodes: cached.statusCodes,
+          endpoints: cached.endpoints,
         },
       };
     }
@@ -560,18 +569,20 @@ export async function getFilterOptions(): Promise<ActionResult<FilterOptions>> {
     // 缓存过期或不存在，重新查询
     logger.debug("筛选器选项缓存未命中，执行 DISTINCT 查询");
     const [models, statusCodes, endpoints] = await Promise.all([
-      getUsedModels(),
-      getUsedStatusCodes(),
-      getUsedEndpoints(),
+      getUsedModels(userId),
+      getUsedStatusCodes(userId),
+      getUsedEndpoints(userId),
     ]);
 
     // 更新缓存
-    filterOptionsCache = {
-      models,
-      statusCodes,
-      endpoints,
-      expiresAt: now + FILTER_OPTIONS_CACHE_TTL_MS,
-    };
+    if (userId === undefined) {
+      adminFilterOptionsCache = {
+        models,
+        statusCodes,
+        endpoints,
+        expiresAt: now + FILTER_OPTIONS_CACHE_TTL_MS,
+      };
+    }
 
     return {
       ok: true,
@@ -604,22 +615,21 @@ export async function getUsageLogSessionIdSuggestions(
       return { ok: true, data: [] };
     }
 
-    const finalFilters =
-      session.user.role === "admin"
-        ? {
-            term: trimmedTerm,
-            userId: input.userId,
-            keyId: input.keyId,
-            providerId: input.providerId,
-            limit: SESSION_ID_SUGGESTION_LIMIT,
-          }
-        : {
-            term: trimmedTerm,
-            userId: session.user.id,
-            keyId: input.keyId,
-            providerId: input.providerId,
-            limit: SESSION_ID_SUGGESTION_LIMIT,
-          };
+    const finalFilters = hasAdminAuthority(session)
+      ? {
+          term: trimmedTerm,
+          userId: input.userId,
+          keyId: input.keyId,
+          providerId: input.providerId,
+          limit: SESSION_ID_SUGGESTION_LIMIT,
+        }
+      : {
+          term: trimmedTerm,
+          userId: session.user.id,
+          keyId: input.keyId,
+          providerId: input.providerId,
+          limit: SESSION_ID_SUGGESTION_LIMIT,
+        };
 
     const sessionIds = await findUsageLogSessionIdSuggestions(finalFilters);
     return { ok: true, data: sessionIds };
@@ -647,8 +657,9 @@ export async function getUsageLogsStats(
     }
 
     // 如果不是 admin，强制过滤为当前用户
-    const finalFilters: Omit<UsageLogFilters, "page" | "pageSize"> =
-      session.user.role === "admin" ? filters : { ...filters, userId: session.user.id };
+    const finalFilters: Omit<UsageLogFilters, "page" | "pageSize"> = hasAdminAuthority(session)
+      ? filters
+      : { ...filters, userId: session.user.id };
 
     const stats = await findUsageLogsStats(finalFilters);
 
@@ -678,8 +689,9 @@ export async function getUsageLogsBatch(
     }
 
     // 如果不是 admin，强制过滤为当前用户
-    const finalFilters: UsageLogBatchFilters =
-      session.user.role === "admin" ? filters : { ...filters, userId: session.user.id };
+    const finalFilters: UsageLogBatchFilters = hasAdminAuthority(session)
+      ? filters
+      : { ...filters, userId: session.user.id };
 
     const result = await findUsageLogsBatch(finalFilters);
 

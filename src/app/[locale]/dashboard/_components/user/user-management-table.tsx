@@ -15,6 +15,7 @@ import { BatchEditToolbar } from "./batch-edit/batch-edit-toolbar";
 import { EditUserDialog } from "./edit-user-dialog";
 import { QuickRenewDialog, type QuickRenewUser } from "./forms/quick-renew-dialog";
 import { UserKeyTableRow } from "./user-key-table-row";
+import { shouldDefaultExpandUser } from "./user-management-table-state";
 
 export interface UserManagementTableProps {
   users: UserDisplay[];
@@ -135,13 +136,18 @@ export function UserManagementTable({
   const tUserList = useTranslations("dashboard.userList");
   const tUserMgmt = useTranslations("dashboard.userManagement");
   const isAdmin = currentUser?.role === "admin";
+  const currentUserId = currentUser?.id;
+  const shouldDefaultExpand = useCallback(
+    (user: UserDisplay) => shouldDefaultExpandUser(user.id, currentUserId, isAdmin),
+    [currentUserId, isAdmin]
+  );
   const showMultiSelect = Boolean(isAdmin && isMultiSelectMode);
   // Use useMemo to create stable empty Set references for fallback
   const emptySet = useMemo(() => new Set<number>(), []);
   const selectedUserIdSet = selectedUserIds ?? emptySet;
   const selectedKeyIdSet = selectedKeyIds ?? emptySet;
   const [expandedUsers, setExpandedUsers] = useState<Map<number, boolean>>(
-    () => new Map(users.map((user) => [user.id, false]))
+    () => new Map(users.map((user) => [user.id, shouldDefaultExpand(user)]))
   );
   const parentRef = useRef<HTMLDivElement>(null);
   const prevAutoExpandRef = useRef(autoExpandOnFilter);
@@ -160,7 +166,7 @@ export function UserManagementTable({
     setExpandedUsers((prev) => {
       const next = new Map<number, boolean>();
       for (const user of users) {
-        next.set(user.id, prev.get(user.id) ?? false);
+        next.set(user.id, prev.get(user.id) ?? shouldDefaultExpand(user));
       }
 
       if (next.size !== prev.size) return next;
@@ -169,7 +175,7 @@ export function UserManagementTable({
       }
       return prev;
     });
-  }, [users]);
+  }, [users, shouldDefaultExpand]);
 
   useEffect(() => {
     if (autoExpandOnFilter && !prevAutoExpandRef.current) {

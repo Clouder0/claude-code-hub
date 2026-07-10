@@ -10,6 +10,8 @@ const exportCsvStore = new Map<string, string>();
 vi.mock("@/lib/auth", () => {
   return {
     getSession: getSessionMock,
+    hasAdminAuthority: (session: { user?: { role?: string } } | null | undefined) =>
+      session?.user?.role === "admin",
   };
 });
 

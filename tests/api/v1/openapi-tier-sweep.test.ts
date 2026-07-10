@@ -25,7 +25,7 @@ const nonAdminSession = {
   key: { id: 99, userId: 99, key: "user-token", canLoginWebUi: true },
 } as AuthSession;
 
-type Operation = { "x-required-access"?: "public" | "read" | "admin" };
+type Operation = { "x-required-access"?: "public" | "read" | "web" | "admin" };
 type OpenApiDocument = { paths: Record<string, Record<string, Operation>> };
 
 const HTTP_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE"] as const;
@@ -157,6 +157,83 @@ describe("v1 OpenAPI tier-enforcement sweep", () => {
       if (status === 403 && body?.errorCode === "auth.forbidden") {
         failures.push(
           `${op.method} ${op.path}: returned auth.forbidden (read tier should not require admin)`
+        );
+      }
+    }
+
+    expect(failures).toEqual([]);
+  }, 60000);
+
+  test("web-tier operations accept web-login callers at the auth boundary", async () => {
+    const { json } = await callV1Route({
+      method: "GET",
+      pathname: "/api/v1/openapi.json",
+    });
+    const document = json as OpenApiDocument;
+
+    const webOps: Array<{ method: HttpMethod; path: string }> = [];
+    for (const [path, item] of Object.entries(document.paths)) {
+      for (const [method, op] of Object.entries(item)) {
+        const upper = method.toUpperCase() as HttpMethod;
+        if (!HTTP_METHODS.includes(upper)) continue;
+        if (op["x-required-access"] !== "web") continue;
+        webOps.push({ method: upper, path });
+      }
+    }
+
+    expect(webOps.length).toBeGreaterThanOrEqual(10);
+
+    const failures: string[] = [];
+
+    for (const op of webOps) {
+      const result = await exerciseAsUser(op.method, op.path);
+      const status = result.response.status;
+      const body = result.json as { errorCode?: string } | undefined;
+
+      if (status === 401) {
+        failures.push(`${op.method} ${op.path}: returned 401 (web tier should accept web token)`);
+        continue;
+      }
+      if (status === 403 && body?.errorCode === "auth.forbidden") {
+        failures.push(
+          `${op.method} ${op.path}: returned auth.forbidden (web tier should not require admin)`
+        );
+      }
+    }
+
+    expect(failures).toEqual([]);
+  }, 60000);
+
+  test("web-tier operations reject readonly keys at the auth boundary", async () => {
+    validateAuthTokenMock.mockImplementation(async (_token, options) =>
+      options?.allowReadOnlyAccess ? nonAdminSession : null
+    );
+
+    const { json } = await callV1Route({
+      method: "GET",
+      pathname: "/api/v1/openapi.json",
+    });
+    const document = json as OpenApiDocument;
+
+    const webOps: Array<{ method: HttpMethod; path: string }> = [];
+    for (const [path, item] of Object.entries(document.paths)) {
+      for (const [method, op] of Object.entries(item)) {
+        const upper = method.toUpperCase() as HttpMethod;
+        if (!HTTP_METHODS.includes(upper)) continue;
+        if (op["x-required-access"] !== "web") continue;
+        webOps.push({ method: upper, path });
+      }
+    }
+
+    const failures: string[] = [];
+
+    for (const op of webOps) {
+      const result = await exerciseAsUser(op.method, op.path);
+      const body = result.json as { errorCode?: string; status?: number } | undefined;
+
+      if (result.response.status !== 401 || body?.errorCode !== "auth.invalid") {
+        failures.push(
+          `${op.method} ${op.path}: returned ${result.response.status}/${body?.errorCode} (expected 401/auth.invalid for readonly key)`
         );
       }
     }

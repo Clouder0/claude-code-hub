@@ -31,9 +31,27 @@ interface AddKeyFormProps {
   onSuccess?: (result: { generatedKey: string; name: string }) => void;
 }
 
+function getNonAdminProviderGroupSuggestions(userProviderGroup: string | null | undefined) {
+  const groups = parseProviderGroups(userProviderGroup);
+  if (groups.includes(PROVIDER_GROUP.ALL)) {
+    return [PROVIDER_GROUP.DEFAULT, PROVIDER_GROUP.ALL];
+  }
+  return groups.length > 0 ? groups : [PROVIDER_GROUP.DEFAULT];
+}
+
+function getDefaultProviderGroup(groups: string[]) {
+  return groups.includes(PROVIDER_GROUP.DEFAULT)
+    ? PROVIDER_GROUP.DEFAULT
+    : (groups[0] ?? PROVIDER_GROUP.DEFAULT);
+}
+
 export function AddKeyForm({ userId, user, isAdmin = false, onSuccess }: AddKeyFormProps) {
   const [isPending, startTransition] = useTransition();
   const [providerGroupSuggestions, setProviderGroupSuggestions] = useState<string[]>([]);
+  const nonAdminProviderGroupSuggestions = getNonAdminProviderGroupSuggestions(user?.providerGroup);
+  const initialProviderGroup = isAdmin
+    ? PROVIDER_GROUP.DEFAULT
+    : getDefaultProviderGroup(nonAdminProviderGroupSuggestions);
   const router = useRouter();
   const t = useTranslations("dashboard.addKeyForm");
   const tBalancePage = useTranslations(
@@ -43,22 +61,13 @@ export function AddKeyForm({ userId, user, isAdmin = false, onSuccess }: AddKeyF
   const tCommon = useTranslations("common");
   const tErrors = useTranslations("errors");
 
-  // Load provider group suggestions
-  useEffect(() => {
-    if (user?.id && !isAdmin) {
-      getAvailableProviderGroups(user.id).then(setProviderGroupSuggestions);
-    } else {
-      getAvailableProviderGroups().then(setProviderGroupSuggestions);
-    }
-  }, [isAdmin, user?.id]);
-
   const form = useZodForm({
     schema: KeyFormSchema,
     defaultValues: {
       name: "",
       expiresAt: "",
       canLoginWebUi: false,
-      providerGroup: PROVIDER_GROUP.DEFAULT,
+      providerGroup: initialProviderGroup,
       cacheTtlPreference: "inherit",
       limit5hUsd: null,
       limit5hResetMode: "rolling" as const,
@@ -126,6 +135,25 @@ export function AddKeyForm({ userId, user, isAdmin = false, onSuccess }: AddKeyF
       }
     },
   });
+  const setFormValue = form.setValue;
+
+  // Provider inventory is admin-only. Self-service choices come from the user's own group contract.
+  useEffect(() => {
+    if (!isAdmin) {
+      const suggestions = getNonAdminProviderGroupSuggestions(user?.providerGroup);
+      setProviderGroupSuggestions(suggestions);
+      setFormValue("providerGroup", getDefaultProviderGroup(suggestions));
+      return;
+    }
+
+    let active = true;
+    getAvailableProviderGroups().then((groups) => {
+      if (active) setProviderGroupSuggestions(groups);
+    });
+    return () => {
+      active = false;
+    };
+  }, [isAdmin, setFormValue, user?.providerGroup]);
 
   // 选择分组时，自动移除 default（当有多个分组时）
   const handleProviderGroupChange = useCallback(

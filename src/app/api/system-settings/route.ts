@@ -1,6 +1,20 @@
 import { NextResponse } from "next/server";
-import { getSession } from "@/lib/auth";
+import { getSession, hasAdminAuthority } from "@/lib/auth";
 import { getSystemSettings } from "@/repository/system-config";
+import type { SystemSettings } from "@/types/system-config";
+
+type DisplaySystemSettings = Pick<
+  SystemSettings,
+  "siteTitle" | "currencyDisplay" | "billingModelSource"
+>;
+
+function toDisplaySystemSettings(settings: SystemSettings): DisplaySystemSettings {
+  return {
+    siteTitle: settings.siteTitle,
+    currencyDisplay: settings.currencyDisplay,
+    billingModelSource: settings.billingModelSource,
+  };
+}
 
 // 需要数据库连接
 export const runtime = "nodejs";
@@ -18,7 +32,10 @@ export async function GET() {
     }
 
     const settings = await getSystemSettings();
-    return NextResponse.json(settings);
+    const body = hasAdminAuthority(session) ? settings : toDisplaySystemSettings(settings);
+    return NextResponse.json(body, {
+      headers: { "Cache-Control": "private, no-store" },
+    });
   } catch (error) {
     console.error("Failed to fetch system settings:", error);
     return NextResponse.json({ error: "获取系统设置失败" }, { status: 500 });

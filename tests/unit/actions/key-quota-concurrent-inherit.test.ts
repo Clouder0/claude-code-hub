@@ -3,6 +3,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const getSessionMock = vi.fn();
 vi.mock("@/lib/auth", () => ({
   getSession: getSessionMock,
+  hasAdminAuthority: (session: { user?: { role?: string } } | null | undefined) =>
+    session?.user?.role === "admin",
 }));
 
 const getTranslationsMock = vi.fn(async () => (key: string) => key);

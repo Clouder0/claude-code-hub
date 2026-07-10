@@ -3,7 +3,7 @@
 import { and, eq, inArray, isNull, or } from "drizzle-orm";
 import { db } from "@/drizzle/db";
 import { messageRequest } from "@/drizzle/schema";
-import { getSession } from "@/lib/auth";
+import { getSession, hasAdminAuthority } from "@/lib/auth";
 import { logger } from "@/lib/logger";
 import { findKeyList } from "@/repository/key";
 import { findSessionOriginChain } from "@/repository/message";
@@ -19,7 +19,7 @@ export async function getSessionOriginChain(
       return { ok: false, error: "未登录" };
     }
 
-    if (session.user.role !== "admin") {
+    if (!hasAdminAuthority(session)) {
       const userKeys = await findKeyList(session.user.id);
       const userKeyValues = userKeys.map((key) => key.key);
 

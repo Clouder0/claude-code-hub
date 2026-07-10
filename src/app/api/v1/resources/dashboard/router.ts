@@ -54,11 +54,11 @@ dashboardRouter.openapi(
   createRoute({
     method: "get",
     path: "/dashboard/overview",
-    middleware: requireAuth("read"),
+    middleware: requireAuth("web"),
     tags: ["Dashboard"],
     summary: "Get dashboard overview",
     description: "Returns overview metrics for the current caller scope.",
-    "x-required-access": "read",
+    "x-required-access": "web",
     security,
     responses: {
       200: {
@@ -75,11 +75,11 @@ dashboardRouter.openapi(
   createRoute({
     method: "get",
     path: "/dashboard/statistics",
-    middleware: requireAuth("read"),
+    middleware: requireAuth("web"),
     tags: ["Dashboard"],
     summary: "Get dashboard statistics",
     description: "Returns chart-ready usage statistics for the selected time range.",
-    "x-required-access": "read",
+    "x-required-access": "web",
     security,
     request: { query: DashboardStatisticsQuerySchema },
     responses: {
@@ -97,12 +97,12 @@ dashboardRouter.openapi(
   createRoute({
     method: "get",
     path: "/dashboard/concurrent-sessions",
-    middleware: requireAuth("read"),
+    middleware: requireAuth("web"),
     tags: ["Dashboard"],
     summary: "Get concurrent session count",
     description:
       "Returns the current concurrent session count for admins or when global usage viewing is enabled.",
-    "x-required-access": "read",
+    "x-required-access": "web",
     security,
     responses: {
       200: {

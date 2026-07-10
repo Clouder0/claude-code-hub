@@ -4,6 +4,8 @@ import type { User } from "@/types/user";
 const getSessionMock = vi.fn();
 vi.mock("@/lib/auth", () => ({
   getSession: getSessionMock,
+  hasAdminAuthority: (session: { user?: { role?: string } } | null) =>
+    session?.user?.role === "admin",
 }));
 
 vi.mock("next/cache", () => ({

@@ -1,9 +1,9 @@
 /**
  * U02: key 写 handler 的会话级守卫
  *
- * PATCH/DELETE /keys/{id}、:enable、:renew 从 admin 层放开到 read 层后，
- * handler 必须拒绝只读会话（read 层接纳 canLoginWebUi=false 的 key 会话），
- * 完整 Web 会话与管理员放行到 action 层做 self-or-admin 所有权检查。
+ * PATCH/DELETE /keys/{id}、:enable、:renew 从 admin 层放开到 Web 层后，
+ * middleware 与 handler 都必须拒绝 canLoginWebUi=false 的只读会话，完整 Web 会话与
+ * 管理员放行到 action 层做 self-or-admin 所有权检查。
  */
 
 import type { Context } from "hono";

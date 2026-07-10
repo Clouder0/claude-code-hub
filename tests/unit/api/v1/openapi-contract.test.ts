@@ -75,7 +75,7 @@ describe("v1 OpenAPI contract", () => {
             failures.push(`${label} request ${mediaType}: missing example`);
           }
         }
-        if (!["public", "read", "admin"].includes(String(requiredAccess))) {
+        if (!["public", "read", "web", "admin"].includes(String(requiredAccess))) {
           failures.push(`${label}: missing x-required-access`);
         }
         if (requiredAccess !== "public" && !Array.isArray(operation.security)) {

@@ -7,7 +7,7 @@ import { getLocale, getTranslations } from "next-intl/server";
 import { db } from "@/drizzle/db";
 import { messageRequest, usageLedger, users as usersTable } from "@/drizzle/schema";
 import { emitActionAudit } from "@/lib/audit/emit";
-import { getSession } from "@/lib/auth";
+import { type AuthSession, getSession, hasAdminAuthority } from "@/lib/auth";
 import { PROVIDER_GROUP } from "@/lib/constants/provider.constants";
 import { logger } from "@/lib/logger";
 import { getUnauthorizedFields } from "@/lib/permissions/user-field-permissions";
@@ -73,10 +73,11 @@ const USER_LIST_DEFAULT_LIMIT = 50;
 const USER_LIST_MAX_LIMIT = 200;
 const SEARCH_USERS_MAX_LIMIT = 5000;
 
-type UserActionSession = {
-  user: { id: number };
-  key: { canLoginWebUi: boolean };
-};
+type UserActionSession = Pick<AuthSession, "user" | "key">;
+
+function canAdministerUsers(session: AuthSession): boolean {
+  return hasAdminAuthority(session);
+}
 
 function normalizeLegacySearchTerm(params?: GetUsersBatchParams): string | undefined {
   for (const candidate of [params?.searchTerm, params?.query, params?.keyword]) {
@@ -463,8 +464,7 @@ export async function getUsers(params?: GetUsersBatchParams): Promise<UserDispla
       return [];
     }
 
-    // Treat any non-admin role as non-admin for safety.
-    const isAdmin = session.user.role === "admin";
+    const isAdmin = canAdministerUsers(session);
     const normalizedParams = normalizeUserListParams(params);
 
     // 非 admin 用户只能看到自己的数据（从 DB 获取完整用户信息）
@@ -520,7 +520,7 @@ export async function getCurrentUserDisplay(): Promise<ActionResult<UserDisplay>
       };
     }
 
-    const [displayUser] = await buildUserDisplays([user], session, session.user.role === "admin");
+    const [displayUser] = await buildUserDisplays([user], session, canAdministerUsers(session));
     return { ok: true, data: displayUser };
   } catch (error) {
     logger.error("Failed to fetch current user display data:", error);
@@ -549,7 +549,7 @@ export async function getUserById(userId: number): Promise<ActionResult<User>> {
       };
     }
 
-    if (session.user.role !== "admin" && session.user.id !== userId) {
+    if (!canAdministerUsers(session) && session.user.id !== userId) {
       return {
         ok: false,
         error: tError("PERMISSION_DENIED"),
@@ -590,7 +590,7 @@ export async function searchUsersForFilter(
       };
     }
 
-    if (session.user.role !== "admin") {
+    if (!canAdministerUsers(session)) {
       return {
         ok: false,
         error: tError("PERMISSION_DENIED"),
@@ -636,7 +636,7 @@ export async function getAllUserTags(): Promise<ActionResult<string[]>> {
       };
     }
 
-    if (session.user.role !== "admin") {
+    if (!canAdministerUsers(session)) {
       return {
         ok: false,
         error: tError("PERMISSION_DENIED"),
@@ -672,7 +672,7 @@ export async function getAllUserKeyGroups(): Promise<ActionResult<string[]>> {
       };
     }
 
-    if (session.user.role !== "admin") {
+    if (!canAdministerUsers(session)) {
       return {
         ok: false,
         error: tError("PERMISSION_DENIED"),
@@ -709,7 +709,7 @@ export async function getUsersBatch(
         errorCode: ERROR_CODES.UNAUTHORIZED,
       };
     }
-    if (session.user.role !== "admin") {
+    if (!canAdministerUsers(session)) {
       return {
         ok: false,
         error: tError("PERMISSION_DENIED"),
@@ -873,7 +873,7 @@ export async function getUsersBatchCore(
         errorCode: ERROR_CODES.UNAUTHORIZED,
       };
     }
-    if (session.user.role !== "admin") {
+    if (!canAdministerUsers(session)) {
       return {
         ok: false,
         error: tError("PERMISSION_DENIED"),
@@ -1019,7 +1019,7 @@ export async function getUsersUsageBatch(
         errorCode: ERROR_CODES.UNAUTHORIZED,
       };
     }
-    if (session.user.role !== "admin") {
+    if (!canAdministerUsers(session)) {
       return {
         ok: false,
         error: tError("PERMISSION_DENIED"),
@@ -1107,7 +1107,7 @@ export async function batchUpdateUsers(
         errorCode: ERROR_CODES.UNAUTHORIZED,
       };
     }
-    if (session.user.role !== "admin") {
+    if (!canAdministerUsers(session)) {
       return {
         ok: false,
         error: tError("PERMISSION_DENIED"),
@@ -1344,7 +1344,7 @@ export async function addUser(data: {
 
     // 权限检查：只有管理员可以添加用户
     const session = await getSession();
-    if (!session || session.user.role !== "admin") {
+    if (!session || !canAdministerUsers(session)) {
       return {
         ok: false,
         error: tError("PERMISSION_DENIED"),
@@ -1546,7 +1546,7 @@ export async function createUserOnly(data: {
 
     // Permission check: only admin can add users
     const session = await getSession();
-    if (!session || session.user.role !== "admin") {
+    if (!session || !canAdministerUsers(session)) {
       return {
         ok: false,
         error: tError("PERMISSION_DENIED"),
@@ -1767,8 +1767,10 @@ export async function editUser(
 
     const validatedData = validationResult.data;
 
-    // Permission check: Get unauthorized fields based on user role
-    const unauthorizedFields = getUnauthorizedFields(validatedData, session.user.role);
+    const isAdmin = canAdministerUsers(session);
+    const effectiveRole = isAdmin ? "admin" : "user";
+    // Field authorization follows effective request authority, not the stored DB role.
+    const unauthorizedFields = getUnauthorizedFields(validatedData, effectiveRole);
 
     if (unauthorizedFields.length > 0) {
       return {
@@ -1779,7 +1781,7 @@ export async function editUser(
     }
 
     // Additional check: Non-admin users can only modify their own data
-    if (session.user.role !== "admin" && session.user.id !== userId) {
+    if (!isAdmin && session.user.id !== userId) {
       return {
         ok: false,
         error: tError("PERMISSION_DENIED"),
@@ -1883,7 +1885,7 @@ export async function removeUser(userId: number): Promise<ActionResult> {
     const tError = await getTranslations("errors");
 
     const session = await getSession();
-    if (!session || session.user.role !== "admin") {
+    if (!session || !canAdministerUsers(session)) {
       return {
         ok: false,
         error: tError("PERMISSION_DENIED"),
@@ -1945,7 +1947,7 @@ export async function getUserLimitUsage(userId: number): Promise<
     }
 
     // 权限检查：用户只能查看自己，管理员可以查看所有人
-    if (session.user.role !== "admin" && session.user.id !== userId) {
+    if (!canAdministerUsers(session) && session.user.id !== userId) {
       return {
         ok: false,
         error: tError("PERMISSION_DENIED"),
@@ -2018,7 +2020,7 @@ export async function renewUser(
     const tError = await getTranslations("errors");
 
     const session = await getSession();
-    if (!session || session.user.role !== "admin") {
+    if (!session || !canAdministerUsers(session)) {
       return {
         ok: false,
         error: tError("PERMISSION_DENIED"),
@@ -2094,7 +2096,7 @@ export async function toggleUserEnabled(userId: number, enabled: boolean): Promi
     const tError = await getTranslations("errors");
 
     const session = await getSession();
-    if (!session || session.user.role !== "admin") {
+    if (!session || !canAdministerUsers(session)) {
       return {
         ok: false,
         error: tError("PERMISSION_DENIED"),
@@ -2158,7 +2160,7 @@ export async function getUserAllLimitUsage(userId: number): Promise<
     }
 
     // 权限检查：用户只能查看自己，管理员可以查看所有人
-    if (session.user.role !== "admin" && session.user.id !== userId) {
+    if (!canAdministerUsers(session) && session.user.id !== userId) {
       return {
         ok: false,
         error: tError("PERMISSION_DENIED"),
@@ -2234,7 +2236,7 @@ export async function resetUserLimitsOnly(userId: number): Promise<ActionResult>
     const tError = await getTranslations("errors");
 
     const session = await getSession();
-    if (!session || session.user.role !== "admin") {
+    if (!session || !canAdministerUsers(session)) {
       return {
         ok: false,
         error: tError("PERMISSION_DENIED"),
@@ -2348,7 +2350,7 @@ export async function resetUserAllStatistics(userId: number): Promise<ActionResu
     const tError = await getTranslations("errors");
 
     const session = await getSession();
-    if (!session || session.user.role !== "admin") {
+    if (!session || !canAdministerUsers(session)) {
       return {
         ok: false,
         error: tError("PERMISSION_DENIED"),

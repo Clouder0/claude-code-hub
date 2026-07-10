@@ -1,5 +1,5 @@
 import { redirect } from "@/i18n/routing";
-import { getSession } from "@/lib/auth";
+import { getSession, hasAdminAuthority } from "@/lib/auth";
 import { UsersPageClient } from "./users-page-client";
 
 export default async function UsersPage({ params }: { params: Promise<{ locale: string }> }) {
@@ -12,5 +12,5 @@ export default async function UsersPage({ params }: { params: Promise<{ locale: 
   }
 
   // TypeScript: session is guaranteed to be non-null after the redirect check
-  return <UsersPageClient currentUser={session.user} />;
+  return <UsersPageClient currentUser={session.user} isAdmin={hasAdminAuthority(session)} />;
 }

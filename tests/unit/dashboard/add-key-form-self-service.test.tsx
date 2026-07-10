@@ -106,7 +106,11 @@ describe("AddKeyForm: self-service routing (U03)", () => {
     const { unmount } = render(
       <NextIntlClientProvider locale="en" messages={messages} timeZone="UTC">
         <Dialog open onOpenChange={() => {}}>
-          <AddKeyForm userId={1} onSuccess={vi.fn()} />
+          <AddKeyForm
+            userId={1}
+            user={{ id: 1, providerGroup: "group1,group2" }}
+            onSuccess={vi.fn()}
+          />
         </Dialog>
       </NextIntlClientProvider>
     );
@@ -119,6 +123,52 @@ describe("AddKeyForm: self-service routing (U03)", () => {
     const payload = keysActionMocks.addOwnKey.mock.calls[0][0] as Record<string, unknown>;
     expect(Object.hasOwn(payload, "userId")).toBe(false);
     expect(payload.name).toBe("test-key");
+    expect(payload.providerGroup).toBe("group1");
+    expect(providersActionMocks.getAvailableProviderGroups).not.toHaveBeenCalled();
+
+    unmount();
+  });
+
+  test("non-admin wildcard users default new keys to the least-privileged group", async () => {
+    const messages = loadMessages();
+
+    const { unmount } = render(
+      <NextIntlClientProvider locale="en" messages={messages} timeZone="UTC">
+        <Dialog open onOpenChange={() => {}}>
+          <AddKeyForm userId={1} user={{ id: 1, providerGroup: "*" }} onSuccess={vi.fn()} />
+        </Dialog>
+      </NextIntlClientProvider>
+    );
+
+    await fillNameAndSubmit();
+
+    const payload = keysActionMocks.addOwnKey.mock.calls[0][0] as Record<string, unknown>;
+    expect(payload.providerGroup).toBe("default");
+    expect(providersActionMocks.getAvailableProviderGroups).not.toHaveBeenCalled();
+
+    unmount();
+  });
+
+  test("non-admin users prefer default when their contract lists it after another group", async () => {
+    const messages = loadMessages();
+
+    const { unmount } = render(
+      <NextIntlClientProvider locale="en" messages={messages} timeZone="UTC">
+        <Dialog open onOpenChange={() => {}}>
+          <AddKeyForm
+            userId={1}
+            user={{ id: 1, providerGroup: "group1,default" }}
+            onSuccess={vi.fn()}
+          />
+        </Dialog>
+      </NextIntlClientProvider>
+    );
+
+    await fillNameAndSubmit();
+
+    const payload = keysActionMocks.addOwnKey.mock.calls[0][0] as Record<string, unknown>;
+    expect(payload.providerGroup).toBe("default");
+    expect(providersActionMocks.getAvailableProviderGroups).not.toHaveBeenCalled();
 
     unmount();
   });
@@ -141,6 +191,9 @@ describe("AddKeyForm: self-service routing (U03)", () => {
 
     const payload = keysActionMocks.addKey.mock.calls[0][0] as Record<string, unknown>;
     expect(payload.userId).toBe(42);
+    expect(payload.providerGroup).toBe("default");
+    expect(providersActionMocks.getAvailableProviderGroups).toHaveBeenCalledTimes(1);
+    expect(providersActionMocks.getAvailableProviderGroups).toHaveBeenCalledWith();
 
     unmount();
   });

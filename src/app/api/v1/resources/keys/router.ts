@@ -26,6 +26,7 @@ import {
   getKey,
   getKeyLimitUsage,
   getKeyQuotaUsage,
+  listSelfKeys,
   listUserKeys,
   patchKeyLimit,
   renewKey,
@@ -114,14 +115,37 @@ keysRouter.openapi(
 
 keysRouter.openapi(
   createRoute({
+    method: "get",
+    path: "/users:self/keys",
+    middleware: requireAuth("web"),
+    tags: ["Keys"],
+    summary: "List own keys",
+    description:
+      "Lists keys owned by the current Web user. The target user always comes from the authenticated session.",
+    "x-required-access": "web",
+    security,
+    request: { query: KeyListQuerySchema },
+    responses: {
+      200: {
+        description: "Own key list.",
+        content: { "application/json": { schema: KeyListResponseSchema } },
+      },
+      ...problemResponses,
+    },
+  }),
+  listSelfKeys as never
+);
+
+keysRouter.openapi(
+  createRoute({
     method: "post",
     path: "/users:self/keys",
-    middleware: requireAuth("read"),
+    middleware: requireAuth("web"),
     tags: ["Keys"],
     summary: "Create own key",
     description:
       "Creates a key for the current session user. The target user id always comes from the authenticated session; read-only sessions (keys without Web UI access) are rejected.",
-    "x-required-access": "read",
+    "x-required-access": "web",
     security,
     request: {
       body: { required: true, content: { "application/json": { schema: KeyCreateSchema } } },
@@ -148,7 +172,7 @@ const enableKeyRoute = createRoute({
   summary: "Set key enabled state",
   description:
     "Enables or disables one key. Admins may toggle any key; regular users with Web UI access may toggle only the keys they own. Read-only sessions are rejected.",
-  "x-required-access": "read",
+  "x-required-access": "web",
   security,
   request: {
     params: KeyIdParamSchema,
@@ -164,7 +188,7 @@ const enableKeyRoute = createRoute({
 });
 
 keysRouter.openAPIRegistry.registerPath(enableKeyRoute);
-keysRouter.post("/keys/:keyId{[0-9]+:enable}", requireAuth("read"), enableKey);
+keysRouter.post("/keys/:keyId{[0-9]+:enable}", requireAuth("web"), enableKey);
 
 const renewKeyRoute = createRoute({
   method: "post",
@@ -173,7 +197,7 @@ const renewKeyRoute = createRoute({
   summary: "Renew key expiration",
   description:
     "Updates one key expiration date. Admins may renew any key; regular users with Web UI access may renew only the keys they own. Read-only sessions are rejected.",
-  "x-required-access": "read",
+  "x-required-access": "web",
   security,
   request: {
     params: KeyIdParamSchema,
@@ -189,7 +213,7 @@ const renewKeyRoute = createRoute({
 });
 
 keysRouter.openAPIRegistry.registerPath(renewKeyRoute);
-keysRouter.post("/keys/:keyId{[0-9]+:renew}", requireAuth("read"), renewKey);
+keysRouter.post("/keys/:keyId{[0-9]+:renew}", requireAuth("web"), renewKey);
 
 const revealKeyRoute = createRoute({
   method: "get",
@@ -198,7 +222,7 @@ const revealKeyRoute = createRoute({
   summary: "Reveal key",
   description:
     "Returns the unmasked user API key. Admins may reveal any key; regular users may reveal only the keys they own. Non-owners receive 403. Writes the existing audit log on every call.",
-  "x-required-access": "read",
+  "x-required-access": "web",
   security,
   request: { params: KeyIdParamSchema },
   responses: {
@@ -211,19 +235,20 @@ const revealKeyRoute = createRoute({
 });
 
 keysRouter.openAPIRegistry.registerPath(revealKeyRoute);
-// Auth tier is "read" so the action's per-request ownership check can
-// apply (admin OR key owner). Non-owners are rejected at the action layer.
-keysRouter.get("/keys/:keyId{[0-9]+:reveal}", requireAuth("read"), revealKey);
+// Web-tier auth admits full dashboard sessions; the action then applies the
+// per-request ownership check (effective admin OR key owner).
+keysRouter.get("/keys/:keyId{[0-9]+:reveal}", requireAuth("web"), revealKey);
 
 keysRouter.openapi(
   createRoute({
     method: "get",
     path: "/keys/{keyId}",
-    middleware: requireAuth("admin"),
+    middleware: requireAuth("web"),
     tags: ["Keys"],
     summary: "Get key",
-    description: "Gets one key view through the existing key limit usage guard.",
-    "x-required-access": "admin",
+    description:
+      "Gets one key view. Effective admins may read any key; Web users may read only their own keys.",
+    "x-required-access": "web",
     security,
     request: { params: KeyIdParamSchema },
     responses: {
@@ -241,12 +266,12 @@ keysRouter.openapi(
   createRoute({
     method: "patch",
     path: "/keys/{keyId}",
-    middleware: requireAuth("read"),
+    middleware: requireAuth("web"),
     tags: ["Keys"],
     summary: "Update key",
     description:
       "Updates one key. Admins may update any key; regular users with Web UI access may update only the keys they own. Read-only sessions are rejected.",
-    "x-required-access": "read",
+    "x-required-access": "web",
     security,
     request: {
       params: KeyIdParamSchema,
@@ -267,12 +292,12 @@ keysRouter.openapi(
   createRoute({
     method: "delete",
     path: "/keys/{keyId}",
-    middleware: requireAuth("read"),
+    middleware: requireAuth("web"),
     tags: ["Keys"],
     summary: "Delete key",
     description:
       "Deletes one key. Admins may delete any key; regular users with Web UI access may delete only the keys they own. Read-only sessions are rejected.",
-    "x-required-access": "read",
+    "x-required-access": "web",
     security,
     request: { params: KeyIdParamSchema },
     responses: { 204: { description: "Key deleted." }, ...problemResponses },
@@ -300,12 +325,12 @@ keysRouter.openapi(
   createRoute({
     method: "get",
     path: "/keys/{keyId}/limit-usage",
-    middleware: requireAuth("read"),
+    middleware: requireAuth("web"),
     tags: ["Keys"],
     summary: "Get key limit usage",
     description:
       "Returns all key cost buckets and concurrent session usage. Admins may query any key; regular users may query only the keys they own (enforced by the action).",
-    "x-required-access": "read",
+    "x-required-access": "web",
     security,
     request: { params: KeyIdParamSchema },
     responses: {
@@ -323,11 +348,12 @@ keysRouter.openapi(
   createRoute({
     method: "get",
     path: "/keys/{keyId}/quota",
-    middleware: requireAuth("admin"),
+    middleware: requireAuth("web"),
     tags: ["Keys"],
     summary: "Get key quota usage",
-    description: "Returns key quota usage for the quota dialog.",
-    "x-required-access": "admin",
+    description:
+      "Returns key quota usage. Effective admins may read any key; Web users may read only their own keys.",
+    "x-required-access": "web",
     security,
     request: { params: KeyIdParamSchema },
     responses: {
@@ -345,11 +371,12 @@ keysRouter.openapi(
   createRoute({
     method: "patch",
     path: "/keys/{keyId}/limits/{field}",
-    middleware: requireAuth("admin"),
+    middleware: requireAuth("web"),
     tags: ["Keys"],
     summary: "Patch one key limit",
-    description: "Updates one key limit field without overwriting the rest of the key.",
-    "x-required-access": "admin",
+    description:
+      "Updates one key limit field without overwriting the rest. Effective admins may update any key; Web users may update only their own keys.",
+    "x-required-access": "web",
     security,
     request: {
       params: PatchKeyLimitParamSchema,

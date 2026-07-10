@@ -88,7 +88,7 @@ describe("v1 management docs routes", () => {
         const requiredAccess = (operation as { "x-required-access"?: unknown })[
           "x-required-access"
         ];
-        if (!["public", "read", "admin"].includes(String(requiredAccess))) {
+        if (!["public", "read", "web", "admin"].includes(String(requiredAccess))) {
           missing.push(`${method.toUpperCase()} ${path}`);
         }
       }

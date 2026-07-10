@@ -7,7 +7,7 @@ import { getTranslations } from "next-intl/server";
 import { db } from "@/drizzle/db";
 import { keys as keysTable, users as usersTable } from "@/drizzle/schema";
 import { emitActionAudit } from "@/lib/audit/emit";
-import { type AuthSession, getSession } from "@/lib/auth";
+import { type AuthSession, getSession, hasAdminAuthority } from "@/lib/auth";
 import { PROVIDER_GROUP } from "@/lib/constants/provider.constants";
 import { logger } from "@/lib/logger";
 import { resolveKeyConcurrentSessionLimit } from "@/lib/rate-limit/concurrent-session-limit";
@@ -31,18 +31,17 @@ import {
   resetKeyCostResetAt,
   updateKey,
 } from "@/repository/key";
-import type { Key } from "@/types/key";
+import type { Key, UpdateKeyData } from "@/types/key";
 import type { ActionResult } from "./types";
 import { type BatchUpdateResult, syncUserProviderGroupFromKeys } from "./users";
 
-// U02: key 写操作的会话级守卫。REST read 层与 legacy adapter 的 scoped 上下文
-// 会放行 canLoginWebUi=false 的只读会话；写操作必须是管理员或完整 Web 会话，
-// 否则只读 key 可改写自身 canLoginWebUi 自提权。
+// U02: key 写操作的会话级守卫。Web 路由已在中间件拒绝只读 key；这里继续为
+// legacy adapter 和 action 直调兜底，避免只读 key 改写自身 canLoginWebUi 自提权。
 function denyKeyWriteForReadOnlySession(
   session: AuthSession,
   tError: (key: string) => string
 ): { ok: false; error: string; errorCode: string } | null {
-  if (session.user.role === "admin" || session.key?.canLoginWebUi === true) {
+  if (hasAdminAuthority(session) || session.key?.canLoginWebUi === true) {
     return null;
   }
   return {
@@ -142,7 +141,7 @@ export async function addKey(data: {
         errorCode: ERROR_CODES.UNAUTHORIZED,
       };
     }
-    if (session.user.role !== "admin" && session.user.id !== data.userId) {
+    if (!hasAdminAuthority(session) && session.user.id !== data.userId) {
       return {
         ok: false,
         error: tError("PERMISSION_DENIED"),
@@ -150,7 +149,7 @@ export async function addKey(data: {
       };
     }
 
-    const isAdmin = session.user.role === "admin";
+    const isAdmin = hasAdminAuthority(session);
 
     // 非 admin 创建 Key 时的分组验证：providerGroup 必须是用户现有分组的子集
     const { findUserById } = await import("@/repository/user");
@@ -370,7 +369,7 @@ export async function addKey(data: {
     });
 
     // 自动同步用户分组（用户分组 = Key 分组并集）
-    if (session.user.role === "admin") {
+    if (isAdmin) {
       await syncUserProviderGroupFromKeys(data.userId);
     }
 
@@ -474,7 +473,8 @@ export async function editKey(
       return { ok: false, error: "密钥不存在" };
     }
 
-    if (session.user.role !== "admin" && session.user.id !== key.userId) {
+    const isAdmin = hasAdminAuthority(session);
+    if (!isAdmin && session.user.id !== key.userId) {
       return {
         ok: false,
         error: tError("PERMISSION_DENIED"),
@@ -485,7 +485,7 @@ export async function editKey(
     // 普通用户禁止修改 providerGroup（即使是自己的 Key）。
     // 为保持兼容性：若客户端仍携带 providerGroup 但值未变化，则允许继续编辑其它字段。
     const providerGroupProvided = Object.hasOwn(data, "providerGroup");
-    if (session.user.role !== "admin" && providerGroupProvided) {
+    if (!isAdmin && providerGroupProvided) {
       const currentGroup = normalizeProviderGroup(key.providerGroup);
       const requestedGroup = normalizeProviderGroup(data.providerGroup);
       if (currentGroup !== requestedGroup) {
@@ -499,7 +499,7 @@ export async function editKey(
 
     // 非管理员经 PATCH isEnabled=false 关停 key 时，沿用 toggleKeyEnabled 的
     // 最后一个启用 key 保护（U02 路由放开后该路径对自助用户可达）
-    if (session.user.role !== "admin" && data.isEnabled === false && key.isEnabled) {
+    if (!isAdmin && data.isEnabled === false && key.isEnabled) {
       const activeKeyCount = await countActiveKeysByUser(key.userId);
       if (activeKeyCount <= 1) {
         return {
@@ -512,9 +512,40 @@ export async function editKey(
 
     // 仅当调用方显式携带 expiresAt 字段时才更新/清除该字段：
     // - 避免像“仅修改限额”这类局部更新把 expiresAt 意外清空
+    const hasField = (field: keyof typeof data) => Object.hasOwn(data, field);
     const hasExpiresAtField = Object.hasOwn(data, "expiresAt");
+    const hasCanLoginWebUiField = hasField("canLoginWebUi");
+    const hasLimit5hUsdField = hasField("limit5hUsd");
+    const hasLimit5hResetModeField = hasField("limit5hResetMode");
+    const hasLimitDailyUsdField = hasField("limitDailyUsd");
+    const hasDailyResetModeField = hasField("dailyResetMode");
+    const hasDailyResetTimeField = hasField("dailyResetTime");
+    const hasLimitWeeklyUsdField = hasField("limitWeeklyUsd");
+    const hasLimitMonthlyUsdField = hasField("limitMonthlyUsd");
+    const hasLimitTotalUsdField = hasField("limitTotalUsd");
+    const hasLimitConcurrentSessionsField = hasField("limitConcurrentSessions");
+    const hasCacheTtlPreferenceField = hasField("cacheTtlPreference");
 
-    const validatedData = KeyFormSchema.parse(data);
+    const validatedData = KeyFormSchema.parse({
+      name: data.name,
+      ...(hasExpiresAtField ? { expiresAt: data.expiresAt } : {}),
+      canLoginWebUi: hasCanLoginWebUiField ? data.canLoginWebUi : key.canLoginWebUi,
+      limit5hUsd: hasLimit5hUsdField ? data.limit5hUsd : key.limit5hUsd,
+      limit5hResetMode: hasLimit5hResetModeField ? data.limit5hResetMode : key.limit5hResetMode,
+      limitDailyUsd: hasLimitDailyUsdField ? data.limitDailyUsd : key.limitDailyUsd,
+      dailyResetMode: hasDailyResetModeField ? data.dailyResetMode : key.dailyResetMode,
+      dailyResetTime: hasDailyResetTimeField ? data.dailyResetTime : key.dailyResetTime,
+      limitWeeklyUsd: hasLimitWeeklyUsdField ? data.limitWeeklyUsd : key.limitWeeklyUsd,
+      limitMonthlyUsd: hasLimitMonthlyUsdField ? data.limitMonthlyUsd : key.limitMonthlyUsd,
+      limitTotalUsd: hasLimitTotalUsdField ? data.limitTotalUsd : key.limitTotalUsd,
+      limitConcurrentSessions: hasLimitConcurrentSessionsField
+        ? data.limitConcurrentSessions
+        : key.limitConcurrentSessions,
+      providerGroup: providerGroupProvided ? data.providerGroup : key.providerGroup,
+      cacheTtlPreference: hasCacheTtlPreferenceField
+        ? data.cacheTtlPreference
+        : (key.cacheTtlPreference ?? "inherit"),
+    });
 
     // 服务端验证：Key限额不能超过用户限额
     const { findUserById } = await import("@/repository/user");
@@ -525,6 +556,7 @@ export async function editKey(
 
     // 验证各个限额字段
     if (
+      hasLimit5hUsdField &&
       validatedData.limit5hUsd != null &&
       validatedData.limit5hUsd > 0 &&
       user.limit5hUsd != null &&
@@ -541,6 +573,7 @@ export async function editKey(
     }
 
     if (
+      hasLimitDailyUsdField &&
       validatedData.limitDailyUsd != null &&
       validatedData.limitDailyUsd > 0 &&
       user.dailyQuota != null &&
@@ -557,6 +590,7 @@ export async function editKey(
     }
 
     if (
+      hasLimitWeeklyUsdField &&
       validatedData.limitWeeklyUsd != null &&
       validatedData.limitWeeklyUsd > 0 &&
       user.limitWeeklyUsd != null &&
@@ -573,6 +607,7 @@ export async function editKey(
     }
 
     if (
+      hasLimitMonthlyUsdField &&
       validatedData.limitMonthlyUsd != null &&
       validatedData.limitMonthlyUsd > 0 &&
       user.limitMonthlyUsd != null &&
@@ -589,6 +624,7 @@ export async function editKey(
     }
 
     if (
+      hasLimitTotalUsdField &&
       validatedData.limitTotalUsd != null &&
       validatedData.limitTotalUsd > 0 &&
       user.limitTotalUsd != null &&
@@ -605,6 +641,7 @@ export async function editKey(
     }
 
     if (
+      hasLimitConcurrentSessionsField &&
       validatedData.limitConcurrentSessions != null &&
       validatedData.limitConcurrentSessions > 0 &&
       user.limitConcurrentSessions != null &&
@@ -644,43 +681,47 @@ export async function editKey(
       }
     }
 
-    const isAdmin = session.user.role === "admin";
     const prevProviderGroup = normalizeProviderGroup(key.providerGroup);
-    const nextProviderGroup = isAdmin ? normalizeProviderGroup(validatedData.providerGroup) : null;
-    const providerGroupChanged = isAdmin && nextProviderGroup !== prevProviderGroup;
+    const nextProviderGroup =
+      isAdmin && providerGroupProvided ? normalizeProviderGroup(validatedData.providerGroup) : null;
+    const providerGroupChanged =
+      isAdmin && providerGroupProvided && nextProviderGroup !== prevProviderGroup;
 
-    await updateKey(keyId, {
+    const updatePayload: UpdateKeyData = {
       name: validatedData.name,
       ...(hasExpiresAtField ? { expires_at: expiresAt } : {}),
-      can_login_web_ui: validatedData.canLoginWebUi,
+      ...(hasCanLoginWebUiField ? { can_login_web_ui: validatedData.canLoginWebUi } : {}),
       ...(data.isEnabled !== undefined ? { is_enabled: data.isEnabled } : {}),
-      limit_5h_usd: validatedData.limit5hUsd,
-      limit_5h_reset_mode: validatedData.limit5hResetMode,
-      limit_daily_usd: validatedData.limitDailyUsd,
-      daily_reset_mode: validatedData.dailyResetMode,
-      daily_reset_time: validatedData.dailyResetTime,
-      limit_weekly_usd: validatedData.limitWeeklyUsd,
-      limit_monthly_usd: validatedData.limitMonthlyUsd,
-      limit_total_usd: validatedData.limitTotalUsd,
-      limit_concurrent_sessions: validatedData.limitConcurrentSessions,
+      ...(hasLimit5hUsdField ? { limit_5h_usd: validatedData.limit5hUsd } : {}),
+      ...(hasLimit5hResetModeField ? { limit_5h_reset_mode: validatedData.limit5hResetMode } : {}),
+      ...(hasLimitDailyUsdField ? { limit_daily_usd: validatedData.limitDailyUsd } : {}),
+      ...(hasDailyResetModeField ? { daily_reset_mode: validatedData.dailyResetMode } : {}),
+      ...(hasDailyResetTimeField ? { daily_reset_time: validatedData.dailyResetTime } : {}),
+      ...(hasLimitWeeklyUsdField ? { limit_weekly_usd: validatedData.limitWeeklyUsd } : {}),
+      ...(hasLimitMonthlyUsdField ? { limit_monthly_usd: validatedData.limitMonthlyUsd } : {}),
+      ...(hasLimitTotalUsdField ? { limit_total_usd: validatedData.limitTotalUsd } : {}),
+      ...(hasLimitConcurrentSessionsField
+        ? { limit_concurrent_sessions: validatedData.limitConcurrentSessions }
+        : {}),
       // providerGroup 为 admin-only 字段：非管理员不允许更新该字段
-      ...(isAdmin
+      ...(isAdmin && providerGroupProvided
         ? {
             provider_group: normalizeProviderGroup(validatedData.providerGroup),
           }
         : {}),
-      cache_ttl_preference: validatedData.cacheTtlPreference,
-    });
+      ...(hasCacheTtlPreferenceField
+        ? { cache_ttl_preference: validatedData.cacheTtlPreference }
+        : {}),
+    };
+
+    await updateKey(keyId, updatePayload);
 
     // 自动同步用户分组（用户分组 = Key 分组并集）
     if (providerGroupChanged) {
       await syncUserProviderGroupFromKeys(key.userId);
     }
 
-    if (
-      validatedData.limit5hResetMode !== undefined &&
-      validatedData.limit5hResetMode !== key.limit5hResetMode
-    ) {
+    if (hasLimit5hResetModeField && validatedData.limit5hResetMode !== key.limit5hResetMode) {
       const { clearSingleKeyCostCache } = await import("@/lib/redis/cost-cache-cleanup");
       await invalidateCachedKey(key.key).catch(() => null);
       await clearSingleKeyCostCache({
@@ -781,7 +822,8 @@ export async function removeKey(keyId: number): Promise<ActionResult> {
       };
     }
 
-    if (session.user.role !== "admin" && session.user.id !== key.userId) {
+    const isAdmin = hasAdminAuthority(session);
+    if (!isAdmin && session.user.id !== key.userId) {
       return {
         ok: false,
         error: tError("PERMISSION_DENIED"),
@@ -803,7 +845,7 @@ export async function removeKey(keyId: number): Promise<ActionResult> {
     }
 
     // 非 admin 删除时的额外检查：确保删除后用户仍有分组（防止分组被清空从而绕过限制）
-    if (session.user.role !== "admin") {
+    if (!isAdmin) {
       const userKeys = await findKeyList(key.userId);
 
       const remainingGroups = new Set<string>();
@@ -883,7 +925,7 @@ export async function getKeys(userId: number): Promise<ActionResult<Key[]>> {
     }
 
     // 权限检查：用户只能获取自己的密钥，管理员可以获取任何用户的密钥
-    if (session.user.role !== "admin" && session.user.id !== userId) {
+    if (!hasAdminAuthority(session) && session.user.id !== userId) {
       return { ok: false, error: "无权限执行此操作" };
     }
 
@@ -906,7 +948,7 @@ export async function getKeysWithStatistics(
     }
 
     // 权限检查：用户只能获取自己的统计，管理员可以获取任何用户的统计
-    if (session.user.role !== "admin" && session.user.id !== userId) {
+    if (!hasAdminAuthority(session) && session.user.id !== userId) {
       return { ok: false, error: "无权限执行此操作" };
     }
 
@@ -936,7 +978,7 @@ export async function getUnmaskedKey(keyId: number): Promise<ActionResult<{ key:
       return { ok: false, error: "密钥不存在" };
     }
 
-    const isAdmin = session.user.role === "admin";
+    const isAdmin = hasAdminAuthority(session);
     const isOwner = session.user.id === key.userId;
     if (!isAdmin && !isOwner) {
       return { ok: false, error: "无权限执行此操作" };
@@ -1018,7 +1060,7 @@ export async function getKeyLimitUsage(keyId: number): Promise<
     const key = toKey(result.key);
 
     // 权限检查
-    if (session.user.role !== "admin" && session.user.id !== key.userId) {
+    if (!hasAdminAuthority(session) && session.user.id !== key.userId) {
       return { ok: false, error: "无权限执行此操作" };
     }
 
@@ -1130,7 +1172,7 @@ export async function resetKeyLimitsOnly(keyId: number): Promise<ActionResult> {
     const tError = await getTranslations("errors");
 
     const session = await getSession();
-    if (!session || session.user.role !== "admin") {
+    if (!session || !hasAdminAuthority(session)) {
       return {
         ok: false,
         error: tError("PERMISSION_DENIED"),
@@ -1227,7 +1269,7 @@ export async function toggleKeyEnabled(keyId: number, enabled: boolean): Promise
     }
 
     // 权限检查：用户只能管理自己的Key，管理员可以管理所有Key
-    if (session.user.role !== "admin" && session.user.id !== key.userId) {
+    if (!hasAdminAuthority(session) && session.user.id !== key.userId) {
       return {
         ok: false,
         error: tError("PERMISSION_DENIED"),
@@ -1278,7 +1320,7 @@ export async function batchUpdateKeys(
         errorCode: ERROR_CODES.UNAUTHORIZED,
       };
     }
-    if (session.user.role !== "admin") {
+    if (!hasAdminAuthority(session)) {
       return {
         ok: false,
         error: tError("PERMISSION_DENIED"),
@@ -1539,7 +1581,7 @@ export async function renewKeyExpiresAt(
     }
 
     // 权限检查：用户只能续期自己的Key，管理员可以续期所有Key
-    if (session.user.role !== "admin" && session.user.id !== key.userId) {
+    if (!hasAdminAuthority(session) && session.user.id !== key.userId) {
       return {
         ok: false,
         error: tError("PERMISSION_DENIED"),
@@ -1603,7 +1645,7 @@ export async function patchKeyLimit(
       return { ok: false, error: tError("KEY_NOT_FOUND"), errorCode: ERROR_CODES.KEY_NOT_FOUND };
     }
 
-    if (session.user.role !== "admin" && session.user.id !== key.userId) {
+    if (!hasAdminAuthority(session) && session.user.id !== key.userId) {
       return {
         ok: false,
         error: tError("PERMISSION_DENIED"),

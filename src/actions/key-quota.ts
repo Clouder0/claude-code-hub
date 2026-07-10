@@ -4,7 +4,7 @@ import { and, eq, isNull } from "drizzle-orm";
 import { getTranslations } from "next-intl/server";
 import { db } from "@/drizzle/db";
 import { keys as keysTable, users as usersTable } from "@/drizzle/schema";
-import { getSession } from "@/lib/auth";
+import { getSession, hasAdminAuthority } from "@/lib/auth";
 import { logger } from "@/lib/logger";
 import { resolveKeyConcurrentSessionLimit } from "@/lib/rate-limit/concurrent-session-limit";
 import { resolveKeyCostResetAt } from "@/lib/rate-limit/cost-reset-utils";
@@ -72,7 +72,7 @@ export async function getKeyQuotaUsage(keyId: number): Promise<ActionResult<KeyQ
     const keyRow = result.key;
 
     // Allow admin to view any key, users can only view their own keys
-    if (session.user.role !== "admin" && keyRow.userId !== session.user.id) {
+    if (!hasAdminAuthority(session) && keyRow.userId !== session.user.id) {
       return {
         ok: false,
         error: tError?.("PERMISSION_DENIED") ?? "",

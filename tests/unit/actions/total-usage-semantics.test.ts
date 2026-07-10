@@ -32,6 +32,8 @@ const findUserByIdMock = vi.fn();
 // Mock modules
 vi.mock("@/lib/auth", () => ({
   getSession: () => getSessionMock(),
+  hasAdminAuthority: (session: { user?: { role?: string } } | null | undefined) =>
+    session?.user?.role === "admin",
 }));
 
 vi.mock("@/repository/statistics", () => ({

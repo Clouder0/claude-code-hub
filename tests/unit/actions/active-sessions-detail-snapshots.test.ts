@@ -24,6 +24,8 @@ const findAdjacentRequestSequencesMock = vi.fn();
 const findMessageRequestAuditBySessionIdAndSequenceMock = vi.fn();
 
 vi.mock("@/lib/auth", () => ({
+  hasAdminAuthority: (session: { user?: { role?: string } } | null | undefined) =>
+    session?.user?.role === "admin",
   getSession: getSessionMock,
 }));
 

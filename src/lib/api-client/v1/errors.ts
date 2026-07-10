@@ -23,10 +23,14 @@ export function isApiError(error: unknown): error is ApiError {
   return error instanceof ApiError;
 }
 
-// Admin-only routes reject non-admin sessions with this exact pair; clients
-// use it to decide whether to retry through a read-tier self endpoint.
+// Admin-only routes reject ordinary users with auth.forbidden and database-key
+// sessions with auth.api_key_admin_disabled when API-key admin access is off.
 export function isAdminForbidden(error: unknown): boolean {
-  return isApiError(error) && error.status === 403 && error.errorCode === "auth.forbidden";
+  return (
+    isApiError(error) &&
+    error.status === 403 &&
+    (error.errorCode === "auth.forbidden" || error.errorCode === "auth.api_key_admin_disabled")
+  );
 }
 
 const API_ERROR_MESSAGE_KEYS: Record<string, string> = {

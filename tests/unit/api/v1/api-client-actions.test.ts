@@ -118,12 +118,15 @@ describe("v1 action compatibility client", () => {
     expect(getMock).toHaveBeenCalledWith("/api/v1/system/settings");
   });
 
-  test("falls back to read-only display settings for non-admin system settings readers", async () => {
+  test.each([
+    "auth.forbidden",
+    "auth.api_key_admin_disabled",
+  ])("falls back to read-only display settings after %s", async (errorCode) => {
     getMock
       .mockRejectedValueOnce(
         new ApiError({
           status: 403,
-          errorCode: "auth.forbidden",
+          errorCode,
           detail: "Admin access is required.",
         })
       )

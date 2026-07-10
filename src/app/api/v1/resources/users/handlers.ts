@@ -88,7 +88,11 @@ export async function listCurrentUser(c: Context): Promise<Response> {
       detail: "Current user was not found.",
     });
   }
-  const items = [redactUserKeys(result.data)];
+  const effectiveDisplay =
+    c.get("auth")?.adminAuthority || result.data.role !== "admin"
+      ? result.data
+      : { ...result.data, role: "user" };
+  const items = [redactUserKeys(effectiveDisplay)];
   return jsonResponse({
     items,
     pageInfo: {

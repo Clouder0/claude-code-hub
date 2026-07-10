@@ -133,6 +133,20 @@ describe("v1 action migration matrix", () => {
     expect(getMigrationEntryByModule("model-prices")?.excludedExports).toHaveProperty(
       "processPriceTableInternal"
     );
+    expect(getMigrationEntryByModule("users")?.access).toBe("mixed");
+    expect(getMigrationEntryByModule("keys")?.access).toBe("mixed");
+    expect(getMigrationEntryByModule("key-quota")?.access).toBe("mixed");
+    for (const module of [
+      "usage-logs",
+      "active-sessions",
+      "concurrent-sessions",
+      "session-response",
+      "session-origin-chain",
+      "statistics",
+      "overview",
+    ]) {
+      expect(getMigrationEntryByModule(module)?.access).toBe("web");
+    }
   });
 
   test("documents every endpoint family declared by the matrix", () => {

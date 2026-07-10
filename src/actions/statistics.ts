@@ -1,6 +1,6 @@
 "use server";
 
-import { getSession } from "@/lib/auth";
+import { getSession, hasAdminAuthority } from "@/lib/auth";
 import { logger } from "@/lib/logger";
 import { getStatisticsWithCache } from "@/lib/redis";
 import { formatCostForStorage } from "@/lib/utils/currency";
@@ -51,7 +51,7 @@ export async function getUserStatistics(
     }
 
     const settings = await getSystemSettings();
-    const isAdmin = session.user.role === "admin";
+    const isAdmin = hasAdminAuthority(session);
 
     // 确定显示模式
     const mode: "users" | "keys" | "mixed" = isAdmin

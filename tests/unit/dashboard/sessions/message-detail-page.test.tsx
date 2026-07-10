@@ -56,7 +56,7 @@ describe("SessionMessagesPage", () => {
     expect(element.type).toBe(MockSessionMessagesClient);
   });
 
-  test("redirects non-admin or unauthenticated users", async () => {
+  test("renders for normal Web users and redirects unauthenticated users", async () => {
     authMocks.getSession.mockResolvedValueOnce(null).mockResolvedValueOnce({
       user: {
         id: 2,
@@ -73,9 +73,14 @@ describe("SessionMessagesPage", () => {
     });
     expect(redirectMock).toHaveBeenCalledWith({ href: "/login", locale: "en" });
 
-    await SessionMessagesPage({
+    const element = await SessionMessagesPage({
       params: Promise.resolve({ locale: "ja", sessionId: "sess_x" }),
     });
-    expect(redirectMock).toHaveBeenCalledWith({ href: "/dashboard", locale: "ja" });
+    expect(isValidElement(element)).toBe(true);
+    if (!isValidElement(element)) {
+      throw new Error("SessionMessagesPage should return a React element");
+    }
+    expect(element.type).toBe(MockSessionMessagesClient);
+    expect(redirectMock).not.toHaveBeenCalledWith({ href: "/dashboard", locale: "ja" });
   });
 });

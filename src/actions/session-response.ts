@@ -1,6 +1,6 @@
 "use server";
 
-import { getSession } from "@/lib/auth";
+import { getSession, hasAdminAuthority } from "@/lib/auth";
 import { logger } from "@/lib/logger";
 import { SessionManager } from "@/lib/session-manager";
 
@@ -25,7 +25,7 @@ export async function getSessionResponse(
       };
     }
 
-    const isAdmin = authSession.user.role === "admin";
+    const isAdmin = hasAdminAuthority(authSession);
     const currentUserId = authSession.user.id;
 
     // 1. 获取 session 统计数据以验证所有权

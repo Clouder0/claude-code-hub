@@ -40,6 +40,10 @@ export function getKeys(userId: number) {
   );
 }
 
+export function getOwnKeys() {
+  return toActionResult(apiGet<{ items?: Key[] }>("/api/v1/users:self/keys").then(unwrapItems));
+}
+
 export function getKeysWithStatistics(userId: number) {
   return toActionResult(
     apiGet<{ items?: Key[] }>(`/api/v1/users/${userId}/keys?include=statistics`).then(unwrapItems)

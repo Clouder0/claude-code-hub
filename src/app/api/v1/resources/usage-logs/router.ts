@@ -59,11 +59,11 @@ usageLogsRouter.openapi(
   createRoute({
     method: "get",
     path: "/usage-logs",
-    middleware: requireAuth("read"),
+    middleware: requireAuth("web"),
     tags: ["Usage Logs"],
     summary: "List usage logs",
     description: "Lists usage logs with either offset or cursor filters.",
-    "x-required-access": "read",
+    "x-required-access": "web",
     security,
     request: { query: UsageLogsQuerySchema },
     responses: {
@@ -81,11 +81,11 @@ usageLogsRouter.openapi(
   createRoute({
     method: "get",
     path: "/usage-logs/stats",
-    middleware: requireAuth("read"),
+    middleware: requireAuth("web"),
     tags: ["Usage Logs"],
     summary: "Get usage log stats",
     description: "Returns aggregate usage log statistics.",
-    "x-required-access": "read",
+    "x-required-access": "web",
     security,
     request: { query: UsageLogsQuerySchema },
     responses: {
@@ -103,11 +103,11 @@ usageLogsRouter.openapi(
   createRoute({
     method: "get",
     path: "/usage-logs/filter-options",
-    middleware: requireAuth("admin"),
+    middleware: requireAuth("web"),
     tags: ["Usage Logs"],
     summary: "Get usage log filter options",
-    description: "Returns admin-scoped cached model, status-code, and endpoint filter options.",
-    "x-required-access": "admin",
+    description: "Returns filter options scoped to the effective caller's visible logs.",
+    "x-required-access": "web",
     security,
     responses: {
       200: {
@@ -124,11 +124,11 @@ usageLogsRouter.openapi(
   createRoute({
     method: "get",
     path: "/usage-logs/models",
-    middleware: requireAuth("admin"),
+    middleware: requireAuth("web"),
     tags: ["Usage Logs"],
     summary: "List usage log models",
-    description: "Returns distinct model values used in admin-visible logs.",
-    "x-required-access": "admin",
+    description: "Returns distinct model values scoped to the effective caller's visible logs.",
+    "x-required-access": "web",
     security,
     responses: {
       200: {
@@ -145,11 +145,11 @@ usageLogsRouter.openapi(
   createRoute({
     method: "get",
     path: "/usage-logs/status-codes",
-    middleware: requireAuth("admin"),
+    middleware: requireAuth("web"),
     tags: ["Usage Logs"],
     summary: "List usage log status codes",
-    description: "Returns distinct status codes used in admin-visible logs.",
-    "x-required-access": "admin",
+    description: "Returns distinct status codes scoped to the effective caller's visible logs.",
+    "x-required-access": "web",
     security,
     responses: {
       200: {
@@ -166,11 +166,11 @@ usageLogsRouter.openapi(
   createRoute({
     method: "get",
     path: "/usage-logs/endpoints",
-    middleware: requireAuth("admin"),
+    middleware: requireAuth("web"),
     tags: ["Usage Logs"],
     summary: "List usage log endpoints",
-    description: "Returns distinct endpoint values used in admin-visible logs.",
-    "x-required-access": "admin",
+    description: "Returns distinct endpoint values scoped to the effective caller's visible logs.",
+    "x-required-access": "web",
     security,
     responses: {
       200: {
@@ -187,11 +187,11 @@ usageLogsRouter.openapi(
   createRoute({
     method: "get",
     path: "/usage-logs/session-id-suggestions",
-    middleware: requireAuth("read"),
+    middleware: requireAuth("web"),
     tags: ["Usage Logs"],
     summary: "Suggest usage log session ids",
     description: "Returns session-id suggestions for the log filter.",
-    "x-required-access": "read",
+    "x-required-access": "web",
     security,
     request: { query: UsageLogSessionSuggestionsQuerySchema },
     responses: {
@@ -209,12 +209,12 @@ usageLogsRouter.openapi(
   createRoute({
     method: "post",
     path: "/usage-logs/exports",
-    middleware: requireAuth("read"),
+    middleware: requireAuth("web"),
     tags: ["Usage Logs"],
     summary: "Create usage log export",
     description:
       "Creates a synchronous CSV export, or an async job when Prefer: respond-async is sent.",
-    "x-required-access": "read",
+    "x-required-access": "web",
     security,
     request: {
       body: {
@@ -241,11 +241,11 @@ usageLogsRouter.openapi(
   createRoute({
     method: "get",
     path: "/usage-logs/exports/{jobId}",
-    middleware: requireAuth("read"),
+    middleware: requireAuth("web"),
     tags: ["Usage Logs"],
     summary: "Get usage log export status",
     description: "Returns async CSV export job status.",
-    "x-required-access": "read",
+    "x-required-access": "web",
     security,
     request: { params: UsageLogExportJobParamSchema },
     responses: {
@@ -263,11 +263,11 @@ usageLogsRouter.openapi(
   createRoute({
     method: "get",
     path: "/usage-logs/exports/{jobId}/download",
-    middleware: requireAuth("read"),
+    middleware: requireAuth("web"),
     tags: ["Usage Logs"],
     summary: "Download usage log export",
     description: "Downloads async CSV export output.",
-    "x-required-access": "read",
+    "x-required-access": "web",
     security,
     request: { params: UsageLogExportJobParamSchema },
     responses: {

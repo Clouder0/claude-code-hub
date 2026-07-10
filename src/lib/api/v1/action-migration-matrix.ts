@@ -1,4 +1,4 @@
-export type ManagementApiAccess = "public" | "read" | "admin";
+export type ManagementApiAccess = "public" | "read" | "web" | "admin" | "mixed";
 
 export type ActionMigrationEntry = {
   module: string;
@@ -34,7 +34,7 @@ export const ACTION_MIGRATION_MATRIX = [
     sourceFile: "users.ts",
     resource: "users",
     endpointFamilies: ["/api/v1/users", "/api/v1/users:batchUpdate"],
-    access: "admin",
+    access: "mixed",
     exportPolicy: "all-action-exports",
     excludedExports: {
       syncUserProviderGroupFromKeys:
@@ -50,7 +50,7 @@ export const ACTION_MIGRATION_MATRIX = [
       "/api/v1/keys/{keyId}",
       "/api/v1/keys/{keyId}:reveal",
     ],
-    access: "admin",
+    access: "mixed",
     exportPolicy: "all-action-exports",
   },
   {
@@ -58,7 +58,7 @@ export const ACTION_MIGRATION_MATRIX = [
     sourceFile: "key-quota.ts",
     resource: "me/keys",
     endpointFamilies: ["/api/v1/me/quota", "/api/v1/keys/{keyId}/quota"],
-    access: "read",
+    access: "mixed",
     exportPolicy: "all-action-exports",
   },
   {
@@ -101,7 +101,7 @@ export const ACTION_MIGRATION_MATRIX = [
     sourceFile: "usage-logs.ts",
     resource: "usage-logs",
     endpointFamilies: ["/api/v1/usage-logs", "/api/v1/usage-logs/exports"],
-    access: "read",
+    access: "web",
     exportPolicy: "all-action-exports",
   },
   {
@@ -125,7 +125,7 @@ export const ACTION_MIGRATION_MATRIX = [
     sourceFile: "active-sessions.ts",
     resource: "sessions",
     endpointFamilies: ["/api/v1/sessions", "/api/v1/sessions/{sessionId}"],
-    access: "read",
+    access: "web",
     exportPolicy: "all-action-exports",
   },
   {
@@ -142,7 +142,7 @@ export const ACTION_MIGRATION_MATRIX = [
     sourceFile: "concurrent-sessions.ts",
     resource: "dashboard",
     endpointFamilies: ["/api/v1/dashboard/concurrent-sessions"],
-    access: "read",
+    access: "web",
     exportPolicy: "all-action-exports",
   },
   {
@@ -150,7 +150,7 @@ export const ACTION_MIGRATION_MATRIX = [
     sourceFile: "session-response.ts",
     resource: "sessions",
     endpointFamilies: ["/api/v1/sessions/{sessionId}/response"],
-    access: "read",
+    access: "web",
     exportPolicy: "all-action-exports",
   },
   {
@@ -158,7 +158,7 @@ export const ACTION_MIGRATION_MATRIX = [
     sourceFile: "session-origin-chain.ts",
     resource: "sessions",
     endpointFamilies: ["/api/v1/sessions/{sessionId}/origin-chain"],
-    access: "read",
+    access: "web",
     exportPolicy: "all-action-exports",
   },
   {
@@ -166,7 +166,7 @@ export const ACTION_MIGRATION_MATRIX = [
     sourceFile: "statistics.ts",
     resource: "dashboard",
     endpointFamilies: ["/api/v1/dashboard/statistics"],
-    access: "read",
+    access: "web",
     exportPolicy: "all-action-exports",
   },
   {
@@ -174,7 +174,7 @@ export const ACTION_MIGRATION_MATRIX = [
     sourceFile: "overview.ts",
     resource: "dashboard",
     endpointFamilies: ["/api/v1/dashboard/overview"],
-    access: "read",
+    access: "web",
     exportPolicy: "all-action-exports",
   },
   {

@@ -53,6 +53,8 @@ describe("getSessionOriginChain integration", () => {
     }));
 
     vi.doMock("@/lib/auth", () => ({
+      hasAdminAuthority: (session: { user?: { role?: string } } | null | undefined) =>
+        session?.user?.role === "admin",
       getSession: vi.fn().mockResolvedValue({ user: { id: 1, role: "admin" } }),
     }));
 

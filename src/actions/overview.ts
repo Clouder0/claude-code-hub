@@ -1,6 +1,6 @@
 "use server";
 
-import { getSession } from "@/lib/auth";
+import { getSession, hasAdminAuthority } from "@/lib/auth";
 import { logger } from "@/lib/logger";
 import { getOverviewWithCache } from "@/lib/redis";
 import { getSystemSettings } from "@/repository/system-config";
@@ -49,7 +49,7 @@ export async function getOverviewData(): Promise<ActionResult<OverviewData>> {
     }
 
     const settings = await getSystemSettings();
-    const isAdmin = session.user.role === "admin";
+    const isAdmin = hasAdminAuthority(session);
     const canViewGlobalData = isAdmin || settings.allowGlobalUsageView;
 
     // 根据权限决定查询范围

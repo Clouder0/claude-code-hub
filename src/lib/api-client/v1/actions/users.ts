@@ -50,6 +50,12 @@ export function getUsers(params?: GetUsersBatchParams): Promise<UserDisplay[]> {
     .then((body) => normalizeUsers(body.items ?? body.users ?? []));
 }
 
+export function getCurrentUserDisplayList(): Promise<UserDisplay[]> {
+  return apiGet<V1UsersPage>("/api/v1/users:self").then((body) =>
+    normalizeUsers(body.items ?? body.users ?? [])
+  );
+}
+
 export function getUsersBatchCore(params?: GetUsersBatchParams) {
   return toActionResult(
     apiGet<V1UsersPage>(`/api/v1/users${toUserListQuery(params)}`).then(toLegacyUsersPage)

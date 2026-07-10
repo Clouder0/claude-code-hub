@@ -262,7 +262,7 @@ describe("v1 usage log endpoints", () => {
     });
   });
 
-  test("keeps global usage-log metadata admin-only", async () => {
+  test("allows Web users to load caller-scoped usage-log metadata", async () => {
     validateAuthTokenMock.mockResolvedValue(userSession);
 
     for (const pathname of [
@@ -276,14 +276,29 @@ describe("v1 usage log endpoints", () => {
         pathname,
         headers: { Authorization: "Bearer user-token" },
       });
-      expect(got.response.status).toBe(403);
-      expect(got.json).toMatchObject({ errorCode: "auth.forbidden" });
+      expect(got.response.status).toBe(200);
     }
 
-    expect(getFilterOptionsMock).not.toHaveBeenCalled();
-    expect(getModelListMock).not.toHaveBeenCalled();
-    expect(getStatusCodeListMock).not.toHaveBeenCalled();
-    expect(getEndpointListMock).not.toHaveBeenCalled();
+    expect(getFilterOptionsMock).toHaveBeenCalled();
+    expect(getModelListMock).toHaveBeenCalled();
+    expect(getStatusCodeListMock).toHaveBeenCalled();
+    expect(getEndpointListMock).toHaveBeenCalled();
+  });
+
+  test("does not admit read-only credentials to management usage logs", async () => {
+    validateAuthTokenMock.mockImplementation(
+      async (_token: string, options: { allowReadOnlyAccess?: boolean }) =>
+        options.allowReadOnlyAccess ? userSession : null
+    );
+
+    const got = await callV1Route({
+      method: "GET",
+      pathname: "/api/v1/usage-logs",
+      headers: { Authorization: "Bearer readonly-token" },
+    });
+
+    expect(got.response.status).toBe(401);
+    expect(getUsageLogsBatchMock).not.toHaveBeenCalled();
   });
 
   test("creates sync and async exports and downloads completed csv", async () => {

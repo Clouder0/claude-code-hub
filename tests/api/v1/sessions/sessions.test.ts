@@ -39,6 +39,11 @@ const adminSession = {
   key: { id: 1, userId: 1, key: "admin-token", canLoginWebUi: true },
 } as AuthSession;
 
+const userSession = {
+  user: { id: 2, role: "user", isEnabled: true },
+  key: { id: 2, userId: 2, key: "user-token", canLoginWebUi: true },
+} as AuthSession;
+
 describe("v1 session endpoints", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -102,6 +107,35 @@ describe("v1 session endpoints", () => {
     });
     expect(detail.response.status).toBe(200);
     expect(getSessionDetailsMock).toHaveBeenCalledWith("s1", 2);
+  });
+
+  test("allows normal Web users into the action-enforced session surface", async () => {
+    validateAuthTokenMock.mockResolvedValue(userSession);
+
+    const active = await callV1Route({
+      method: "GET",
+      pathname: "/api/v1/sessions",
+      headers: { Authorization: "Bearer user-token" },
+    });
+
+    expect(active.response.status).toBe(200);
+    expect(getActiveSessionsMock).toHaveBeenCalled();
+  });
+
+  test("does not admit read-only credentials to management sessions", async () => {
+    validateAuthTokenMock.mockImplementation(
+      async (_token: string, options: { allowReadOnlyAccess?: boolean }) =>
+        options.allowReadOnlyAccess ? userSession : null
+    );
+
+    const active = await callV1Route({
+      method: "GET",
+      pathname: "/api/v1/sessions",
+      headers: { Authorization: "Bearer readonly-token" },
+    });
+
+    expect(active.response.status).toBe(401);
+    expect(getActiveSessionsMock).not.toHaveBeenCalled();
   });
 
   test("reads session payload subresources", async () => {

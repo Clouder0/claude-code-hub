@@ -1,6 +1,6 @@
 import { Suspense } from "react";
 import { redirect } from "@/i18n/routing";
-import { getSession } from "@/lib/auth";
+import { getSession, hasAdminAuthority } from "@/lib/auth";
 import { getSystemSettings } from "@/repository/system-config";
 import { ActiveSessionsSkeleton } from "./_components/active-sessions-skeleton";
 import {
@@ -25,7 +25,7 @@ export default async function UsageLogsPage({
     return redirect({ href: "/login", locale });
   }
 
-  const isAdmin = session.user.role === "admin";
+  const isAdmin = hasAdminAuthority(session);
   const systemSettings = await getSystemSettings();
 
   return (

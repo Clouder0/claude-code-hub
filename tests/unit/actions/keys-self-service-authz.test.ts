@@ -1,16 +1,18 @@
 /**
  * U02: key 写操作的 self-or-admin 鉴权矩阵
  *
- * REST 路由放开到 read 层后，action 层必须兜底拒绝只读会话
- * （canLoginWebUi=false 的 key 经 read 层 / legacy adapter 的 scoped 上下文
- * 可以拿到非空 session），否则只读 key 可 PATCH 自己的 canLoginWebUi 自提权。
+ * Web 路由与 action 层都必须拒绝只读会话。legacy adapter 的 scoped 上下文可能让
+ * canLoginWebUi=false 的 key 拿到非空 session，因此 action 仍需兜底，避免它 PATCH
+ * 自己的 canLoginWebUi 自提权。
  */
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const getSessionMock = vi.fn();
+const hasAdminAuthorityMock = vi.fn();
 vi.mock("@/lib/auth", () => ({
   getSession: getSessionMock,
+  hasAdminAuthority: hasAdminAuthorityMock,
 }));
 
 vi.mock("next/cache", () => ({
@@ -70,6 +72,9 @@ const adminSession = { user: { id: 1, role: "admin" }, key: { canLoginWebUi: tru
 
 beforeEach(() => {
   vi.clearAllMocks();
+  hasAdminAuthorityMock.mockImplementation(
+    (session: { user?: { role?: string } } | null) => session?.user?.role === "admin"
+  );
   deleteKeyMock.mockResolvedValue(true);
   updateKeyMock.mockResolvedValue({});
   findKeyByIdMock.mockResolvedValue({ ...OWN_KEY });
@@ -141,6 +146,18 @@ describe("editKey self-service authorization", () => {
     if (!result.ok) {
       expect(result.errorCode).toBe("PERMISSION_DENIED");
     }
+    expect(updateKeyMock).not.toHaveBeenCalled();
+  });
+
+  it("treats a stored admin role without effective authority as self-scoped", async () => {
+    getSessionMock.mockResolvedValue(adminSession);
+    hasAdminAuthorityMock.mockReturnValue(false);
+    findKeyByIdMock.mockResolvedValue({ ...OWN_KEY, userId: 7 });
+
+    const { editKey } = await import("@/actions/keys");
+    const result = await editKey(42, { name: "cross-user" });
+
+    expect(result).toMatchObject({ ok: false, errorCode: "PERMISSION_DENIED" });
     expect(updateKeyMock).not.toHaveBeenCalled();
   });
 

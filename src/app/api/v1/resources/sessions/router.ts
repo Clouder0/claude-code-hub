@@ -62,11 +62,11 @@ sessionsRouter.openapi(
   createRoute({
     method: "get",
     path: "/sessions",
-    middleware: requireAuth("read"),
+    middleware: requireAuth("web"),
     tags: ["Sessions"],
     summary: "List sessions",
     description: "Lists active sessions or active/inactive session pages.",
-    "x-required-access": "read",
+    "x-required-access": "web",
     security,
     request: { query: SessionsListQuerySchema },
     responses: {
@@ -84,11 +84,11 @@ sessionsRouter.openapi(
   createRoute({
     method: "post",
     path: "/sessions:batchTerminate",
-    middleware: requireAuth("read"),
+    middleware: requireAuth("web"),
     tags: ["Sessions"],
     summary: "Batch terminate sessions",
     description: "Terminates multiple sessions allowed by the caller scope.",
-    "x-required-access": "read",
+    "x-required-access": "web",
     security,
     request: {
       body: {
@@ -111,11 +111,11 @@ sessionsRouter.openapi(
   createRoute({
     method: "get",
     path: "/sessions/{sessionId}",
-    middleware: requireAuth("read"),
+    middleware: requireAuth("web"),
     tags: ["Sessions"],
     summary: "Get session detail",
     description: "Returns session detail, snapshots, request metadata, and response metadata.",
-    "x-required-access": "read",
+    "x-required-access": "web",
     security,
     request: { params: SessionIdParamSchema, query: SessionSequenceQuerySchema },
     responses: {
@@ -133,11 +133,11 @@ sessionsRouter.openapi(
   createRoute({
     method: "get",
     path: "/sessions/{sessionId}/messages",
-    middleware: requireAuth("read"),
+    middleware: requireAuth("web"),
     tags: ["Sessions"],
     summary: "Get session messages",
     description: "Returns stored session messages for a session or request sequence.",
-    "x-required-access": "read",
+    "x-required-access": "web",
     security,
     request: { params: SessionIdParamSchema, query: SessionSequenceQuerySchema },
     responses: {
@@ -155,11 +155,11 @@ sessionsRouter.openapi(
   createRoute({
     method: "get",
     path: "/sessions/{sessionId}/messages/exists",
-    middleware: requireAuth("read"),
+    middleware: requireAuth("web"),
     tags: ["Sessions"],
     summary: "Check session messages",
     description: "Checks whether stored messages exist for a session or request sequence.",
-    "x-required-access": "read",
+    "x-required-access": "web",
     security,
     request: { params: SessionIdParamSchema, query: SessionSequenceQuerySchema },
     responses: {
@@ -177,11 +177,11 @@ sessionsRouter.openapi(
   createRoute({
     method: "get",
     path: "/sessions/{sessionId}/requests",
-    middleware: requireAuth("read"),
+    middleware: requireAuth("web"),
     tags: ["Sessions"],
     summary: "List session requests",
     description: "Lists request rows for a session.",
-    "x-required-access": "read",
+    "x-required-access": "web",
     security,
     request: { params: SessionIdParamSchema, query: SessionRequestsQuerySchema },
     responses: {
@@ -199,11 +199,11 @@ sessionsRouter.openapi(
   createRoute({
     method: "get",
     path: "/sessions/{sessionId}/origin-chain",
-    middleware: requireAuth("read"),
+    middleware: requireAuth("web"),
     tags: ["Sessions"],
     summary: "Get session origin chain",
     description: "Returns provider origin chain information for a session.",
-    "x-required-access": "read",
+    "x-required-access": "web",
     security,
     request: { params: SessionIdParamSchema },
     responses: {
@@ -221,11 +221,11 @@ sessionsRouter.openapi(
   createRoute({
     method: "get",
     path: "/sessions/{sessionId}/response",
-    middleware: requireAuth("read"),
+    middleware: requireAuth("web"),
     tags: ["Sessions"],
     summary: "Get session response body",
     description: "Returns the stored response body for a session.",
-    "x-required-access": "read",
+    "x-required-access": "web",
     security,
     request: { params: SessionIdParamSchema },
     responses: {
@@ -243,11 +243,11 @@ sessionsRouter.openapi(
   createRoute({
     method: "delete",
     path: "/sessions/{sessionId}",
-    middleware: requireAuth("read"),
+    middleware: requireAuth("web"),
     tags: ["Sessions"],
     summary: "Terminate session",
     description: "Terminates one active session allowed by the caller scope.",
-    "x-required-access": "read",
+    "x-required-access": "web",
     security,
     request: { params: SessionIdParamSchema },
     responses: {

@@ -144,42 +144,32 @@ describe("v1 key endpoints", () => {
     expect(addKeyMock).not.toHaveBeenCalled();
   });
 
-  test("treats raw API keys presented through auth cookies as session credentials (cookie-source policy)", async () => {
-    // A cookie that survives validateAuthToken arrived via the login flow, so it is a browser
-    // session — not a programmatic API key call. We therefore classify it as `session` and
-    // allow admin operations even when ENABLE_API_KEY_ADMIN_ACCESS is disabled. Header-sourced
-    // raw keys remain classified as `user-api-key` (see `rejects user API keys` above).
-    validateAuthTokenMock.mockResolvedValueOnce(adminSession);
+  test("keeps raw database-key cookies self-scoped when API key admin access is disabled", async () => {
+    validateAuthTokenMock.mockResolvedValue(adminSession);
+    const cookieHeaders = {
+      Cookie: "auth-token=user-api-key",
+      [CSRF_HEADER]: createCsrfToken({ authToken: "user-api-key", userId: 1 }),
+    };
 
-    const response = await callV1Route({
-      method: "POST",
-      pathname: "/api/v1/users/1/keys",
-      headers: {
-        Cookie: "auth-token=user-api-key",
-        [CSRF_HEADER]: createCsrfToken({ authToken: "user-api-key", userId: 1 }),
-      },
-      body: { name: "blocked" },
+    const webAuth = await resolveAuth(
+      createCookieAuthContext({
+        ...cookieHeaders,
+      }),
+      "web"
+    );
+    expect(webAuth).not.toBeInstanceOf(Response);
+    expect(webAuth).toMatchObject({
+      credentialType: "user-api-key",
+      source: "cookie",
+      adminAuthority: false,
+      session: { user: { id: 1, role: "user" } },
     });
 
-    // The synthetic Next.js Request in callV1Route does not propagate cookies to the Hono
-    // adapter the same way a real browser does, so this leg continues to short-circuit at
-    // token extraction with auth.missing. That is unrelated to the classification policy
-    // we are exercising below.
-    expect(response.response.status).toBe(401);
-    expect(response.json).toMatchObject({ errorCode: "auth.missing" });
-    expect(addKeyMock).not.toHaveBeenCalled();
-
-    const middlewareResponse = await resolveAuth(
-      createCookieAuthContext({
-        Cookie: "auth-token=user-api-key",
-        [CSRF_HEADER]: createCsrfToken({ authToken: "user-api-key", userId: 1 }),
-      }),
-      "admin"
-    );
-    expect(middlewareResponse).not.toBeInstanceOf(Response);
-    expect(middlewareResponse).toMatchObject({
-      credentialType: "session",
-      source: "cookie",
+    const adminAuth = await resolveAuth(createCookieAuthContext(cookieHeaders), "admin");
+    expect(adminAuth).toBeInstanceOf(Response);
+    expect((adminAuth as Response).status).toBe(403);
+    expect(await (adminAuth as Response).json()).toMatchObject({
+      errorCode: "auth.api_key_admin_disabled",
     });
   });
 
@@ -425,6 +415,7 @@ describe("v1 key endpoints", () => {
     const doc = json as { paths: Record<string, unknown> };
 
     expect(doc.paths).toHaveProperty("/api/v1/users/{userId}/keys");
+    expect(doc.paths).toHaveProperty("/api/v1/users:self/keys");
     expect(doc.paths).toHaveProperty("/api/v1/keys/{keyId}");
     expect(doc.paths).toHaveProperty("/api/v1/keys/{keyId}:enable");
     expect(doc.paths).toHaveProperty("/api/v1/keys/{keyId}:renew");

@@ -261,6 +261,7 @@ vi.doMock("@/lib/api-client/v1/actions/keys", async () => {
   );
   return {
     ...keys,
+    getOwnKeys: vi.fn(async () => ({ ok: true, data: [] })),
     getKeys:
       getKeys && vi.isMockFunction(getKeys) ? getKeys : vi.fn(async () => ({ ok: true, data: [] })),
     getKeysWithStatistics:

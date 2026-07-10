@@ -29,7 +29,7 @@ for (const [path, pathItem] of Object.entries(document.paths ?? {})) {
     if (!op.summary) failures.push(`${label}: missing summary`);
     if (!op.description) failures.push(`${label}: missing description`);
     if (!op.tags?.length) failures.push(`${label}: missing tags`);
-    if (!["public", "read", "admin"].includes(op["x-required-access"] ?? "")) {
+    if (!["public", "read", "web", "admin"].includes(op["x-required-access"] ?? "")) {
       failures.push(`${label}: missing x-required-access`);
     }
     if (!op.responses || Object.keys(op.responses).length === 0) {
