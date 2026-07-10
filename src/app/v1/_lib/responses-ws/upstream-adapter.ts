@@ -206,8 +206,21 @@ function isWsClosingOrClosed(ws: WebSocketType): boolean {
   return ws.readyState >= 2;
 }
 
+function absorbConnectingCloseError(ws: WebSocketType): void {
+  if (ws.readyState !== 0) return;
+
+  // `ws.close()` and `ws.terminate()` abort an in-progress handshake by
+  // scheduling an `error` event on the next tick. The request-specific error
+  // listener may already be removed after the fallback result resolves, so
+  // retain a one-shot sink for this expected close-induced error. Without it,
+  // a normal WS -> HTTP fallback can become an uncaughtException and exit the
+  // whole process.
+  ws.once("error", () => {});
+}
+
 function closeWs(ws: WebSocketType, code: number): void {
   try {
+    absorbConnectingCloseError(ws);
     ws.close(code);
   } catch {
     // ignore
@@ -216,6 +229,7 @@ function closeWs(ws: WebSocketType, code: number): void {
 
 function terminateWs(ws: WebSocketType): void {
   try {
+    absorbConnectingCloseError(ws);
     ws.terminate?.();
   } catch {
     // ignore
