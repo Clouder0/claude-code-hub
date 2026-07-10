@@ -1816,14 +1816,8 @@ export async function editUser(
       beforeUser &&
       validatedData.limit5hResetMode !== beforeUser.limit5hResetMode
     ) {
-      const { findKeyList } = await import("@/repository/key");
-      const { clearUserCostCache } = await import("@/lib/redis/cost-cache-cleanup");
-      const keys = await findKeyList(userId);
-      await clearUserCostCache({
-        userId,
-        keyIds: keys.map((item) => item.id),
-        keyHashes: keys.map((item) => item.key),
-      }).catch(() => null);
+      const { clear5hResetModeCache } = await import("@/lib/redis/cost-cache-cleanup");
+      await clear5hResetModeCache({ entityType: "user", entityId: userId }).catch(() => null);
     }
 
     // 用户分组由 Key 分组自动计算，不再需要级联更新 Key 的 providerGroup

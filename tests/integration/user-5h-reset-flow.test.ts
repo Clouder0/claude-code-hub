@@ -148,8 +148,13 @@ async function cleanupRedisKeys(userIds: number[]) {
   }
 
   const keys = userIds.flatMap((userId) => [
+    `user:${userId}:cost_5h_rolling`,
     buildRollingCostKey("user", userId, "5h"),
     `user:${userId}:cost_5h_fixed`,
+    `user:${userId}:cost_daily_0000`,
+    `user:${userId}:cost_weekly`,
+    `user:${userId}:cost_monthly`,
+    `lease:user:${userId}:5h:rolling`,
     buildLeaseKey("user", userId, "5h", "rolling"),
     buildLeaseKey("user", userId, "5h", "fixed"),
   ]);
@@ -205,7 +210,23 @@ run("user 5h reset flow integration", () => {
     expect(before.data.limitDaily.usage).toBe(7);
 
     const redis = await waitForRedisReady();
-    await redis.set(buildLeaseKey("user", userId, "5h", "rolling"), "lease", "EX", 300);
+    const legacyRollingCostKey = `user:${userId}:cost_5h_rolling`;
+    const currentRollingCostKey = buildRollingCostKey("user", userId, "5h");
+    const legacyRollingLeaseKey = `lease:user:${userId}:5h:rolling`;
+    const currentRollingLeaseKey = buildLeaseKey("user", userId, "5h", "rolling");
+    const fixedCounterKeys = [
+      `user:${userId}:cost_5h_fixed`,
+      `user:${userId}:cost_daily_0000`,
+      `user:${userId}:cost_weekly`,
+      `user:${userId}:cost_monthly`,
+    ];
+    await redis.zadd(legacyRollingCostKey, now.getTime(), "legacy-request");
+    await redis.zadd(currentRollingCostKey, now.getTime(), "current-request");
+    await redis.set(legacyRollingLeaseKey, "legacy-lease", "EX", 300);
+    await redis.set(currentRollingLeaseKey, "current-lease", "EX", 300);
+    for (const key of fixedCounterKeys) {
+      await redis.set(key, "sentinel", "EX", 300);
+    }
 
     const resetResult = await resetUser5hLimitOnly(userId);
     expect(resetResult.ok).toBe(true);
@@ -223,8 +244,13 @@ run("user 5h reset flow integration", () => {
 
     const userAfterReset = await findUserById(userId);
     expect(userAfterReset?.limit5hCostResetAt).toBeInstanceOf(Date);
-    expect(await redis.exists(buildRollingCostKey("user", userId, "5h"))).toBe(0);
-    expect(await redis.exists(buildLeaseKey("user", userId, "5h", "rolling"))).toBe(0);
+    expect(await redis.exists(legacyRollingCostKey)).toBe(0);
+    expect(await redis.exists(currentRollingCostKey)).toBe(0);
+    expect(await redis.exists(legacyRollingLeaseKey)).toBe(0);
+    expect(await redis.exists(currentRollingLeaseKey)).toBe(0);
+    for (const key of fixedCounterKeys) {
+      expect(await redis.get(key)).toBe("sentinel");
+    }
 
     await insertUserUsage({
       userId,
