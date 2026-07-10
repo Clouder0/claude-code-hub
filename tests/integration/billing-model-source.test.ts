@@ -4,6 +4,7 @@ import type { SystemSettings } from "@/types/system-config";
 
 const asyncTasks: Promise<void>[] = [];
 const cloudPriceSyncRequests: Array<{ reason: string }> = [];
+const unexpectedLogErrors: unknown[][] = [];
 
 vi.mock("@/lib/async-task-manager", () => ({
   AsyncTaskManager: {
@@ -11,6 +12,7 @@ vi.mock("@/lib/async-task-manager", () => ({
       asyncTasks.push(promise);
       return new AbortController();
     },
+    touch: () => {},
     cleanup: () => {},
     cancel: () => {},
   },
@@ -21,7 +23,9 @@ vi.mock("@/lib/logger", () => ({
     debug: () => {},
     info: () => {},
     warn: () => {},
-    error: () => {},
+    error: (...args: unknown[]) => {
+      unexpectedLogErrors.push(args);
+    },
     trace: () => {},
   },
 }));
@@ -48,6 +52,7 @@ vi.mock("@/repository/message", () => ({
 
 vi.mock("@/lib/session-manager", () => ({
   SessionManager: {
+    clearSessionProvider: vi.fn(),
     updateSessionUsage: vi.fn(),
     updateSessionProvider: vi.fn(),
     storeSessionResponse: vi.fn(),
@@ -58,6 +63,7 @@ vi.mock("@/lib/session-manager", () => ({
 
 vi.mock("@/lib/rate-limit", () => ({
   RateLimitService: {
+    decrementLeaseBudget: vi.fn(),
     trackCost: vi.fn(),
     trackUserDailyCost: vi.fn(),
   },
@@ -94,7 +100,17 @@ import { getSystemSettings } from "@/repository/system-config";
 beforeEach(() => {
   vi.clearAllMocks();
   cloudPriceSyncRequests.splice(0, cloudPriceSyncRequests.length);
+  unexpectedLogErrors.splice(0, unexpectedLogErrors.length);
   invalidateSystemSettingsCache();
+  vi.mocked(SessionManager.clearSessionProvider).mockResolvedValue(undefined);
+  vi.mocked(SessionManager.updateSessionUsage).mockResolvedValue(undefined);
+  vi.mocked(SessionManager.updateSessionProvider).mockResolvedValue(undefined);
+  vi.mocked(SessionManager.storeSessionResponse).mockResolvedValue(undefined);
+  vi.mocked(SessionManager.updateSessionWithCodexCacheKey).mockResolvedValue(undefined);
+  vi.mocked(RateLimitService.decrementLeaseBudget).mockResolvedValue(undefined);
+  vi.mocked(RateLimitService.trackCost).mockResolvedValue(undefined);
+  vi.mocked(RateLimitService.trackUserDailyCost).mockResolvedValue(undefined);
+  vi.mocked(SessionTracker.refreshSession).mockResolvedValue(undefined);
 });
 
 function makeSystemSettings(
@@ -252,7 +268,7 @@ function createSession({
 }
 
 function createNonStreamResponse(
-  usage: { input_tokens: number; output_tokens: number },
+  usage: Record<string, unknown>,
   extras?: Record<string, unknown>
 ): Response {
   return new Response(
@@ -314,6 +330,14 @@ function createStreamResponse(usage: { input_tokens: number; output_tokens: numb
 async function drainAsyncTasks(): Promise<void> {
   const tasks = asyncTasks.splice(0, asyncTasks.length);
   await Promise.all(tasks);
+  const fatalBackgroundErrors = unexpectedLogErrors.filter(([message]) =>
+    typeof message === "string"
+      ? message === "Failed to handle non-stream log:" ||
+        message === "Failed to handle stream log:" ||
+        message.includes("Uncaught error in")
+      : false
+  );
+  expect(fatalBackgroundErrors).toEqual([]);
 }
 
 function captureRateLimitCosts(): number[] {
@@ -377,6 +401,7 @@ async function runScenario({
   vi.mocked(updateMessageRequestCostWithBreakdown).mockImplementation(
     async (_id: number, costUsd: unknown) => {
       dbCosts.push(String(costUsd));
+      return String(costUsd);
     }
   );
 
@@ -521,6 +546,7 @@ describe("Billing model source - Redis session cost vs DB cost", () => {
     vi.mocked(updateMessageRequestCostWithBreakdown).mockImplementation(
       async (_id: number, costUsd: unknown) => {
         dbCosts.push(String(costUsd));
+        return String(costUsd);
       }
     );
     const rateLimitCosts = captureRateLimitCosts();
@@ -554,6 +580,243 @@ describe("Billing model source - Redis session cost vs DB cost", () => {
     expect(sessionCosts[0]).toBe("50");
   });
 
+  it("openai-compatible GPT-5.6 uses actual Priority rates for all four usage buckets", async () => {
+    vi.mocked(getSystemSettings).mockResolvedValue(makeSystemSettings("redirected", "actual"));
+    vi.mocked(findLatestPriceByModel).mockImplementation(async (modelName: string) => {
+      if (modelName !== "gpt-5.6-sol") {
+        return null;
+      }
+
+      return makePriceRecord(modelName, {
+        input_cost_per_token: 0.000005,
+        cache_read_input_token_cost: 0.0000005,
+        cache_creation_input_token_cost: 0.00000625,
+        output_cost_per_token: 0.00003,
+        input_cost_per_token_priority: 0.00001,
+        cache_read_input_token_cost_priority: 0.000001,
+        cache_creation_input_token_cost_priority: 0.0000125,
+        output_cost_per_token_priority: 0.00006,
+      });
+    });
+
+    const dbCosts: string[] = [];
+    const dbBreakdowns: Array<Record<string, unknown>> = [];
+    vi.mocked(updateMessageRequestCostWithBreakdown).mockImplementation(
+      async (_id: number, costUsd: unknown, breakdown?: unknown) => {
+        dbCosts.push(String(costUsd));
+        if (breakdown && typeof breakdown === "object") {
+          dbBreakdowns.push(breakdown as Record<string, unknown>);
+        }
+        return String(costUsd);
+      }
+    );
+    const rateLimitCosts = captureRateLimitCosts();
+
+    const sessionCosts: string[] = [];
+    vi.mocked(SessionManager.updateSessionUsage).mockImplementation(
+      async (_sessionId: string, payload: Record<string, unknown>) => {
+        if (typeof payload.costUsd === "string") {
+          sessionCosts.push(payload.costUsd);
+        }
+      }
+    );
+
+    const session = createSession({
+      originalModel: "gpt-5.6-sol",
+      redirectedModel: "gpt-5.6-sol",
+      sessionId: "sess-gpt56-openai-compatible-priority",
+      messageId: 3300,
+      providerOverrides: {
+        name: "OpenAI Compatible",
+        url: "https://api.openai.com/v1",
+        providerType: "openai-compatible",
+      },
+      requestMessage: { service_tier: "priority" },
+      requestPath: "/v1/responses",
+    });
+
+    const response = createNonStreamResponse(
+      {
+        input_tokens: 1000,
+        input_tokens_details: {
+          cached_tokens: 200,
+          cache_write_tokens: 300,
+        },
+        output_tokens: 400,
+      },
+      { service_tier: "priority" }
+    );
+    await ProxyResponseHandler.dispatch(session, response);
+    await drainAsyncTasks();
+
+    expect(dbBreakdowns[0]).toMatchObject({
+      input: "0.005",
+      cache_read: "0.0002",
+      cache_creation: "0.00375",
+      cache_creation_default: "0.00375",
+      output: "0.024",
+      total: "0.03295",
+      pricing: {
+        tier: "priority",
+        unit_rates: {
+          input: "0.00001",
+          cache_read: "0.000001",
+          cache_write: "0.0000125",
+          output: "0.00006",
+        },
+        rate_source: "model_price_data",
+        price_book_model: "gpt-5.6-sol",
+      },
+    });
+    expect(dbCosts[0]).toBe("0.03295");
+    expect(rateLimitCosts[0]).toBe(0.03295);
+    expect(sessionCosts[0]).toBe("0.03295");
+  });
+
+  it("openai-compatible GPT-5.6 bills an actual Standard downgrade at Standard rates", async () => {
+    vi.mocked(getSystemSettings).mockResolvedValue(makeSystemSettings("redirected", "requested"));
+    vi.mocked(findLatestPriceByModel).mockImplementation(async (modelName: string) => {
+      if (modelName !== "gpt-5.6-sol") {
+        return null;
+      }
+
+      return makePriceRecord(modelName, {
+        input_cost_per_token: 0.000005,
+        cache_read_input_token_cost: 0.0000005,
+        cache_creation_input_token_cost: 0.00000625,
+        output_cost_per_token: 0.00003,
+        input_cost_per_token_priority: 0.00001,
+        cache_read_input_token_cost_priority: 0.000001,
+        cache_creation_input_token_cost_priority: 0.0000125,
+        output_cost_per_token_priority: 0.00006,
+      });
+    });
+
+    const dbCosts: string[] = [];
+    vi.mocked(updateMessageRequestCostWithBreakdown).mockImplementation(
+      async (_id: number, costUsd: unknown) => {
+        dbCosts.push(String(costUsd));
+        return String(costUsd);
+      }
+    );
+    const rateLimitCosts = captureRateLimitCosts();
+
+    const sessionCosts: string[] = [];
+    vi.mocked(SessionManager.updateSessionUsage).mockImplementation(
+      async (_sessionId: string, payload: Record<string, unknown>) => {
+        if (typeof payload.costUsd === "string") {
+          sessionCosts.push(payload.costUsd);
+        }
+      }
+    );
+
+    const session = createSession({
+      originalModel: "gpt-5.6-sol",
+      redirectedModel: "gpt-5.6-sol",
+      sessionId: "sess-gpt56-openai-compatible-downgrade",
+      messageId: 3301,
+      providerOverrides: {
+        name: "OpenAI Compatible",
+        url: "https://api.openai.com/v1",
+        providerType: "openai-compatible",
+      },
+      requestMessage: { service_tier: "priority" },
+      requestPath: "/v1/responses",
+    });
+
+    const response = createNonStreamResponse(
+      {
+        input_tokens: 1000,
+        input_tokens_details: {
+          cached_tokens: 200,
+          cache_write_tokens: 300,
+        },
+        output_tokens: 400,
+      },
+      { service_tier: "default" }
+    );
+    await ProxyResponseHandler.dispatch(session, response);
+    await drainAsyncTasks();
+
+    expect(dbCosts[0]).toBe("0.016475");
+    expect(rateLimitCosts[0]).toBe(0.016475);
+    expect(sessionCosts[0]).toBe("0.016475");
+  });
+
+  it("openai-compatible GPT-5.6 preserves but marks actual Priority long-context billing unsupported", async () => {
+    vi.mocked(getSystemSettings).mockResolvedValue(makeSystemSettings("redirected", "requested"));
+    vi.mocked(findLatestPriceByModel).mockImplementation(async (modelName: string) => {
+      if (modelName !== "gpt-5.6-sol") {
+        return null;
+      }
+
+      return makePriceRecord(modelName, {
+        input_cost_per_token: 0.000005,
+        cache_read_input_token_cost: 0.0000005,
+        cache_creation_input_token_cost: 0.00000625,
+        output_cost_per_token: 0.00003,
+        input_cost_per_token_above_272k_tokens: 0.00001,
+        cache_read_input_token_cost_above_272k_tokens: 0.000001,
+        cache_creation_input_token_cost_above_272k_tokens: 0.0000125,
+        output_cost_per_token_above_272k_tokens: 0.000045,
+        input_cost_per_token_priority: 0.00001,
+        cache_read_input_token_cost_priority: 0.000001,
+        cache_creation_input_token_cost_priority: 0.0000125,
+        output_cost_per_token_priority: 0.00006,
+      });
+    });
+
+    const persistedDetails: Array<Record<string, unknown>> = [];
+    vi.mocked(updateMessageRequestDetails).mockImplementation(async (_id, details) => {
+      persistedDetails.push(details as Record<string, unknown>);
+    });
+    vi.mocked(updateMessageRequestCostWithBreakdown).mockResolvedValue(undefined);
+    const rateLimitCosts = captureRateLimitCosts();
+
+    const session = createSession({
+      originalModel: "gpt-5.6-sol",
+      redirectedModel: "gpt-5.6-sol",
+      sessionId: "sess-gpt56-openai-compatible-priority-long",
+      messageId: 3302,
+      providerOverrides: {
+        name: "OpenAI Compatible",
+        url: "https://api.openai.com/v1",
+        providerType: "openai-compatible",
+      },
+      requestMessage: { service_tier: "priority" },
+      requestPath: "/v1/responses",
+    });
+
+    const response = createNonStreamResponse(
+      {
+        input_tokens: 272_001,
+        input_tokens_details: {
+          cached_tokens: 0,
+          cache_write_tokens: 1,
+        },
+        output_tokens: 1,
+      },
+      { service_tier: "priority" }
+    );
+    const clientResponse = await ProxyResponseHandler.dispatch(session, response);
+    await clientResponse.text();
+    await drainAsyncTasks();
+
+    expect(clientResponse.status).toBe(200);
+    expect(updateMessageRequestCostWithBreakdown).not.toHaveBeenCalled();
+    expect(rateLimitCosts).toEqual([]);
+    expect(persistedDetails.at(-1)?.specialSettings).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "billing_settlement",
+          status: "unsupported",
+          reason: "gpt56_priority_long_context_unsupported",
+          observedInputTokens: 272_001,
+        }),
+      ])
+    );
+  });
+
   it("codex fast: requested mode ignores actual priority when request tier is default", async () => {
     vi.mocked(getSystemSettings).mockResolvedValue(makeSystemSettings("redirected"));
     vi.mocked(updateMessageRequestDetails).mockResolvedValue(undefined);
@@ -585,6 +848,7 @@ describe("Billing model source - Redis session cost vs DB cost", () => {
     vi.mocked(updateMessageRequestCostWithBreakdown).mockImplementation(
       async (_id: number, costUsd: unknown) => {
         dbCosts.push(String(costUsd));
+        return String(costUsd);
       }
     );
     const rateLimitCosts = captureRateLimitCosts();
@@ -654,6 +918,7 @@ describe("Billing model source - Redis session cost vs DB cost", () => {
     vi.mocked(updateMessageRequestCostWithBreakdown).mockImplementation(
       async (_id: number, costUsd: unknown) => {
         dbCosts.push(String(costUsd));
+        return String(costUsd);
       }
     );
     const rateLimitCosts = captureRateLimitCosts();
@@ -714,6 +979,7 @@ describe("Billing model source - Redis session cost vs DB cost", () => {
     vi.mocked(updateMessageRequestCostWithBreakdown).mockImplementation(
       async (_id: number, costUsd: unknown) => {
         dbCosts.push(String(costUsd));
+        return String(costUsd);
       }
     );
     const rateLimitCosts = captureRateLimitCosts();
@@ -780,6 +1046,7 @@ describe("Billing model source - Redis session cost vs DB cost", () => {
     vi.mocked(updateMessageRequestCostWithBreakdown).mockImplementation(
       async (_id: number, costUsd: unknown) => {
         dbCosts.push(String(costUsd));
+        return String(costUsd);
       }
     );
     const rateLimitCosts = captureRateLimitCosts();
@@ -839,6 +1106,7 @@ describe("Billing model source - Redis session cost vs DB cost", () => {
     vi.mocked(updateMessageRequestCostWithBreakdown).mockImplementation(
       async (_id: number, costUsd: unknown) => {
         dbCosts.push(String(costUsd));
+        return String(costUsd);
       }
     );
     const rateLimitCosts = captureRateLimitCosts();
@@ -898,6 +1166,7 @@ describe("Billing model source - Redis session cost vs DB cost", () => {
     vi.mocked(updateMessageRequestCostWithBreakdown).mockImplementation(
       async (_id: number, costUsd: unknown) => {
         dbCosts.push(String(costUsd));
+        return String(costUsd);
       }
     );
     const rateLimitCosts = captureRateLimitCosts();
@@ -957,6 +1226,7 @@ describe("Billing model source - Redis session cost vs DB cost", () => {
     vi.mocked(updateMessageRequestCostWithBreakdown).mockImplementation(
       async (_id: number, costUsd: unknown) => {
         dbCosts.push(String(costUsd));
+        return String(costUsd);
       }
     );
     const rateLimitCosts = captureRateLimitCosts();
@@ -1016,6 +1286,7 @@ describe("Billing model source - Redis session cost vs DB cost", () => {
     vi.mocked(updateMessageRequestCostWithBreakdown).mockImplementation(
       async (_id: number, costUsd: unknown) => {
         dbCosts.push(String(costUsd));
+        return String(costUsd);
       }
     );
     const rateLimitCosts = captureRateLimitCosts();
@@ -1087,6 +1358,7 @@ describe("模型重定向后的图片按次计费", () => {
       async (_id: number, costUsd: unknown, breakdown?: Record<string, unknown>) => {
         dbCosts.push(String(costUsd));
         storedBreakdown = breakdown;
+        return String(costUsd);
       }
     );
 
@@ -1326,7 +1598,7 @@ describe("模型重定向后的图片按次计费", () => {
       return makePriceRecord(modelName, { input_cost_per_request: 0.01 }, "manual");
     });
 
-    vi.mocked(updateMessageRequestCostWithBreakdown).mockResolvedValue(undefined);
+    vi.mocked(updateMessageRequestCostWithBreakdown).mockResolvedValue("0.01");
     vi.mocked(updateMessageRequestDetails).mockResolvedValue(undefined);
     vi.mocked(RateLimitService.trackCost).mockResolvedValue(undefined);
 

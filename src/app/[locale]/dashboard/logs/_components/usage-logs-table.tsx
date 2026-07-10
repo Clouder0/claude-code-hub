@@ -17,6 +17,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
+import { resolveBillingSettlement } from "@/lib/usage-logs/billing-audit";
 import { cn, formatTokenAmount } from "@/lib/utils";
 import { copyTextToClipboard } from "@/lib/utils/clipboard";
 import type { CurrencyCode } from "@/lib/utils/currency";
@@ -125,6 +126,7 @@ export function UsageLogsTable({
                 const isWarmupSkipped = log.blockedBy === "warmup";
                 const isMutedRow = isNonBilling || isWarmupSkipped;
                 const pricingResolution = getPricingResolutionSpecialSetting(log.specialSettings);
+                const billingSettlement = resolveBillingSettlement(log.specialSettings);
 
                 // 计算倍率（用于 Provider 列 Badge 和成本明细）
                 const successfulProvider =
@@ -400,6 +402,10 @@ export function UsageLogsTable({
                         </TooltipProvider>
                       ) : isNonBilling ? (
                         "-"
+                      ) : billingSettlement ? (
+                        <Badge variant="destructive" className="text-[10px] leading-tight px-1">
+                          {t("logs.billingDetails.settlementUnsupported")}
+                        </Badge>
                       ) : log.costUsd != null ? (
                         <TooltipProvider>
                           <Tooltip delayDuration={250}>
@@ -522,7 +528,9 @@ export function UsageLogsTable({
                                               t("logs.billingDetails.hedgeLoserShort")}
                                           </span>
                                           <span className="font-mono">
-                                            {formatCurrency(loser.costUsd, currencyCode, 6)}
+                                            {loser.billingStatus === "unsupported"
+                                              ? t("logs.billingDetails.settlementUnsupported")
+                                              : formatCurrency(loser.costUsd, currencyCode, 6)}
                                           </span>
                                         </div>
                                       ))}
@@ -627,8 +635,11 @@ export function UsageLogsTable({
                         billingModelSource={billingModelSource}
                         specialSettings={log.specialSettings}
                         inputTokens={log.inputTokens}
+                        observedInputTokens={log.observedInputTokens}
                         outputTokens={log.outputTokens}
                         cacheCreationInputTokens={log.cacheCreationInputTokens}
+                        cacheWriteTokensReported={log.cacheWriteTokensReported}
+                        cacheWriteAccounting={log.cacheWriteAccounting}
                         cacheCreation5mInputTokens={log.cacheCreation5mInputTokens}
                         cacheCreation1hInputTokens={log.cacheCreation1hInputTokens}
                         cacheReadInputTokens={log.cacheReadInputTokens}

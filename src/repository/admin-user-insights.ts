@@ -1,11 +1,12 @@
 "use server";
 
-import { and, avg, count, desc, eq, gte, lt, sql, sum } from "drizzle-orm";
+import { and, avg, count, desc, eq, gte, lt, type SQL, sql, sum } from "drizzle-orm";
 import { db } from "@/drizzle/db";
 import { providers, usageLedger } from "@/drizzle/schema";
 import { Decimal, toCostDecimal } from "@/lib/utils/currency";
 import { resolveSystemTimezone } from "@/lib/utils/timezone";
 import { LEDGER_BILLING_CONDITION } from "./_shared/ledger-conditions";
+import { buildProviderBillingEventsQuery } from "./_shared/provider-billing-events";
 import { getSystemSettings } from "./system-config";
 
 export interface UserInsightsOverviewMetrics {
@@ -54,6 +55,26 @@ async function buildSystemTimezoneDateConditions(startDate?: string, endDate?: s
         usageLedger.createdAt,
         sql`((${endDate}::date + INTERVAL '1 day') AT TIME ZONE ${timezone})`
       )
+    );
+  }
+
+  return conditions;
+}
+
+function buildProviderEventDateConditions(
+  startDate: string | undefined,
+  endDate: string | undefined,
+  timezone: string,
+  createdAtColumn: SQL = sql`provider_billing_event.created_at`
+): SQL[] {
+  const conditions: SQL[] = [];
+
+  if (startDate) {
+    conditions.push(sql`${createdAtColumn} >= (${startDate}::date AT TIME ZONE ${timezone})`);
+  }
+  if (endDate) {
+    conditions.push(
+      sql`${createdAtColumn} < ((${endDate}::date + INTERVAL '1 day') AT TIME ZONE ${timezone})`
     );
   }
 
@@ -119,6 +140,55 @@ export async function getUserModelBreakdown(
       : sql<string>`COALESCE(${usageLedger.model}, ${usageLedger.originalModel})`;
   const modelField = sql<string>`NULLIF(TRIM(${rawModelField}), '')`;
 
+  if (filters?.providerId) {
+    const timezone = await resolveSystemTimezone();
+    const eventDateConditions = buildProviderEventDateConditions(startDate, endDate, timezone);
+    const ledgerDateConditions = buildProviderEventDateConditions(
+      startDate,
+      endDate,
+      timezone,
+      sql`ledger.created_at`
+    );
+    const eventModelField =
+      billingModelSource === "original"
+        ? sql<string>`NULLIF(TRIM(COALESCE(provider_billing_event.original_model, provider_billing_event.model)), '')`
+        : sql<string>`NULLIF(TRIM(COALESCE(provider_billing_event.model, provider_billing_event.original_model)), '')`;
+    const eventConditions = [
+      sql`provider_billing_event.user_id = ${userId}`,
+      sql`provider_billing_event.provider_id = ${filters.providerId}`,
+      ...eventDateConditions,
+    ];
+    if (filters.keyId) {
+      eventConditions.push(
+        sql`provider_billing_event.key_value = (SELECT k."key" FROM "keys" k WHERE k."id" = ${filters.keyId})`
+      );
+    }
+
+    return await db
+      .select({
+        model: eventModelField,
+        requests: sql<number>`count(*)::int`,
+        cost: sql<number>`COALESCE(sum(provider_billing_event.cost_usd)::double precision, 0)`,
+        inputTokens: sql<number>`COALESCE(sum(provider_billing_event.input_tokens)::double precision, 0)`,
+        outputTokens: sql<number>`COALESCE(sum(provider_billing_event.output_tokens)::double precision, 0)`,
+        cacheCreationTokens: sql<number>`COALESCE(sum(provider_billing_event.cache_creation_input_tokens)::double precision, 0)`,
+        cacheReadTokens: sql<number>`COALESCE(sum(provider_billing_event.cache_read_input_tokens)::double precision, 0)`,
+      })
+      .from(
+        sql`(${buildProviderBillingEventsQuery({
+          providerId: filters.providerId,
+          userId,
+          ledgerCreatedAtCondition:
+            ledgerDateConditions.length > 0
+              ? sql.join(ledgerDateConditions, sql` AND `)
+              : undefined,
+        })}) AS provider_billing_event`
+      )
+      .where(and(...eventConditions))
+      .groupBy(eventModelField)
+      .orderBy(desc(sql`sum(provider_billing_event.cost_usd)`));
+  }
+
   const conditions = [
     LEDGER_BILLING_CONDITION,
     eq(usageLedger.userId, userId),
@@ -155,7 +225,7 @@ export async function getUserModelBreakdown(
 
 /**
  * Get provider-level usage breakdown for a specific user.
- * JOINs usageLedger with providers table and groups by provider.
+ * Expands request totals into winner/hedge-loser billing events and groups by provider.
  */
 export async function getUserProviderBreakdown(
   userId: number,
@@ -163,21 +233,25 @@ export async function getUserProviderBreakdown(
   endDate?: string,
   filters?: { keyId?: number; model?: string }
 ): Promise<AdminUserProviderBreakdownItem[]> {
-  const conditions = [
-    LEDGER_BILLING_CONDITION,
-    eq(usageLedger.userId, userId),
-    ...(await buildSystemTimezoneDateConditions(startDate, endDate)),
-  ];
+  const timezone = await resolveSystemTimezone();
+  const eventDateConditions = buildProviderEventDateConditions(startDate, endDate, timezone);
+  const ledgerDateConditions = buildProviderEventDateConditions(
+    startDate,
+    endDate,
+    timezone,
+    sql`ledger.created_at`
+  );
+  const conditions = [sql`provider_billing_event.user_id = ${userId}`, ...eventDateConditions];
 
   if (filters?.keyId) {
     conditions.push(
-      sql`${usageLedger.key} = (SELECT k."key" FROM "keys" k WHERE k."id" = ${filters.keyId})`
+      sql`provider_billing_event.key_value = (SELECT k."key" FROM "keys" k WHERE k."id" = ${filters.keyId})`
     );
   }
 
   if (filters?.model) {
     conditions.push(
-      sql`(${usageLedger.model} ILIKE ${filters.model} OR ${usageLedger.originalModel} ILIKE ${filters.model})`
+      sql`(provider_billing_event.model ILIKE ${filters.model} OR provider_billing_event.original_model ILIKE ${filters.model})`
     );
   }
 
@@ -186,17 +260,23 @@ export async function getUserProviderBreakdown(
       providerId: providers.id,
       providerName: providers.name,
       requests: sql<number>`count(*)::int`,
-      cost: sql<number>`COALESCE(sum(${usageLedger.costUsd})::double precision, 0)`,
-      inputTokens: sql<number>`COALESCE(sum(${usageLedger.inputTokens})::double precision, 0)`,
-      outputTokens: sql<number>`COALESCE(sum(${usageLedger.outputTokens})::double precision, 0)`,
-      cacheCreationTokens: sql<number>`COALESCE(sum(${usageLedger.cacheCreationInputTokens})::double precision, 0)`,
-      cacheReadTokens: sql<number>`COALESCE(sum(${usageLedger.cacheReadInputTokens})::double precision, 0)`,
+      cost: sql<number>`COALESCE(sum(provider_billing_event.cost_usd)::double precision, 0)`,
+      inputTokens: sql<number>`COALESCE(sum(provider_billing_event.input_tokens)::double precision, 0)`,
+      outputTokens: sql<number>`COALESCE(sum(provider_billing_event.output_tokens)::double precision, 0)`,
+      cacheCreationTokens: sql<number>`COALESCE(sum(provider_billing_event.cache_creation_input_tokens)::double precision, 0)`,
+      cacheReadTokens: sql<number>`COALESCE(sum(provider_billing_event.cache_read_input_tokens)::double precision, 0)`,
     })
-    .from(usageLedger)
-    .innerJoin(providers, eq(usageLedger.finalProviderId, providers.id))
+    .from(
+      sql`(${buildProviderBillingEventsQuery({
+        userId,
+        ledgerCreatedAtCondition:
+          ledgerDateConditions.length > 0 ? sql.join(ledgerDateConditions, sql` AND `) : undefined,
+      })}) AS provider_billing_event`
+    )
+    .innerJoin(providers, sql`provider_billing_event.provider_id = ${providers.id}`)
     .where(and(...conditions))
     .groupBy(providers.id, providers.name)
-    .orderBy(desc(sql`sum(${usageLedger.costUsd})`));
+    .orderBy(desc(sql`sum(provider_billing_event.cost_usd)`));
 
   return rows;
 }

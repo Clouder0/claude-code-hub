@@ -4,6 +4,11 @@ import {
 } from "@/app/v1/_lib/proxy/anthropic-actual-response-model";
 import { ResponseFixer } from "@/app/v1/_lib/proxy/response-fixer";
 import { AsyncTaskManager } from "@/lib/async-task-manager";
+import {
+  allocateOpenAIUsage,
+  type CacheWriteAccounting,
+  shouldInferOpenAICacheWrite,
+} from "@/lib/billing/openai-usage-accounting";
 import { getEnvConfig } from "@/lib/config/env.schema";
 import { getCachedSystemSettings } from "@/lib/config/system-settings-cache";
 import { emitProxyLangfuseTrace } from "@/lib/langfuse/emit-proxy-trace";
@@ -15,6 +20,7 @@ import { deleteLiveChain } from "@/lib/redis/live-chain-store";
 import { SessionManager } from "@/lib/session-manager";
 import { SessionTracker } from "@/lib/session-tracker";
 import { CODEX_1M_CONTEXT_TOKEN_THRESHOLD } from "@/lib/special-attributes";
+import { resolveRequestBillingRates } from "@/lib/utils/billing-rate-resolution";
 import type {
   CostBreakdown,
   RequestCostCalculationOptions,
@@ -24,7 +30,10 @@ import {
   calculateRequestCost,
   calculateRequestCostBreakdown,
   matchLongContextPricing,
+  resolvePricingSnapshotForCostBreakdown,
   sanitizeMultiplier,
+  toStoredPricingSnapshot,
+  UnsupportedPricingCombinationError,
 } from "@/lib/utils/cost-calculation";
 import { COST_SCALE, Decimal } from "@/lib/utils/currency";
 import { isNonBillingEndpoint } from "@/lib/utils/performance-formatter";
@@ -36,12 +45,18 @@ import {
 } from "@/lib/utils/upstream-error-detection";
 import {
   addMessageRequestHedgeLoserCost,
+  type MessageRequestBillingSettlement,
   updateMessageRequestCostWithBreakdown,
   updateMessageRequestDetails,
   updateMessageRequestDuration,
+  updateMessageRequestUnsupportedBillingSettlement,
   updateMessageRequestWinnerCost,
 } from "@/repository/message";
-import type { HedgeLoserBilling, StoredCostBreakdown } from "@/types/cost-breakdown";
+import type {
+  HedgeLoserBilling,
+  StoredCostBreakdown,
+  StoredPricingContext,
+} from "@/types/cost-breakdown";
 import type { Provider } from "@/types/provider";
 import type { SessionUsageUpdate } from "@/types/session";
 import type { LongContextPricingSpecialSetting } from "@/types/special-settings";
@@ -423,6 +438,7 @@ function discardBeforeResponseBodySnapshot(session: ProxySession): void {
 }
 
 export type UsageMetrics = {
+  observed_input_tokens?: number;
   input_tokens?: number;
   output_tokens?: number;
   cache_creation_input_tokens?: number;
@@ -430,6 +446,9 @@ export type UsageMetrics = {
   cache_creation_1h_input_tokens?: number;
   cache_ttl?: "5m" | "1h" | "mixed";
   cache_read_input_tokens?: number;
+  cache_read_tokens_observed?: boolean;
+  cache_write_tokens_reported?: number | null;
+  cache_write_accounting?: CacheWriteAccounting;
   // 图片 modality tokens（从 candidatesTokensDetails/promptTokensDetails 提取）
   input_image_tokens?: number;
   output_image_tokens?: number;
@@ -493,7 +512,7 @@ function ensurePricingResolutionSpecialSetting(
     type: "pricing_resolution",
     scope: "billing",
     hit: true,
-    modelName: session.getCurrentModel() ?? resolvedPricing.resolvedModelName,
+    modelName: session.getBillingModel() ?? resolvedPricing.resolvedModelName,
     resolvedModelName: resolvedPricing.resolvedModelName,
     resolvedPricingProviderKey: resolvedPricing.resolvedPricingProviderKey,
     source: resolvedPricing.source,
@@ -508,7 +527,7 @@ function getRequestedCodexServiceTier(
     return null;
   }
 
-  const request = session.request.message as Record<string, unknown>;
+  const request = session.getBillingRequestMessage();
   return typeof request.service_tier === "string" ? request.service_tier : null;
 }
 
@@ -553,13 +572,52 @@ export function parseServiceTierFromResponseText(responseText: string): string |
   return lastSeenServiceTier;
 }
 
-type CodexPriorityBillingDecision = {
+type PriorityBillingDecision = {
+  providerType: "codex" | "openai-compatible";
   requestedServiceTier: string | null;
   actualServiceTier: string | null;
   billingSourcePreference: Awaited<ReturnType<ProxySession["getCodexPriorityBillingSource"]>>;
   resolvedFrom: "requested" | "actual" | null;
   effectivePriority: boolean;
 };
+
+async function resolvePriorityBillingDecision(
+  session: ProxySession,
+  actualServiceTier: string | null,
+  options?: {
+    provider?: Provider | null;
+    requestedServiceTier?: string | null;
+  }
+): Promise<PriorityBillingDecision | null> {
+  const provider = options?.provider ?? session.provider;
+  if (provider?.providerType === "codex") {
+    return resolveCodexPriorityBillingDecision(session, actualServiceTier, options);
+  }
+
+  if (provider?.providerType !== "openai-compatible") {
+    return null;
+  }
+
+  const request = session.getBillingRequestMessage();
+  const requestedServiceTier =
+    options?.requestedServiceTier !== undefined
+      ? options.requestedServiceTier
+      : typeof request.service_tier === "string"
+        ? request.service_tier
+        : null;
+  const resolvedFrom =
+    actualServiceTier != null ? "actual" : requestedServiceTier ? "requested" : null;
+  const effectiveTier = actualServiceTier ?? requestedServiceTier;
+
+  return {
+    providerType: "openai-compatible",
+    requestedServiceTier,
+    actualServiceTier,
+    billingSourcePreference: "actual",
+    resolvedFrom,
+    effectivePriority: effectiveTier === "priority",
+  };
+}
 
 async function resolveCodexPriorityBillingDecision(
   session: ProxySession,
@@ -568,7 +626,7 @@ async function resolveCodexPriorityBillingDecision(
     provider?: Provider | null;
     requestedServiceTier?: string | null;
   }
-): Promise<CodexPriorityBillingDecision | null> {
+): Promise<PriorityBillingDecision | null> {
   const provider = options?.provider ?? session.provider;
   if (provider?.providerType !== "codex") {
     return null;
@@ -609,6 +667,7 @@ async function resolveCodexPriorityBillingDecision(
   }
 
   return {
+    providerType: "codex",
     requestedServiceTier,
     actualServiceTier,
     billingSourcePreference,
@@ -617,32 +676,45 @@ async function resolveCodexPriorityBillingDecision(
   };
 }
 
-function ensureCodexServiceTierResultSpecialSetting(
+function ensureServiceTierResultSpecialSetting(
   session: ProxySession,
-  decision: CodexPriorityBillingDecision | null
+  decision: PriorityBillingDecision | null
 ): void {
   if (!decision) {
     return;
   }
 
-  const existing = session
-    .getSpecialSettings()
-    ?.find((setting) => setting.type === "codex_service_tier_result");
+  const settingType =
+    decision.providerType === "codex" ? "codex_service_tier_result" : "openai_service_tier_result";
+  if (session.getSpecialSettings()?.some((setting) => setting.type === settingType)) {
+    return;
+  }
 
-  if (existing && existing.type === "codex_service_tier_result") {
+  const hit =
+    decision.effectivePriority ||
+    decision.requestedServiceTier != null ||
+    decision.actualServiceTier != null;
+  if (decision.providerType === "codex") {
+    session.addSpecialSetting({
+      type: "codex_service_tier_result",
+      scope: "response",
+      hit,
+      requestedServiceTier: decision.requestedServiceTier,
+      actualServiceTier: decision.actualServiceTier,
+      billingSourcePreference: decision.billingSourcePreference,
+      resolvedFrom: decision.resolvedFrom,
+      effectivePriority: decision.effectivePriority,
+    });
     return;
   }
 
   session.addSpecialSetting({
-    type: "codex_service_tier_result",
+    type: "openai_service_tier_result",
     scope: "response",
-    hit:
-      decision.effectivePriority ||
-      decision.requestedServiceTier != null ||
-      decision.actualServiceTier != null,
+    hit,
+    providerType: "openai-compatible",
     requestedServiceTier: decision.requestedServiceTier,
     actualServiceTier: decision.actualServiceTier,
-    billingSourcePreference: decision.billingSourcePreference,
     resolvedFrom: decision.resolvedFrom,
     effectivePriority: decision.effectivePriority,
   });
@@ -682,18 +754,60 @@ function ensureLongContextPricingAudit(
   }
 }
 
+function ensureUnsupportedBillingSettlement(
+  session: ProxySession,
+  usage: UsageMetrics,
+  error: UnsupportedPricingCombinationError,
+  resolvedPricing: ResolvedPricingResult | null
+): void {
+  const cacheWriteTokens =
+    typeof usage.cache_creation_input_tokens === "number"
+      ? usage.cache_creation_input_tokens
+      : (usage.cache_creation_5m_input_tokens ?? 0) + (usage.cache_creation_1h_input_tokens ?? 0);
+  const observedInputTokens =
+    usage.observed_input_tokens ??
+    (usage.input_tokens ?? 0) +
+      cacheWriteTokens +
+      (usage.cache_read_input_tokens ?? 0) +
+      (usage.input_image_tokens ?? 0);
+  const alreadyRecorded = session
+    .getSpecialSettings()
+    ?.some(
+      (setting) =>
+        setting.type === "billing_settlement" &&
+        setting.status === "unsupported" &&
+        setting.reason === error.reason
+    );
+  if (alreadyRecorded) {
+    return;
+  }
+
+  session.addSpecialSetting({
+    type: "billing_settlement",
+    scope: "billing",
+    hit: true,
+    status: "unsupported",
+    reason: error.reason,
+    observedInputTokens,
+    missingFields: [...error.missingFields],
+    ...(resolvedPricing ? { pricingContext: buildStoredPricingContext(resolvedPricing) } : {}),
+  });
+}
+
 function buildCostCalculationOptions(
   costMultiplier: number,
   context1mApplied: boolean,
   priorityServiceTierApplied: boolean,
   longContextPricing: ResolvedLongContextPricing | null,
-  groupCostMultiplier: number = 1
+  groupCostMultiplier: number = 1,
+  modelName: string | null = null
 ): RequestCostCalculationOptions {
   return {
     multiplier: costMultiplier,
     groupMultiplier: groupCostMultiplier,
     context1mApplied,
     priorityServiceTierApplied,
+    modelName,
     longContextPricing,
   };
 }
@@ -1615,7 +1729,7 @@ export class ProxyResponseHandler {
             statusCode: finalizedStatusCode,
             ttfbMs: session.ttfbMs ?? duration,
             providerChain: session.getProviderChain(),
-            model: session.getCurrentModel() ?? undefined, // 更新重定向后的模型
+            model: session.getBillingModel() ?? undefined, // 更新最终发往上游的模型
             providerId: session.provider?.id, // 更新最终供应商ID（重试切换后）
             context1mApplied: session.getContext1mApplied(),
             swapCacheTtlApplied: session.provider?.swapCacheTtlBilling ?? false,
@@ -1628,6 +1742,7 @@ export class ProxyResponseHandler {
           await SessionManager.clearSessionProvider(session.sessionId);
 
           const sessionUsagePayload: SessionUsageUpdate = {
+            requestSequence: session.requestSequence,
             status: finalizedStatusCode >= 200 && finalizedStatusCode < 300 ? "completed" : "error",
             statusCode: finalizedStatusCode,
           };
@@ -1676,16 +1791,22 @@ export class ProxyResponseHandler {
         const usageResult = parseUsageFromResponseText(responseText, provider.providerType);
         usageMetrics = usageResult.usageMetrics;
         const actualServiceTier = parseServiceTierFromResponseText(responseText);
-        const codexPriorityBillingDecision = await resolveCodexPriorityBillingDecision(
+        const priorityBillingDecision = await resolvePriorityBillingDecision(
           session,
           actualServiceTier
         );
         if (!isNonBillingUsageEndpoint(session)) {
-          ensureCodexServiceTierResultSpecialSetting(session, codexPriorityBillingDecision);
+          ensureServiceTierResultSpecialSetting(session, priorityBillingDecision);
         }
-        const priorityServiceTierApplied = codexPriorityBillingDecision?.effectivePriority ?? false;
+        const priorityServiceTierApplied = priorityBillingDecision?.effectivePriority ?? false;
 
         if (usageMetrics) {
+          usageMetrics = await settleOpenAIUsageAccounting(
+            session,
+            provider,
+            usageMetrics,
+            priorityServiceTierApplied
+          );
           usageMetrics = normalizeUsageWithSwap(
             usageMetrics,
             session,
@@ -1705,7 +1826,11 @@ export class ProxyResponseHandler {
         );
 
         if (billableUsageMetrics) {
-          maybeSetCodexContext1m(session, provider, billableUsageMetrics.input_tokens);
+          maybeSetCodexContext1m(
+            session,
+            provider,
+            billableUsageMetrics.observed_input_tokens ?? billableUsageMetrics.input_tokens
+          );
         }
 
         // Codex: Extract prompt_cache_key and update session binding
@@ -1757,6 +1882,7 @@ export class ProxyResponseHandler {
           );
         }
 
+        let costSettled = false;
         if (billableUsageMetrics && messageContext) {
           const billing = sessionBillingInputs(session, provider, priorityServiceTierApplied);
           const costUpdateResult = await updateRequestCostFromUsage(
@@ -1768,6 +1894,7 @@ export class ProxyResponseHandler {
           if (costUpdateResult.longContextPricingApplied) {
             ensureLongContextPricingAudit(session, costUpdateResult.longContextPricing);
           }
+          costSettled = costUpdateResult.costSettled;
 
           // 追踪消费到 Redis（用于限流）
           await trackCostToRedis(session, billableUsageMetrics, billing, {
@@ -1780,15 +1907,18 @@ export class ProxyResponseHandler {
         let costUsdStr: string | undefined;
         let rawCostUsdStr: string | undefined;
         let costBreakdown: CostBreakdown | undefined;
-        if (billableUsageMetrics) {
+        if (billableUsageMetrics && costSettled) {
           try {
             if (session.request.model) {
               const resolvedPricing = await session.getResolvedPricingByBillingSource(provider);
               if (resolvedPricing) {
                 ensurePricingResolutionSpecialSetting(session, resolvedPricing);
                 const longContextPricing =
-                  matchLongContextPricing(billableUsageMetrics, resolvedPricing.priceData)
-                    ?.pricing ?? null;
+                  matchLongContextPricing(
+                    billableUsageMetrics,
+                    resolvedPricing.priceData,
+                    resolvedPricing.resolvedModelName
+                  )?.pricing ?? null;
                 const cost = calculateRequestCost(
                   billableUsageMetrics,
                   resolvedPricing.priceData,
@@ -1797,7 +1927,8 @@ export class ProxyResponseHandler {
                     session.getContext1mApplied(),
                     priorityServiceTierApplied,
                     longContextPricing,
-                    session.getGroupCostMultiplier()
+                    session.getGroupCostMultiplier(),
+                    resolvedPricing.resolvedModelName
                   )
                 );
                 if (cost.gt(0)) {
@@ -1812,7 +1943,9 @@ export class ProxyResponseHandler {
                       1.0,
                       session.getContext1mApplied(),
                       priorityServiceTierApplied,
-                      longContextPricing
+                      longContextPricing,
+                      1,
+                      resolvedPricing.resolvedModelName
                     )
                   );
                   if (rawCost.gt(0)) {
@@ -1829,6 +1962,7 @@ export class ProxyResponseHandler {
                     {
                       context1mApplied: session.getContext1mApplied(),
                       priorityServiceTierApplied,
+                      modelName: resolvedPricing.resolvedModelName,
                       longContextPricing,
                     }
                   );
@@ -1851,6 +1985,7 @@ export class ProxyResponseHandler {
           session.shouldTrackSessionObservability()
         ) {
           void SessionManager.updateSessionUsage(session.sessionId, {
+            requestSequence: session.requestSequence,
             inputTokens: usageMetrics?.input_tokens,
             outputTokens: usageMetrics?.output_tokens,
             cacheCreationInputTokens: usageMetrics?.cache_creation_input_tokens,
@@ -1897,6 +2032,7 @@ export class ProxyResponseHandler {
           // 保存扩展信息（status code, tokens, provider chain）
           await updateMessageRequestDetails(messageContext.id, {
             statusCode: statusCode,
+            ...buildUsageAuditPersistence(usageMetrics),
             inputTokens: usageMetrics?.input_tokens,
             outputTokens: usageMetrics?.output_tokens,
             ttfbMs: session.ttfbMs ?? duration,
@@ -1906,7 +2042,7 @@ export class ProxyResponseHandler {
             cacheCreation1hInputTokens: usageMetrics?.cache_creation_1h_input_tokens,
             cacheTtlApplied: usageMetrics?.cache_ttl ?? null,
             providerChain: session.getProviderChain(),
-            model: session.getCurrentModel() ?? undefined, // 更新重定向后的模型
+            model: session.getBillingModel() ?? undefined, // 更新最终发往上游的模型
             actualResponseModel: extractActualResponseModelForProvider(
               provider.providerType,
               false,
@@ -2783,16 +2919,22 @@ export class ProxyResponseHandler {
         usageForCost = usageResult.usageMetrics;
 
         const actualServiceTier = parseServiceTierFromResponseText(allContent);
-        const codexPriorityBillingDecision = await resolveCodexPriorityBillingDecision(
+        const priorityBillingDecision = await resolvePriorityBillingDecision(
           session,
           actualServiceTier
         );
         if (!isNonBillingUsageEndpoint(session)) {
-          ensureCodexServiceTierResultSpecialSetting(session, codexPriorityBillingDecision);
+          ensureServiceTierResultSpecialSetting(session, priorityBillingDecision);
         }
-        const priorityServiceTierApplied = codexPriorityBillingDecision?.effectivePriority ?? false;
+        const priorityServiceTierApplied = priorityBillingDecision?.effectivePriority ?? false;
 
         if (usageForCost) {
+          usageForCost = await settleOpenAIUsageAccounting(
+            session,
+            provider,
+            usageForCost,
+            priorityServiceTierApplied
+          );
           usageForCost = normalizeUsageWithSwap(
             usageForCost,
             session,
@@ -2800,7 +2942,11 @@ export class ProxyResponseHandler {
           );
         }
 
-        maybeSetCodexContext1m(session, provider, usageForCost?.input_tokens);
+        maybeSetCodexContext1m(
+          session,
+          provider,
+          usageForCost?.observed_input_tokens ?? usageForCost?.input_tokens
+        );
 
         // Codex: Extract prompt_cache_key from SSE events and update session binding
         if (provider.providerType === "codex" && session.sessionId && provider.id) {
@@ -2861,18 +3007,21 @@ export class ProxyResponseHandler {
         });
 
         // Calculate cost for session tracking (with multiplier) and Langfuse (raw)
-        let costUsdStr: string | undefined;
+        let costUsdStr: string | undefined = costUpdateResult.costUsd ?? undefined;
         let rawCostUsdStr: string | undefined;
         let costBreakdown: CostBreakdown | undefined;
-        if (billableUsageForCost) {
+        if (billableUsageForCost && costUpdateResult.costSettled) {
           try {
             if (session.request.model) {
               const resolvedPricing = await session.getResolvedPricingByBillingSource(provider);
               if (resolvedPricing) {
                 ensurePricingResolutionSpecialSetting(session, resolvedPricing);
                 const longContextPricing =
-                  matchLongContextPricing(billableUsageForCost, resolvedPricing.priceData)
-                    ?.pricing ?? null;
+                  matchLongContextPricing(
+                    billableUsageForCost,
+                    resolvedPricing.priceData,
+                    resolvedPricing.resolvedModelName
+                  )?.pricing ?? null;
                 const cost = calculateRequestCost(
                   billableUsageForCost,
                   resolvedPricing.priceData,
@@ -2881,10 +3030,11 @@ export class ProxyResponseHandler {
                     session.getContext1mApplied(),
                     priorityServiceTierApplied,
                     longContextPricing,
-                    session.getGroupCostMultiplier()
+                    session.getGroupCostMultiplier(),
+                    resolvedPricing.resolvedModelName
                   )
                 );
-                if (cost.gt(0)) {
+                if (cost.gt(0) && costUsdStr === undefined) {
                   costUsdStr = cost.toString();
                 }
                 // Raw cost without multiplier for Langfuse
@@ -2896,14 +3046,16 @@ export class ProxyResponseHandler {
                       1.0,
                       session.getContext1mApplied(),
                       priorityServiceTierApplied,
-                      longContextPricing
+                      longContextPricing,
+                      1,
+                      resolvedPricing.resolvedModelName
                     )
                   );
                   if (rawCost.gt(0)) {
                     rawCostUsdStr = rawCost.toString();
                   }
                 } else {
-                  rawCostUsdStr = costUsdStr;
+                  rawCostUsdStr = cost.gt(0) ? cost.toString() : undefined;
                 }
                 // Cost breakdown for Langfuse (raw, no multiplier)
                 try {
@@ -2913,6 +3065,7 @@ export class ProxyResponseHandler {
                     {
                       context1mApplied: session.getContext1mApplied(),
                       priorityServiceTierApplied,
+                      modelName: resolvedPricing.resolvedModelName,
                       longContextPricing,
                     }
                   );
@@ -2931,6 +3084,7 @@ export class ProxyResponseHandler {
         // 更新 session 使用量到 Redis（用于实时监控）
         if (session.sessionId) {
           const payload: SessionUsageUpdate = {
+            requestSequence: session.requestSequence,
             status: effectiveStatusCode >= 200 && effectiveStatusCode < 300 ? "completed" : "error",
             statusCode: effectiveStatusCode,
             ...(streamErrorMessage ? { errorMessage: streamErrorMessage } : {}),
@@ -2983,6 +3137,7 @@ export class ProxyResponseHandler {
         // 保存扩展信息（status code, tokens, provider chain）
         await updateMessageRequestDetails(messageContext.id, {
           statusCode: effectiveStatusCode,
+          ...buildUsageAuditPersistence(usageForCost),
           inputTokens: usageForCost?.input_tokens,
           outputTokens: usageForCost?.output_tokens,
           ttfbMs: session.ttfbMs,
@@ -2993,7 +3148,7 @@ export class ProxyResponseHandler {
           cacheTtlApplied: usageForCost?.cache_ttl ?? null,
           providerChain: session.getProviderChain(),
           ...(streamErrorMessage ? { errorMessage: streamErrorMessage } : {}),
-          model: currentRequestedModel ?? undefined, // 更新重定向后的模型
+          model: session.getBillingModel() ?? undefined, // 持久化最终发往上游的模型
           actualResponseModel: finalActualResponseModel,
           providerId: providerIdForPersistence ?? session.provider?.id, // 更新最终供应商ID（重试切换后）
           context1mApplied: session.getContext1mApplied(),
@@ -3575,13 +3730,17 @@ export function extractUsageMetrics(value: unknown): UsageMetrics | null {
   // Claude 格式：顶层 cache_read_input_tokens（扁平结构）
   if (typeof usage.cache_read_input_tokens === "number") {
     result.cache_read_input_tokens = usage.cache_read_input_tokens;
+    result.cache_read_tokens_observed = true;
     hasAny = true;
   }
 
+  const inputTokensDetails = usage.input_tokens_details as Record<string, unknown> | undefined;
+  const promptTokensDetails = usage.prompt_tokens_details as Record<string, unknown> | undefined;
+
   if (result.cache_read_input_tokens === undefined) {
-    const inputTokensDetails = usage.input_tokens_details as Record<string, unknown> | undefined;
     if (inputTokensDetails && typeof inputTokensDetails.cached_tokens === "number") {
       result.cache_read_input_tokens = inputTokensDetails.cached_tokens;
+      result.cache_read_tokens_observed = true;
       hasAny = true;
       logger.debug("[ResponseHandler] Parsed cached tokens from OpenAI Response API format", {
         cachedTokens: inputTokensDetails.cached_tokens,
@@ -3590,13 +3749,29 @@ export function extractUsageMetrics(value: unknown): UsageMetrics | null {
   }
 
   if (result.cache_read_input_tokens === undefined) {
-    const promptTokensDetails = usage.prompt_tokens_details as Record<string, unknown> | undefined;
     if (promptTokensDetails && typeof promptTokensDetails.cached_tokens === "number") {
       result.cache_read_input_tokens = promptTokensDetails.cached_tokens;
+      result.cache_read_tokens_observed = true;
       hasAny = true;
       logger.debug("[ResponseHandler] Parsed cached tokens from OpenAI Chat Completions format", {
         cachedTokens: promptTokensDetails.cached_tokens,
       });
+    }
+  }
+
+  if (
+    result.cache_write_tokens_reported === undefined &&
+    inputTokensDetails &&
+    typeof inputTokensDetails.cache_write_tokens === "number"
+  ) {
+    result.cache_write_tokens_reported = inputTokensDetails.cache_write_tokens;
+    hasAny = true;
+  }
+
+  if (result.cache_write_tokens_reported === undefined) {
+    if (promptTokensDetails && typeof promptTokensDetails.cache_write_tokens === "number") {
+      result.cache_write_tokens_reported = promptTokensDetails.cache_write_tokens;
+      hasAny = true;
     }
   }
 
@@ -3643,18 +3818,19 @@ export function parseUsageFromResponseText(
     if (parsedValue && typeof parsedValue === "object" && !Array.isArray(parsedValue)) {
       const parsed = parsedValue as Record<string, unknown>;
 
-      // Standard usage fields
-      applyUsageValue(parsed.usage, "json.root.usage");
-
-      // Gemini usageMetadata (direct)
-      applyUsageValue(parsed.usageMetadata, "json.root.usageMetadata");
-
-      // Handle response wrapping (some Gemini providers return {response: {...}})
+      // A completed Responses event can be wrapped in `{ response: { usage } }` while the
+      // wrapper still carries an earlier placeholder usage. The terminal nested response wins.
       if (parsed.response && typeof parsed.response === "object") {
         const responseObj = parsed.response as Record<string, unknown>;
         applyUsageValue(responseObj.usage, "json.response.usage");
         applyUsageValue(responseObj.usageMetadata, "json.response.usageMetadata");
       }
+
+      // Standard usage fields
+      applyUsageValue(parsed.usage, "json.root.usage");
+
+      // Gemini usageMetadata (direct)
+      applyUsageValue(parsed.usageMetadata, "json.root.usageMetadata");
 
       if (Array.isArray(parsed.output)) {
         for (const item of parsed.output as Array<Record<string, unknown>>) {
@@ -3689,6 +3865,7 @@ export function parseUsageFromResponseText(
   // 2. 纯 data: 格式 - Gemini
   if (!usageMetrics && isSSEText(responseText)) {
     const events = parseSSEData(responseText);
+    const usesOpenAISubsetUsage = providerType === "codex" || providerType === "openai-compatible";
 
     // Claude SSE 特殊处理：
     // - message_delta 通常包含更完整的 usage（应优先使用）
@@ -3699,6 +3876,10 @@ export function parseUsageFromResponseText(
     // Gemini SSE: usageMetadata 需要 last-wins（完整 token 计数仅在最后事件中）
     let lastGeminiUsage: UsageMetrics | null = null;
     let lastGeminiUsageRecord: Record<string, unknown> | null = null;
+    let lastOpenAIUsage: UsageMetrics | null = null;
+    let lastOpenAIUsageRecord: Record<string, unknown> | null = null;
+    let terminalOpenAIUsage: UsageMetrics | null = null;
+    let terminalOpenAIUsageRecord: Record<string, unknown> | null = null;
 
     const mergeUsageMetrics = (base: UsageMetrics | null, patch: UsageMetrics): UsageMetrics => {
       if (!base) {
@@ -3725,6 +3906,26 @@ export function parseUsageFromResponseText(
       }
 
       const data = event.data as Record<string, unknown>;
+      const responseObj =
+        data.response && typeof data.response === "object"
+          ? (data.response as Record<string, unknown>)
+          : null;
+
+      if (usesOpenAISubsetUsage) {
+        const usageValue = responseObj?.usage ?? data.usage;
+        if (usageValue && typeof usageValue === "object") {
+          const extracted = extractUsageMetrics(usageValue);
+          if (extracted) {
+            const adjusted = adjustUsageForProviderType(extracted, providerType);
+            lastOpenAIUsage = adjusted;
+            lastOpenAIUsageRecord = usageValue as Record<string, unknown>;
+            if (event.event === "response.completed" || data.type === "response.completed") {
+              terminalOpenAIUsage = adjusted;
+              terminalOpenAIUsageRecord = usageValue as Record<string, unknown>;
+            }
+          }
+        }
+      }
 
       if (event.event === "message_start") {
         // Claude message_start format: data.message.usage
@@ -3792,8 +3993,7 @@ export function parseUsageFromResponseText(
         }
 
         // Handle response wrapping in SSE
-        if (!usageMetrics && data.response && typeof data.response === "object") {
-          const responseObj = data.response as Record<string, unknown>;
+        if (!usageMetrics && responseObj) {
           applyUsageValue(responseObj.usage, `sse.${event.event}.response.usage`);
 
           // response.usageMetadata 也使用 last-wins 策略
@@ -3808,6 +4008,17 @@ export function parseUsageFromResponseText(
       }
     }
 
+    const selectedOpenAIUsage = terminalOpenAIUsage ?? lastOpenAIUsage;
+    if (usesOpenAISubsetUsage && selectedOpenAIUsage) {
+      usageMetrics = selectedOpenAIUsage;
+      usageRecord = terminalOpenAIUsageRecord ?? lastOpenAIUsageRecord;
+      logger.debug("[ResponseHandler] Final usage from OpenAI terminal/last SSE event", {
+        providerType,
+        source: terminalOpenAIUsage ? "response.completed" : "last_usage",
+        usage: usageMetrics,
+      });
+    }
+
     // Claude SSE 合并规则：优先使用 message_delta，缺失字段再回退到 message_start
     const mergedClaudeUsage = (() => {
       if (messageDeltaUsage && messageStartUsage) {
@@ -3816,7 +4027,7 @@ export function parseUsageFromResponseText(
       return messageDeltaUsage ?? messageStartUsage;
     })();
 
-    if (mergedClaudeUsage) {
+    if (!usesOpenAISubsetUsage && mergedClaudeUsage) {
       usageMetrics = adjustUsageForProviderType(mergedClaudeUsage, providerType);
       usageRecord = mergedClaudeUsage as unknown as Record<string, unknown>;
       logger.debug("[ResponseHandler] Final merged usage from Claude SSE", {
@@ -3854,28 +4065,46 @@ function adjustUsageForProviderType(
     return usage;
   }
 
-  const cachedTokens = usage.cache_read_input_tokens;
   const inputTokens = usage.input_tokens;
 
-  if (typeof cachedTokens !== "number" || typeof inputTokens !== "number") {
+  if (typeof inputTokens !== "number") {
     return usage;
   }
 
-  const adjustedInput = Math.max(inputTokens - cachedTokens, 0);
-  if (adjustedInput === inputTokens) {
-    return usage;
-  }
+  const allocation = allocateOpenAIUsage({
+    observedInputTokens: inputTokens,
+    cachedTokens: usage.cache_read_input_tokens,
+    cacheWriteTokensReported:
+      usage.cache_write_tokens_reported ?? usage.cache_creation_input_tokens,
+    inferUnreportedCacheWrite: false,
+  });
 
-  logger.debug("[UsageMetrics] Adjusted input tokens to exclude cached tokens", {
+  logger.debug("[UsageMetrics] Split OpenAI subset usage into disjoint billing buckets", {
     providerType,
     originalInputTokens: inputTokens,
-    cachedTokens,
-    adjustedInputTokens: adjustedInput,
+    cachedTokens: allocation.cacheReadInputTokens,
+    cacheWriteTokens: allocation.cacheWriteInputTokens,
+    adjustedInputTokens: allocation.ordinaryInputTokens,
   });
 
   return {
     ...usage,
-    input_tokens: adjustedInput,
+    observed_input_tokens: allocation.observedInputTokens,
+    input_tokens: allocation.ordinaryInputTokens,
+    cache_read_input_tokens:
+      usage.cache_read_tokens_observed || typeof usage.cache_read_input_tokens === "number"
+        ? allocation.cacheReadInputTokens
+        : undefined,
+    cache_read_tokens_observed: usage.cache_read_tokens_observed,
+    cache_creation_input_tokens:
+      allocation.cacheWriteInputTokens > 0
+        ? allocation.cacheWriteInputTokens
+        : usage.cache_creation_input_tokens,
+    cache_write_tokens_reported:
+      usage.cache_write_tokens_reported === undefined
+        ? undefined
+        : allocation.cacheWriteTokensReported,
+    cache_write_accounting: allocation.cacheWriteAccounting,
   };
 }
 
@@ -3907,7 +4136,12 @@ function normalizeUsageWithSwap(
   const swapped = { ...usageMetrics };
   applySwapCacheTtlBilling(swapped, swapCacheTtlBilling);
 
-  let resolvedCacheTtl = swapped.cache_ttl ?? session.getCacheTtlResolved?.() ?? null;
+  const hasGenericOpenAICacheWrite =
+    swapped.cache_write_accounting !== undefined ||
+    swapped.cache_write_tokens_reported !== undefined;
+  let resolvedCacheTtl = hasGenericOpenAICacheWrite
+    ? (swapped.cache_ttl ?? null)
+    : (swapped.cache_ttl ?? session.getCacheTtlResolved?.() ?? null);
 
   // When the upstream response had no cache_ttl，we fell through to the session-level
   // getCacheTtlResolved() fallback which reflects the *original* (un-swapped) value.
@@ -3919,10 +4153,14 @@ function normalizeUsageWithSwap(
 
   const cache5m =
     swapped.cache_creation_5m_input_tokens ??
-    (resolvedCacheTtl === "1h" ? undefined : swapped.cache_creation_input_tokens);
+    (hasGenericOpenAICacheWrite || resolvedCacheTtl === "1h"
+      ? undefined
+      : swapped.cache_creation_input_tokens);
   const cache1h =
     swapped.cache_creation_1h_input_tokens ??
-    (resolvedCacheTtl === "1h" ? swapped.cache_creation_input_tokens : undefined);
+    (!hasGenericOpenAICacheWrite && resolvedCacheTtl === "1h"
+      ? swapped.cache_creation_input_tokens
+      : undefined);
   const cacheTotal =
     swapped.cache_creation_input_tokens ?? ((cache5m ?? 0) + (cache1h ?? 0) || undefined);
 
@@ -3932,6 +4170,204 @@ function normalizeUsageWithSwap(
     cache_creation_5m_input_tokens: cache5m,
     cache_creation_1h_input_tokens: cache1h,
     cache_creation_input_tokens: cacheTotal,
+  };
+}
+
+type ResolvedPricingResult = Awaited<ReturnType<ProxySession["getResolvedPricingByBillingSource"]>>;
+
+function buildStoredPricingContext(
+  resolvedPricing: NonNullable<ResolvedPricingResult>
+): StoredPricingContext {
+  const supplement = resolvedPricing.priceData.openai_official_pricing_supplement;
+  return {
+    source: resolvedPricing.source,
+    model: resolvedPricing.resolvedModelName,
+    provider: resolvedPricing.resolvedPricingProviderKey,
+    ...(supplement
+      ? {
+          supplement: {
+            ...supplement,
+            applied_fields: [...supplement.applied_fields],
+            conflicting_fields: [...supplement.conflicting_fields],
+          },
+        }
+      : {}),
+  };
+}
+
+function resolveCacheWriteInferenceGateRate(
+  usage: UsageMetrics,
+  resolvedPricing: ResolvedPricingResult | null | undefined,
+  priorityServiceTierApplied: boolean
+): number | undefined {
+  if (!resolvedPricing) return undefined;
+
+  const resolution = resolveRequestBillingRates({
+    usage,
+    priceData: resolvedPricing.priceData,
+    priorityServiceTierApplied,
+    modelName: resolvedPricing.resolvedModelName,
+  });
+  return resolution?.status === "resolved" && resolution.rates.cacheWrite > 0
+    ? resolution.rates.cacheWrite
+    : undefined;
+}
+
+function buildStoredCostBreakdown(input: {
+  usage: UsageMetrics;
+  resolvedPricing: NonNullable<ResolvedPricingResult>;
+  context1mApplied: boolean;
+  priorityServiceTierApplied: boolean;
+  longContextPricing: ResolvedLongContextPricing | null;
+  costMultiplier: number;
+  groupCostMultiplier: number;
+  cost: Decimal;
+}): StoredCostBreakdown | undefined {
+  try {
+    const breakdown = calculateRequestCostBreakdown(input.usage, input.resolvedPricing.priceData, {
+      context1mApplied: input.context1mApplied,
+      priorityServiceTierApplied: input.priorityServiceTierApplied,
+      modelName: input.resolvedPricing.resolvedModelName,
+      longContextPricing: input.longContextPricing,
+    });
+    const baseTotal = new Decimal(breakdown.input)
+      .plus(breakdown.output)
+      .plus(breakdown.cache_creation)
+      .plus(breakdown.cache_read);
+    const pricingSnapshot = resolvePricingSnapshotForCostBreakdown(
+      input.usage,
+      input.resolvedPricing.priceData,
+      {
+        context1mApplied: input.context1mApplied,
+        priorityServiceTierApplied: input.priorityServiceTierApplied,
+        modelName: input.resolvedPricing.resolvedModelName,
+        longContextPricing: input.longContextPricing,
+      }
+    );
+    const storedPricing = toStoredPricingSnapshot(pricingSnapshot, {
+      source: input.resolvedPricing.source,
+      model: input.resolvedPricing.resolvedModelName,
+      provider: input.resolvedPricing.resolvedPricingProviderKey,
+    });
+
+    return {
+      input: String(breakdown.input),
+      output: String(breakdown.output),
+      cache_creation: String(breakdown.cache_creation),
+      cache_creation_default: String(breakdown.cache_creation_default),
+      cache_creation_5m: String(breakdown.cache_creation_5m),
+      cache_creation_1h: String(breakdown.cache_creation_1h),
+      cache_read: String(breakdown.cache_read),
+      ...(storedPricing ? { pricing: storedPricing } : {}),
+      base_total: baseTotal.toDecimalPlaces(COST_SCALE).toString(),
+      provider_multiplier: sanitizeMultiplier(input.costMultiplier),
+      group_multiplier: sanitizeMultiplier(input.groupCostMultiplier),
+      total: input.cost.toString(),
+    };
+  } catch (error) {
+    logger.warn("[CostCalculation] Failed to build auditable cost breakdown", {
+      model: input.resolvedPricing.resolvedModelName,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return undefined;
+  }
+}
+
+async function settleOpenAIUsageAccounting(
+  session: ProxySession,
+  provider: Provider,
+  usage: UsageMetrics,
+  priorityServiceTierApplied: boolean,
+  overrides?: {
+    resolvedPricing?: ResolvedPricingResult | null;
+    requestBody?: unknown;
+  }
+): Promise<UsageMetrics> {
+  if (
+    (provider.providerType !== "codex" && provider.providerType !== "openai-compatible") ||
+    typeof usage.observed_input_tokens !== "number"
+  ) {
+    return usage;
+  }
+
+  const reportedWrite = usage.cache_write_tokens_reported ?? usage.cache_creation_input_tokens;
+  const needsInference = !(typeof reportedWrite === "number" && reportedWrite > 0);
+  let resolvedPricing = overrides?.resolvedPricing;
+
+  if (needsInference && resolvedPricing === undefined) {
+    try {
+      resolvedPricing = await session.getResolvedPricingByBillingSource(provider);
+    } catch (error) {
+      logger.warn("[UsageMetrics] Failed to resolve pricing for cache-write inference", {
+        providerId: provider.id,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      resolvedPricing = null;
+    }
+  }
+
+  const inferUnreportedCacheWrite =
+    needsInference &&
+    shouldInferOpenAICacheWrite({
+      modelName:
+        resolvedPricing?.resolvedModelName ??
+        session.getBillingModel() ??
+        session.getOriginalModel() ??
+        session.request.model,
+      providerType: provider.providerType,
+      observedInputTokens: usage.observed_input_tokens,
+      cachedTokensPresent: usage.cache_read_tokens_observed === true,
+      // This value only gates whether GPT-5.6 cache-write inference is supported. The
+      // selected tier's atomic four-rate resolution remains the sole source used to charge.
+      cacheWriteCostPerToken: resolveCacheWriteInferenceGateRate(
+        usage,
+        resolvedPricing,
+        priorityServiceTierApplied
+      ),
+      requestBody:
+        overrides && Object.hasOwn(overrides, "requestBody")
+          ? overrides.requestBody
+          : session.getBillingRequestMessage(),
+    });
+
+  const allocation = allocateOpenAIUsage({
+    observedInputTokens: usage.observed_input_tokens,
+    cachedTokens: usage.cache_read_input_tokens,
+    cacheWriteTokensReported: reportedWrite,
+    inferUnreportedCacheWrite,
+  });
+  const hasAccountedWrite =
+    allocation.cacheWriteAccounting !== "none" || reportedWrite !== undefined;
+
+  return {
+    ...usage,
+    observed_input_tokens: allocation.observedInputTokens,
+    input_tokens: allocation.ordinaryInputTokens,
+    cache_read_input_tokens: usage.cache_read_tokens_observed
+      ? allocation.cacheReadInputTokens
+      : usage.cache_read_input_tokens,
+    cache_creation_input_tokens: hasAccountedWrite
+      ? allocation.cacheWriteInputTokens
+      : usage.cache_creation_input_tokens,
+    cache_write_tokens_reported:
+      reportedWrite === undefined ? undefined : allocation.cacheWriteTokensReported,
+    cache_write_accounting: allocation.cacheWriteAccounting,
+  };
+}
+
+function buildUsageAuditPersistence(usage: UsageMetrics | null | undefined): {
+  observedInputTokens?: number;
+  cacheWriteTokensReported?: number | null;
+  cacheWriteAccounting?: CacheWriteAccounting;
+} {
+  if (!usage || typeof usage.observed_input_tokens !== "number") {
+    return {};
+  }
+
+  return {
+    observedInputTokens: usage.observed_input_tokens,
+    cacheWriteTokensReported: usage.cache_write_tokens_reported ?? null,
+    cacheWriteAccounting: usage.cache_write_accounting ?? "none",
   };
 }
 
@@ -3947,6 +4383,7 @@ async function updateRequestCostFromUsage(
   winnerLoserAware: boolean = false
 ): Promise<{
   costUsd: string | null;
+  costSettled: boolean;
   resolvedPricing: Awaited<ReturnType<ProxySession["getResolvedPricingByBillingSource"]>> | null;
   longContextPricing: ResolvedLongContextPricing | null;
   longContextPricingApplied: boolean;
@@ -3964,6 +4401,7 @@ async function updateRequestCostFromUsage(
     });
     return {
       costUsd: null,
+      costSettled: false,
       resolvedPricing: null,
       longContextPricing: null,
       longContextPricingApplied: false,
@@ -3973,6 +4411,18 @@ async function updateRequestCostFromUsage(
   if (isNonBillingUsageEndpoint(session)) {
     return {
       costUsd: null,
+      costSettled: false,
+      resolvedPricing: null,
+      longContextPricing: null,
+      longContextPricingApplied: false,
+    };
+  }
+
+  if (!provider) {
+    logger.warn("[CostCalculation] No provider available for durable settlement", { messageId });
+    return {
+      costUsd: null,
+      costSettled: false,
       resolvedPricing: null,
       longContextPricing: null,
       longContextPricingApplied: false,
@@ -3980,20 +4430,41 @@ async function updateRequestCostFromUsage(
   }
 
   const originalModel = session.getOriginalModel();
-  const redirectedModel = session.getCurrentModel();
+  const redirectedModel = session.getBillingModel();
 
   if (!originalModel && !redirectedModel) {
     logger.warn("[CostCalculation] No model name available", { messageId });
     return {
       costUsd: null,
+      costSettled: false,
       resolvedPricing: null,
       longContextPricing: null,
       longContextPricingApplied: false,
     };
   }
 
+  const createBillingSettlement = (): MessageRequestBillingSettlement => ({
+    providerId: provider.id,
+    model: redirectedModel ?? originalModel ?? undefined,
+    costMultiplier,
+    groupCostMultiplier,
+    providerChain: session.getProviderChain(),
+    specialSettings: session.getSpecialSettings() ?? [],
+    context1mApplied,
+    swapCacheTtlApplied: provider.swapCacheTtlBilling ?? false,
+    inputTokens: usage.input_tokens,
+    ...buildUsageAuditPersistence(usage),
+    outputTokens: usage.output_tokens,
+    cacheCreationInputTokens: usage.cache_creation_input_tokens,
+    cacheReadInputTokens: usage.cache_read_input_tokens,
+    cacheCreation5mInputTokens: usage.cache_creation_5m_input_tokens,
+    cacheCreation1hInputTokens: usage.cache_creation_1h_input_tokens,
+    cacheTtlApplied: usage.cache_ttl ?? null,
+  });
+
+  let resolvedPricing: ResolvedPricingResult | null = null;
   try {
-    const resolvedPricing = await session.getResolvedPricingByBillingSource(provider);
+    resolvedPricing = await session.getResolvedPricingByBillingSource(provider);
 
     if (!resolvedPricing?.priceData || !hasValidPriceData(resolvedPricing.priceData)) {
       logger.warn("[CostCalculation] No price data found, skipping billing", {
@@ -4005,14 +4476,21 @@ async function updateRequestCostFromUsage(
       requestCloudPriceTableSync({ reason: "missing-model" });
       return {
         costUsd: null,
+        costSettled: false,
         resolvedPricing: null,
         longContextPricing: null,
         longContextPricingApplied: false,
       };
     }
 
+    ensurePricingResolutionSpecialSetting(session, resolvedPricing);
+
     const longContextPricing =
-      matchLongContextPricing(usage, resolvedPricing.priceData)?.pricing ?? null;
+      matchLongContextPricing(usage, resolvedPricing.priceData, resolvedPricing.resolvedModelName)
+        ?.pricing ?? null;
+    if (longContextPricing) {
+      ensureLongContextPricingAudit(session, longContextPricing);
+    }
     const cost = calculateRequestCost(
       usage,
       resolvedPricing.priceData,
@@ -4021,40 +4499,22 @@ async function updateRequestCostFromUsage(
         context1mApplied,
         priorityServiceTierApplied,
         longContextPricing,
-        groupCostMultiplier
+        groupCostMultiplier,
+        resolvedPricing.resolvedModelName
       )
     );
 
-    // Calculate and store cost breakdown
-    let storedBreakdown: StoredCostBreakdown | undefined;
-    try {
-      const breakdown = calculateRequestCostBreakdown(usage, resolvedPricing.priceData, {
-        context1mApplied,
-        priorityServiceTierApplied,
-        longContextPricing,
-      });
-      const baseTotal = new Decimal(breakdown.input)
-        .plus(breakdown.output)
-        .plus(breakdown.cache_creation)
-        .plus(breakdown.cache_read);
-      // Use the same sanitization rules as calculateRequestCost so that
-      // total === base_total * provider_multiplier * group_multiplier
-      // holds even when the caller passes NaN / Infinity / negative values.
-      storedBreakdown = {
-        input: String(breakdown.input),
-        output: String(breakdown.output),
-        cache_creation: String(breakdown.cache_creation),
-        cache_creation_5m: String(breakdown.cache_creation_5m),
-        cache_creation_1h: String(breakdown.cache_creation_1h),
-        cache_read: String(breakdown.cache_read),
-        base_total: baseTotal.toDecimalPlaces(COST_SCALE).toString(),
-        provider_multiplier: sanitizeMultiplier(costMultiplier),
-        group_multiplier: sanitizeMultiplier(groupCostMultiplier),
-        total: cost.toString(),
-      };
-    } catch {
-      /* non-critical */
-    }
+    const storedBreakdown = buildStoredCostBreakdown({
+      usage,
+      resolvedPricing,
+      context1mApplied,
+      priorityServiceTierApplied,
+      longContextPricing,
+      costMultiplier,
+      groupCostMultiplier,
+      cost,
+    });
+    const billingSettlement = createBillingSettlement();
 
     logger.info("[CostCalculation] Cost calculated successfully", {
       messageId,
@@ -4068,13 +4528,29 @@ async function updateRequestCostFromUsage(
     });
 
     if (cost.gt(0)) {
-      if (winnerLoserAware) {
-        await updateMessageRequestWinnerCost(messageId, cost, storedBreakdown);
-      } else {
-        await updateMessageRequestCostWithBreakdown(messageId, cost, storedBreakdown);
+      const persistedCostUsd = winnerLoserAware
+        ? await updateMessageRequestWinnerCost(messageId, cost, storedBreakdown, billingSettlement)
+        : await updateMessageRequestCostWithBreakdown(
+            messageId,
+            cost,
+            storedBreakdown,
+            billingSettlement
+          );
+      if (persistedCostUsd == null) {
+        logger.error("[BillingSettlement] Durable cost write returned no settled value", {
+          messageId,
+        });
+        return {
+          costUsd: null,
+          costSettled: false,
+          resolvedPricing: null,
+          longContextPricing,
+          longContextPricingApplied: longContextPricing != null,
+        };
       }
       return {
-        costUsd: cost.toString(),
+        costUsd: persistedCostUsd,
+        costSettled: true,
         resolvedPricing,
         longContextPricing,
         longContextPricingApplied: longContextPricing != null,
@@ -4093,17 +4569,49 @@ async function updateRequestCostFromUsage(
     }
     return {
       costUsd: null,
+      costSettled: false,
       resolvedPricing,
       longContextPricing,
       longContextPricingApplied: longContextPricing != null,
     };
   } catch (error) {
+    if (error instanceof UnsupportedPricingCombinationError) {
+      ensureUnsupportedBillingSettlement(session, usage, error, resolvedPricing);
+      try {
+        await updateMessageRequestUnsupportedBillingSettlement(
+          messageId,
+          createBillingSettlement()
+        );
+      } catch (settlementError) {
+        logger.error("[BillingSettlement] Failed to persist unsupported pricing audit", {
+          messageId,
+          reason: error.reason,
+          error:
+            settlementError instanceof Error ? settlementError.message : String(settlementError),
+        });
+      }
+      logger.warn("[BillingSettlement] Unsupported pricing combination; charge left unresolved", {
+        messageId,
+        reason: error.reason,
+        missingFields: error.missingFields,
+        observedInputTokens: usage.observed_input_tokens,
+      });
+      return {
+        costUsd: null,
+        costSettled: false,
+        resolvedPricing: null,
+        longContextPricing: null,
+        longContextPricingApplied: false,
+      };
+    }
+
     logger.error("[CostCalculation] Failed to update request cost, skipping billing", {
       messageId,
       error: error instanceof Error ? error.message : String(error),
     });
     return {
       costUsd: null,
+      costSettled: false,
       resolvedPricing: null,
       longContextPricing: null,
       longContextPricingApplied: false,
@@ -4128,6 +4636,8 @@ export async function finalizeHedgeLoserBilling(params: {
   messageRequestId: number;
   /** Loser's session — used for pricing/multiplier resolution and Redis cost tracking. */
   loserSession: ProxySession;
+  /** Original request session — owns auth/message/session identity even for shadow losers. */
+  trackingSession?: ProxySession;
   provider: Provider;
   /** Hedge attempt sequence number, for the audit entry. */
   attemptNumber: number;
@@ -4142,29 +4652,16 @@ export async function finalizeHedgeLoserBilling(params: {
    * per-request fee for a truncated stream.
    */
   drainComplete: boolean;
-  /**
-   * Billing context captured BEFORE the shared session could be polluted by
-   * syncWinningAttemptSession (only set for the INITIAL provider's losing attempt, whose
-   * session is overwritten with the winner's model). Shadow-session losers leave this
-   * undefined and read their own (un-polluted) session.
-   */
-  billingContext?: {
-    originalModel: string | null;
-    redirectedModel: string | null;
-    requestedServiceTier: string | null;
-    context1mApplied: boolean;
-    groupCostMultiplier: number;
-  };
 }): Promise<string | null> {
   const {
     messageRequestId,
     loserSession,
+    trackingSession,
     provider,
     attemptNumber,
     upstreamStatusCode,
     allContent,
     drainComplete,
-    billingContext,
   } = params;
 
   try {
@@ -4173,8 +4670,21 @@ export async function finalizeHedgeLoserBilling(params: {
     }
 
     const { usageMetrics } = parseUsageFromResponseText(allContent, provider.providerType);
+    const actualServiceTier = parseServiceTierFromResponseText(allContent);
+    const priorityBillingDecision = await resolvePriorityBillingDecision(
+      loserSession,
+      actualServiceTier,
+      { provider }
+    );
+    const priorityServiceTierApplied = priorityBillingDecision?.effectivePriority ?? false;
     let usageForCost = usageMetrics;
     if (usageForCost) {
+      usageForCost = await settleOpenAIUsageAccounting(
+        loserSession,
+        provider,
+        usageForCost,
+        priorityServiceTierApplied
+      );
       usageForCost = normalizeUsageWithSwap(
         usageForCost,
         loserSession,
@@ -4200,68 +4710,110 @@ export async function finalizeHedgeLoserBilling(params: {
       return null;
     }
 
-    const resolvedPricing = await loserSession.getResolvedPricingByBillingSource(
-      provider,
-      billingContext
-        ? {
-            originalModel: billingContext.originalModel,
-            redirectedModel: billingContext.redirectedModel,
-          }
-        : undefined
-    );
+    const resolvedPricing = await loserSession.getResolvedPricingByBillingSource(provider);
     if (!resolvedPricing?.priceData || !hasValidPriceData(resolvedPricing.priceData)) {
       return null;
     }
 
-    const actualServiceTier = parseServiceTierFromResponseText(allContent);
-    const priorityServiceTierApplied =
-      (
-        await resolveCodexPriorityBillingDecision(loserSession, actualServiceTier, {
-          provider,
-          ...(billingContext ? { requestedServiceTier: billingContext.requestedServiceTier } : {}),
-        })
-      )?.effectivePriority ?? false;
-    // Mirror the winner: a Codex loser with a large prompt must trigger the 1M context tier,
-    // else it under-bills. Only mutate for shadow-session losers (no snapshot) — the initial
-    // loser uses its pre-pollution snapshot and must not mutate the shared/original session.
-    if (!billingContext) {
-      maybeSetCodexContext1m(loserSession, provider, billableUsage.input_tokens);
-    }
-    const context1mApplied = billingContext?.context1mApplied ?? loserSession.getContext1mApplied();
+    // Every hedge attempt has its own session, so context escalation cannot pollute the winner.
+    maybeSetCodexContext1m(
+      loserSession,
+      provider,
+      billableUsage.observed_input_tokens ?? billableUsage.input_tokens
+    );
+    const context1mApplied = loserSession.getContext1mApplied();
     const costMultiplier = provider.costMultiplier;
-    const groupCostMultiplier =
-      billingContext?.groupCostMultiplier ?? loserSession.getGroupCostMultiplier();
+    const groupCostMultiplier = loserSession.getGroupCostMultiplier();
 
     const longContextPricing =
-      matchLongContextPricing(billableUsage, resolvedPricing.priceData)?.pricing ?? null;
-    const cost = calculateRequestCost(
-      billableUsage,
-      resolvedPricing.priceData,
-      buildCostCalculationOptions(
-        costMultiplier,
-        context1mApplied,
-        priorityServiceTierApplied,
-        longContextPricing,
-        groupCostMultiplier
-      )
-    );
+      matchLongContextPricing(
+        billableUsage,
+        resolvedPricing.priceData,
+        resolvedPricing.resolvedModelName
+      )?.pricing ?? null;
+    const loserUsageAudit = {
+      providerId: provider.id,
+      providerName: provider.name,
+      attemptNumber,
+      inputTokens: billableUsage.input_tokens,
+      observedInputTokens: billableUsage.observed_input_tokens,
+      outputTokens: billableUsage.output_tokens,
+      cacheCreationInputTokens: billableUsage.cache_creation_input_tokens,
+      cacheWriteTokensReported: billableUsage.cache_write_tokens_reported,
+      cacheWriteAccounting: billableUsage.cache_write_accounting,
+      cacheReadInputTokens: billableUsage.cache_read_input_tokens,
+      requestedServiceTier: priorityBillingDecision?.requestedServiceTier ?? null,
+      actualServiceTier: priorityBillingDecision?.actualServiceTier ?? null,
+      serviceTierResolvedFrom: priorityBillingDecision?.resolvedFrom ?? null,
+      effectivePriority: priorityServiceTierApplied,
+      pricingContext: buildStoredPricingContext(resolvedPricing),
+    } satisfies Omit<HedgeLoserBilling, "costUsd">;
+    let cost: Decimal;
+    try {
+      cost = calculateRequestCost(
+        billableUsage,
+        resolvedPricing.priceData,
+        buildCostCalculationOptions(
+          costMultiplier,
+          context1mApplied,
+          priorityServiceTierApplied,
+          longContextPricing,
+          groupCostMultiplier,
+          resolvedPricing.resolvedModelName
+        )
+      );
+    } catch (error) {
+      if (!(error instanceof UnsupportedPricingCombinationError)) {
+        throw error;
+      }
+
+      const unsupportedEntry: HedgeLoserBilling = {
+        ...loserUsageAudit,
+        costUsd: "0",
+        billingStatus: "unsupported",
+        billingReason: error.reason,
+        missingPricingFields: [...error.missingFields],
+      };
+      await addMessageRequestHedgeLoserCost(messageRequestId, new Decimal(0), unsupportedEntry);
+      logger.warn("[BillingSettlement] Hedge loser pricing unsupported; recorded without charge", {
+        messageRequestId,
+        providerId: provider.id,
+        providerName: provider.name,
+        attemptNumber,
+        reason: error.reason,
+        missingFields: error.missingFields,
+        observedInputTokens: billableUsage.observed_input_tokens,
+      });
+      return null;
+    }
 
     if (!cost.gt(0)) {
       return null;
     }
 
+    const loserCostBreakdown = buildStoredCostBreakdown({
+      usage: billableUsage,
+      resolvedPricing,
+      context1mApplied,
+      priorityServiceTierApplied,
+      longContextPricing,
+      costMultiplier,
+      groupCostMultiplier,
+      cost,
+    });
+
     const loserEntry: HedgeLoserBilling = {
-      providerId: provider.id,
-      providerName: provider.name,
-      attemptNumber,
+      ...loserUsageAudit,
       costUsd: cost.toString(),
-      inputTokens: billableUsage.input_tokens,
-      outputTokens: billableUsage.output_tokens,
-      cacheCreationInputTokens: billableUsage.cache_creation_input_tokens,
-      cacheReadInputTokens: billableUsage.cache_read_input_tokens,
+      billingStatus: "settled",
+      ...(loserCostBreakdown ? { costBreakdown: loserCostBreakdown } : {}),
     };
 
-    await addMessageRequestHedgeLoserCost(messageRequestId, cost, loserEntry);
+    const requestTotalCostUsd = await addMessageRequestHedgeLoserCost(
+      messageRequestId,
+      cost,
+      loserEntry
+    );
 
     // Track the loser cost into the same Redis spend counters the winner uses, so the
     // key/user/provider rate limits account for it (DB and limit enforcement stay in sync).
@@ -4275,8 +4827,26 @@ export async function finalizeHedgeLoserBilling(params: {
         priorityServiceTierApplied,
         groupCostMultiplier,
       },
-      { resolvedPricing, longContextPricing }
+      { resolvedPricing, longContextPricing },
+      {
+        trackingSession: trackingSession ?? loserSession,
+        billingEventId: `${messageRequestId}:hedge-loser:${provider.id}:${attemptNumber}`,
+        recordPricingResolution: false,
+      }
     );
+
+    const sessionForTracking = trackingSession ?? loserSession;
+    if (
+      requestTotalCostUsd != null &&
+      sessionForTracking.sessionId &&
+      sessionForTracking.shouldTrackSessionObservability()
+    ) {
+      await SessionManager.updateSessionCostFromRequest(
+        sessionForTracking.sessionId,
+        sessionForTracking.requestSequence,
+        requestTotalCostUsd
+      );
+    }
 
     logger.info("[HedgeLoserBilling] Billed hedge loser", {
       messageRequestId,
@@ -4336,14 +4906,11 @@ export async function finalizeRequestStats(
   const winnerLoserAware = peekDeferredStreamingFinalization(session)?.billHedgeLosers === true;
   const { usageMetrics } = parseUsageFromResponseText(responseText, provider.providerType);
   const actualServiceTier = parseServiceTierFromResponseText(responseText);
-  const codexPriorityBillingDecision = await resolveCodexPriorityBillingDecision(
-    session,
-    actualServiceTier
-  );
+  const priorityBillingDecision = await resolvePriorityBillingDecision(session, actualServiceTier);
   if (!isNonBillingUsageEndpoint(session)) {
-    ensureCodexServiceTierResultSpecialSetting(session, codexPriorityBillingDecision);
+    ensureServiceTierResultSpecialSetting(session, priorityBillingDecision);
   }
-  const priorityServiceTierApplied = codexPriorityBillingDecision?.effectivePriority ?? false;
+  const priorityServiceTierApplied = priorityBillingDecision?.effectivePriority ?? false;
   if (!usageMetrics) {
     const billablePerRequestUsage = await resolveBillableUsageMetricsForCost(
       session,
@@ -4383,6 +4950,7 @@ export async function finalizeRequestStats(
       session.shouldTrackSessionObservability()
     ) {
       void SessionManager.updateSessionUsage(session.sessionId, {
+        requestSequence: session.requestSequence,
         costUsd: perRequestCostUsd,
         status: statusCode >= 200 && statusCode < 300 ? "completed" : "error",
         statusCode,
@@ -4397,7 +4965,7 @@ export async function finalizeRequestStats(
       ...(errorMessage ? { errorMessage } : {}),
       ttfbMs: session.ttfbMs ?? duration,
       providerChain: session.getProviderChain(),
-      model: session.getCurrentModel() ?? undefined,
+      model: session.getBillingModel() ?? undefined,
       actualResponseModel: extractActualResponseModelForProvider(
         provider.providerType,
         resolvedIsStream,
@@ -4414,8 +4982,14 @@ export async function finalizeRequestStats(
   // 4. 更新成本
   // Invert cache TTL at data entry when provider option is enabled
   // All downstream (badge, cost, DB, logs) will see inverted values
-  const normalizedUsage = normalizeUsageWithSwap(
+  const accountedUsage = await settleOpenAIUsageAccounting(
+    session,
+    provider,
     usageMetrics,
+    priorityServiceTierApplied
+  );
+  const normalizedUsage = normalizeUsageWithSwap(
+    accountedUsage,
     session,
     provider.swapCacheTtlBilling
   );
@@ -4424,7 +4998,11 @@ export async function finalizeRequestStats(
   // 非计费端点（count_tokens / compact）不得触发 Codex 1M 上下文开关，
   // 否则会影响同 session 后续真实请求的账单口径。
   if (billableNormalizedUsage) {
-    maybeSetCodexContext1m(session, provider, billableNormalizedUsage.input_tokens);
+    maybeSetCodexContext1m(
+      session,
+      provider,
+      billableNormalizedUsage.observed_input_tokens ?? billableNormalizedUsage.input_tokens
+    );
   }
 
   const billing = sessionBillingInputs(session, provider, priorityServiceTierApplied);
@@ -4447,15 +5025,23 @@ export async function finalizeRequestStats(
 
   // 6. 更新 session usage
   if (session.sessionId) {
-    let costUsdStr: string | undefined;
+    let costUsdStr: string | undefined = costUpdateResult.costUsd ?? undefined;
     try {
-      if (billableNormalizedUsage && session.request.model) {
+      if (
+        costUpdateResult.costSettled &&
+        costUsdStr === undefined &&
+        billableNormalizedUsage &&
+        session.request.model
+      ) {
         const resolvedPricing = await session.getResolvedPricingByBillingSource(provider);
         if (resolvedPricing) {
           ensurePricingResolutionSpecialSetting(session, resolvedPricing);
           const longContextPricing =
-            matchLongContextPricing(billableNormalizedUsage, resolvedPricing.priceData)?.pricing ??
-            null;
+            matchLongContextPricing(
+              billableNormalizedUsage,
+              resolvedPricing.priceData,
+              resolvedPricing.resolvedModelName
+            )?.pricing ?? null;
           const cost = calculateRequestCost(
             billableNormalizedUsage,
             resolvedPricing.priceData,
@@ -4464,7 +5050,8 @@ export async function finalizeRequestStats(
               session.getContext1mApplied(),
               priorityServiceTierApplied,
               longContextPricing,
-              session.getGroupCostMultiplier()
+              session.getGroupCostMultiplier(),
+              resolvedPricing.resolvedModelName
             )
           );
           if (cost.gt(0)) {
@@ -4480,6 +5067,7 @@ export async function finalizeRequestStats(
 
     if (session.shouldTrackSessionObservability()) {
       void SessionManager.updateSessionUsage(session.sessionId, {
+        requestSequence: session.requestSequence,
         inputTokens: normalizedUsage.input_tokens,
         outputTokens: normalizedUsage.output_tokens,
         cacheCreationInputTokens: normalizedUsage.cache_creation_input_tokens,
@@ -4497,6 +5085,7 @@ export async function finalizeRequestStats(
   // 7. 更新请求详情
   await updateMessageRequestDetails(messageContext.id, {
     statusCode: statusCode,
+    ...buildUsageAuditPersistence(normalizedUsage),
     inputTokens: normalizedUsage.input_tokens,
     outputTokens: normalizedUsage.output_tokens,
     ttfbMs: session.ttfbMs ?? duration,
@@ -4507,7 +5096,7 @@ export async function finalizeRequestStats(
     cacheTtlApplied: normalizedUsage.cache_ttl ?? null,
     providerChain: session.getProviderChain(),
     ...(errorMessage ? { errorMessage } : {}),
-    model: session.getCurrentModel() ?? undefined,
+    model: session.getBillingModel() ?? undefined,
     actualResponseModel: extractActualResponseModelForProvider(
       provider.providerType,
       resolvedIsStream,
@@ -4565,20 +5154,26 @@ async function trackCostToRedis(
   pricingOverrides?: {
     resolvedPricing?: Awaited<ReturnType<ProxySession["getResolvedPricingByBillingSource"]>> | null;
     longContextPricing?: ResolvedLongContextPricing | null;
+  },
+  trackingOptions?: {
+    trackingSession?: ProxySession;
+    billingEventId?: string;
+    recordPricingResolution?: boolean;
   }
 ): Promise<void> {
-  if (!usage || !session.sessionId) return;
+  const trackingSession = trackingOptions?.trackingSession ?? session;
+  if (!usage || !trackingSession.sessionId) return;
   if (isNonBillingUsageEndpoint(session)) return;
 
   try {
-    const messageContext = session.messageContext;
+    const messageContext = trackingSession.messageContext;
     const { provider, priorityServiceTierApplied } = billing;
-    const key = session.authState?.key;
-    const user = session.authState?.user;
+    const key = trackingSession.authState?.key;
+    const user = trackingSession.authState?.user;
 
     if (!messageContext || !provider || !key || !user) return;
 
-    const modelName = session.request.model;
+    const modelName = session.getBillingModel();
     if (!modelName) return;
 
     const resolvedPricing =
@@ -4587,10 +5182,16 @@ async function trackCostToRedis(
         : pricingOverrides.resolvedPricing;
     if (!resolvedPricing) return;
 
-    ensurePricingResolutionSpecialSetting(session, resolvedPricing);
+    if (trackingOptions?.recordPricingResolution !== false) {
+      ensurePricingResolutionSpecialSetting(session, resolvedPricing);
+    }
     const longContextPricing =
       pricingOverrides?.longContextPricing === undefined
-        ? (matchLongContextPricing(usage, resolvedPricing.priceData)?.pricing ?? null)
+        ? (matchLongContextPricing(
+            usage,
+            resolvedPricing.priceData,
+            resolvedPricing.resolvedModelName
+          )?.pricing ?? null)
         : pricingOverrides.longContextPricing;
 
     const cost = calculateRequestCost(
@@ -4601,32 +5202,29 @@ async function trackCostToRedis(
         billing.context1mApplied,
         priorityServiceTierApplied,
         longContextPricing,
-        billing.groupCostMultiplier
+        billing.groupCostMultiplier,
+        resolvedPricing.resolvedModelName
       )
     );
     if (cost.lte(0)) return;
 
     const costFloat = parseFloat(cost.toString());
+    const billingEventId = trackingOptions?.billingEventId ?? `${messageContext.id}:winner`;
 
     // 追踪到 Redis（使用 session.sessionId）
-    await RateLimitService.trackCost(
-      key.id,
-      provider.id,
-      session.sessionId, // 直接使用 session.sessionId
-      costFloat,
-      {
-        userId: user.id,
-        key5hResetMode: key.limit5hResetMode,
-        keyResetTime: key.dailyResetTime,
-        keyResetMode: key.dailyResetMode,
-        provider5hResetMode: provider.limit5hResetMode,
-        providerResetTime: provider.dailyResetTime,
-        providerResetMode: provider.dailyResetMode,
-        user5hResetMode: user.limit5hResetMode,
-        requestId: messageContext.id,
-        createdAtMs: messageContext.createdAt.getTime(),
-      }
-    );
+    await RateLimitService.trackCost(key.id, provider.id, trackingSession.sessionId, costFloat, {
+      userId: user.id,
+      key5hResetMode: key.limit5hResetMode,
+      keyResetTime: key.dailyResetTime,
+      keyResetMode: key.dailyResetMode,
+      provider5hResetMode: provider.limit5hResetMode,
+      providerResetTime: provider.dailyResetTime,
+      providerResetMode: provider.dailyResetMode,
+      user5hResetMode: user.limit5hResetMode,
+      requestId: messageContext.id,
+      createdAtMs: messageContext.createdAt.getTime(),
+      billingEventId,
+    });
 
     // 新增：追踪用户层每日消费
     await RateLimitService.trackUserDailyCost(
@@ -4637,6 +5235,7 @@ async function trackCostToRedis(
       {
         requestId: messageContext.id,
         createdAtMs: messageContext.createdAt.getTime(),
+        billingEventId,
       }
     );
 
@@ -4673,12 +5272,15 @@ async function trackCostToRedis(
     });
 
     // 刷新 session 时间戳（滑动窗口）
-    if (session.shouldTrackSessionObservability()) {
-      void SessionTracker.refreshSession(session.sessionId, key.id, provider.id, user.id).catch(
-        (error) => {
-          logger.error("[ResponseHandler] Failed to refresh session tracker:", error);
-        }
-      );
+    if (trackingSession.shouldTrackSessionObservability()) {
+      void SessionTracker.refreshSession(
+        trackingSession.sessionId,
+        key.id,
+        provider.id,
+        user.id
+      ).catch((error) => {
+        logger.error("[ResponseHandler] Failed to refresh session tracker:", error);
+      });
     }
   } catch (error) {
     logger.error("[ResponseHandler] Failed to track cost to Redis, skipping", {
@@ -4751,7 +5353,7 @@ async function persistRequestFailure(options: {
       errorCause,
       ttfbMs: phase === "non-stream" ? (session.ttfbMs ?? duration) : session.ttfbMs,
       providerChain: session.getProviderChain(),
-      model: session.getCurrentModel() ?? undefined,
+      model: session.getBillingModel() ?? undefined,
       providerId: session.provider?.id, // 更新最终供应商ID（重试切换后）
       context1mApplied: session.getContext1mApplied(),
       swapCacheTtlApplied: session.provider?.swapCacheTtlBilling ?? false,

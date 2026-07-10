@@ -56,6 +56,8 @@ export interface SessionStoreInfo {
  * Session 使用量信息（响应时更新）
  */
 export interface SessionUsageUpdate {
+  /** Monotonic request sequence used to keep late hedge updates from clobbering newer costs. */
+  requestSequence?: number;
   inputTokens?: number;
   outputTokens?: number;
   cacheCreationInputTokens?: number;

@@ -4,6 +4,7 @@ import {
   convertCptTable,
   convertCptVariant,
 } from "@/lib/price-sync/cpt-convert";
+import { OPENAI_OFFICIAL_GPT56_PRICING_SUPPLEMENT_ID } from "@/lib/price-sync/openai-official-supplement";
 import type {
   CptModelEntry,
   CptPricingVariant,
@@ -150,6 +151,7 @@ describe("convertCptVariant", () => {
         prompt: { unit: "per_M_tokens", price: "2" },
         completion: { unit: "per_M_tokens", price: "8" },
         cache_read: { unit: "per_M_tokens", price: "0.5" },
+        cache_write: { unit: "per_M_tokens", price: "2.5" },
       },
       tracks: [
         {
@@ -163,6 +165,7 @@ describe("convertCptVariant", () => {
     expect(node?.input_cost_per_token_priority).toBeCloseTo(0.000004, 12);
     expect(node?.output_cost_per_token_priority).toBeCloseTo(0.000016, 12);
     expect(node?.cache_read_input_token_cost_priority).toBeCloseTo(0.000001, 12);
+    expect(node?.cache_creation_input_token_cost_priority).toBeCloseTo(0.000005, 12);
   });
 
   it("skips unsupported tracks (batch/flex) without failing", () => {
@@ -296,7 +299,170 @@ function claudeEntry(overrides?: Partial<CptModelEntry>): CptModelEntry {
   };
 }
 
+function gpt56Entry(overrides?: Partial<CptModelEntry>): CptModelEntry {
+  return {
+    slug: "openai/gpt-5.6-sol",
+    model_name: "gpt-5.6-sol",
+    vendor: "openai",
+    display_name: "GPT-5.6 Sol",
+    aliases: ["gpt-5.6"],
+    family: "gpt",
+    model_type: "responses",
+    pricing: [
+      {
+        provider: "openai",
+        official: true,
+        source: "https://developers.openai.com/api/docs/pricing",
+        charges: {
+          prompt: { unit: "per_M_tokens", price: "5" },
+          cache_read: { unit: "per_M_tokens", price: "0.5" },
+          cache_write: { unit: "per_M_tokens", price: "6.25" },
+          completion: { unit: "per_M_tokens", price: "30" },
+        },
+        tracks: [
+          {
+            label: ">272K context",
+            factor: "1",
+            charge_factors: {
+              prompt: "2",
+              cache_read: "2",
+              cache_write: "2",
+              completion: "1.5",
+            },
+            triggers: [{ kind: "input_tokens_above", threshold: 272000, inclusive: false }],
+          },
+          { label: "standard", factor: "1", triggers: [] },
+        ],
+      },
+    ],
+    ...overrides,
+  };
+}
+
 describe("convertCptModelEntry", () => {
+  it("supplements a GPT-5.6 official OpenAI node with complete Priority rates", () => {
+    const priceData = convertCptModelEntry(gpt56Entry(), PROVIDERS);
+
+    expect(priceData).not.toBeNull();
+    expect(priceData?.input_cost_per_token_priority).toBe(10 / 1_000_000);
+    expect(priceData?.cache_read_input_token_cost_priority).toBe(1 / 1_000_000);
+    expect(priceData?.cache_creation_input_token_cost_priority).toBe(12.5 / 1_000_000);
+    expect(priceData?.output_cost_per_token_priority).toBe(60 / 1_000_000);
+  });
+
+  it.each([
+    {
+      modelName: "gpt-5.6-sol",
+      standard: [5, 0.5, 6.25, 30],
+      long: [10, 1, 12.5, 45],
+      priority: [10, 1, 12.5, 60],
+    },
+    {
+      modelName: "gpt-5.6-terra",
+      standard: [2.5, 0.25, 3.125, 15],
+      long: [5, 0.5, 6.25, 22.5],
+      priority: [5, 0.5, 6.25, 30],
+    },
+    {
+      modelName: "gpt-5.6-luna",
+      standard: [1, 0.1, 1.25, 6],
+      long: [2, 0.2, 2.5, 9],
+      priority: [2, 0.2, 2.5, 12],
+    },
+  ])("supplements exact Standard, long-context, and Priority rates for $modelName", ({
+    modelName,
+    standard,
+    long,
+    priority,
+  }) => {
+    const priceData = convertCptModelEntry(
+      gpt56Entry({
+        slug: `openai/${modelName}`,
+        model_name: modelName,
+        display_name: modelName,
+        aliases: [],
+        pricing: [
+          {
+            provider: "openai",
+            official: true,
+            source: "test-incomplete-live-cpt",
+            charges: {
+              prompt: { unit: "per_M_tokens", price: String(standard[0]) },
+            },
+            tracks: null,
+          },
+        ],
+      }),
+      PROVIDERS
+    );
+
+    expect(priceData).toMatchObject({
+      input_cost_per_token: standard[0] / 1_000_000,
+      cache_read_input_token_cost: standard[1] / 1_000_000,
+      cache_creation_input_token_cost: standard[2] / 1_000_000,
+      output_cost_per_token: standard[3] / 1_000_000,
+      input_cost_per_token_above_272k_tokens: long[0] / 1_000_000,
+      cache_read_input_token_cost_above_272k_tokens: long[1] / 1_000_000,
+      cache_creation_input_token_cost_above_272k_tokens: long[2] / 1_000_000,
+      output_cost_per_token_above_272k_tokens: long[3] / 1_000_000,
+      input_cost_per_token_priority: priority[0] / 1_000_000,
+      cache_read_input_token_cost_priority: priority[1] / 1_000_000,
+      cache_creation_input_token_cost_priority: priority[2] / 1_000_000,
+      output_cost_per_token_priority: priority[3] / 1_000_000,
+    });
+  });
+
+  it("keeps explicit GPT-5.6 CPT rates and records supplement conflicts", () => {
+    const entry = gpt56Entry();
+    const official = entry.pricing[0];
+    entry.pricing = [
+      {
+        ...official,
+        tracks: [
+          ...(official.tracks ?? []),
+          {
+            label: "priority",
+            factor: "2",
+            charge_factors: { cache_write: "2.4" },
+            triggers: [{ kind: "body_matches", field: "service_tier", pattern: "^priority$" }],
+          },
+        ],
+      },
+    ];
+
+    const priceData = convertCptModelEntry(entry, PROVIDERS);
+    const metadata = priceData?.pricing?.openai.openai_official_pricing_supplement;
+
+    expect(priceData?.cache_creation_input_token_cost_priority).toBe(15 / 1_000_000);
+    expect(metadata).toEqual({
+      id: OPENAI_OFFICIAL_GPT56_PRICING_SUPPLEMENT_ID,
+      source: "https://developers.openai.com/api/docs/pricing",
+      applied_fields: [],
+      conflicting_fields: ["cache_creation_input_token_cost_priority"],
+    });
+  });
+
+  it("does not apply the OpenAI supplement to a non-official provider node", () => {
+    const priceData = convertCptModelEntry(
+      gpt56Entry({
+        pricing: [
+          {
+            provider: "openrouter",
+            official: false,
+            source: "test",
+            charges: { prompt: { unit: "per_M_tokens", price: "5.5" } },
+            tracks: null,
+          },
+        ],
+      }),
+      PROVIDERS
+    );
+
+    expect(priceData?.input_cost_per_token).toBe(5.5 / 1_000_000);
+    expect(priceData?.input_cost_per_token_priority).toBeUndefined();
+    expect(priceData?.openai_official_pricing_supplement).toBeUndefined();
+  });
+
   it("uses the first official variant for top-level fields", () => {
     const priceData = convertCptModelEntry(claudeEntry(), PROVIDERS);
     expect(priceData).not.toBeNull();
@@ -485,6 +651,18 @@ describe("convertCptTable", () => {
 
     // vendors 统计仍按 canonical 模型计数
     expect(converted.vendors.find((v) => v.vendor === "anthropic")?.modelCount).toBe(1);
+  });
+
+  it("expands gpt-5.6 as a Sol alias with the complete official Priority rates", () => {
+    const converted = convertCptTable(table([gpt56Entry()]));
+
+    expect(converted.models["gpt-5.6"]).toMatchObject({
+      slug: "openai/gpt-5.6-sol",
+      input_cost_per_token_priority: 10 / 1_000_000,
+      cache_read_input_token_cost_priority: 1 / 1_000_000,
+      cache_creation_input_token_cost_priority: 12.5 / 1_000_000,
+      output_cost_per_token_priority: 60 / 1_000_000,
+    });
   });
 
   it("does not let an alias override another canonical model", () => {

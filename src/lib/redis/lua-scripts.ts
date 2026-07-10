@@ -277,7 +277,8 @@ return results
  * ARGV[1]: cost（本次消费金额）
  * ARGV[2]: now（当前时间戳，毫秒）
  * ARGV[3]: window（窗口时长，毫秒，默认 18000000 = 5小时）
- * ARGV[4]: request_id（可选，用于 member 去重）
+ * ARGV[4]: request_id（可选，billing_event_id 缺失时用于 member 去重）
+ * ARGV[5]: billing_event_id（可选，同一请求内独立计费事件的稳定去重 ID，优先使用）
  *
  * 返回值：string - 当前窗口内的总消费
  */
@@ -287,14 +288,20 @@ local cost = tonumber(ARGV[1])
 local now_ms = tonumber(ARGV[2])
 local window_ms = tonumber(ARGV[3])  -- 5 hours = 18000000 ms
 local request_id = ARGV[4]
+local billing_event_id = ARGV[5]
 
 -- 1. 清理过期记录（5 小时前的数据）
 redis.call('ZREMRANGEBYSCORE', key, '-inf', now_ms - window_ms)
 
--- 2. 添加当前消费记录（member = timestamp:cost 或 timestamp:requestId:cost，便于调试和追踪）
+-- 2. 添加当前消费记录。billing_event_id 区分同一请求的 winner / hedge losers；
+--    缺失时回退到原 request_id member，保持普通请求重试去重语义。
 local member
-if request_id and request_id ~= '' then
-  member = now_ms .. ':' .. request_id .. ':' .. cost
+local member_id = billing_event_id
+if not member_id or member_id == '' then
+  member_id = request_id
+end
+if member_id and member_id ~= '' then
+  member = now_ms .. ':' .. member_id .. ':' .. cost
 else
   member = now_ms .. ':' .. cost
 end
@@ -364,7 +371,8 @@ return tostring(total)
  * ARGV[1]: cost（本次消费金额）
  * ARGV[2]: now（当前时间戳，毫秒）
  * ARGV[3]: window（窗口时长，毫秒，默认 86400000 = 24小时）
- * ARGV[4]: request_id（可选，用于 member 去重）
+ * ARGV[4]: request_id（可选，billing_event_id 缺失时用于 member 去重）
+ * ARGV[5]: billing_event_id（可选，同一请求内独立计费事件的稳定去重 ID，优先使用）
  *
  * 返回值：string - 当前窗口内的总消费
  */
@@ -374,14 +382,20 @@ local cost = tonumber(ARGV[1])
 local now_ms = tonumber(ARGV[2])
 local window_ms = tonumber(ARGV[3])  -- 24 hours = 86400000 ms
 local request_id = ARGV[4]
+local billing_event_id = ARGV[5]
 
 -- 1. 清理过期记录（24 小时前的数据）
 redis.call('ZREMRANGEBYSCORE', key, '-inf', now_ms - window_ms)
 
--- 2. 添加当前消费记录（member = timestamp:cost 或 timestamp:requestId:cost，便于调试和追踪）
+-- 2. 添加当前消费记录。billing_event_id 区分同一请求的 winner / hedge losers；
+--    缺失时回退到原 request_id member，保持普通请求重试去重语义。
 local member
-if request_id and request_id ~= '' then
-  member = now_ms .. ':' .. request_id .. ':' .. cost
+local member_id = billing_event_id
+if not member_id or member_id == '' then
+  member_id = request_id
+end
+if member_id and member_id ~= '' then
+  member = now_ms .. ':' .. member_id .. ':' .. cost
 else
   member = now_ms .. ':' .. cost
 end

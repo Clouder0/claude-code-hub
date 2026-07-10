@@ -226,18 +226,6 @@ type StreamingHedgeAttempt = {
    * usage lives in the first chunk).
    */
   firstChunk: Uint8Array | null;
-  /**
-   * Billing context snapshot for the INITIAL provider's losing attempt, captured BEFORE
-   * commitWinner overwrites the shared session's model/context with the winner's. Null for
-   * shadow-session attempts (which read their own un-polluted session at billing time).
-   */
-  billingSnapshot: {
-    originalModel: string | null;
-    redirectedModel: string | null;
-    requestedServiceTier: string | null;
-    context1mApplied: boolean;
-    groupCostMultiplier: number;
-  } | null;
 };
 
 type ReactiveRectifierRetryState = {
@@ -3924,12 +3912,12 @@ export class ProxyForwarder {
         await finalizeHedgeLoserBilling({
           messageRequestId,
           loserSession: attempt.session,
+          trackingSession: session,
           provider: attempt.provider,
           attemptNumber: attempt.sequence,
           upstreamStatusCode: response.status,
           allContent,
           drainComplete,
-          billingContext: attempt.billingSnapshot ?? undefined,
         });
       })()
         .catch((billingError) => {
@@ -4368,7 +4356,7 @@ export class ProxyForwarder {
                 attempt.sequence,
                 error,
                 errorMessage,
-                buildRequestDetails(session),
+                buildRequestDetails(attempt.session),
                 matchedRule,
                 rawCrossProviderFallbackEnabled
               ),
@@ -4417,25 +4405,9 @@ export class ProxyForwarder {
         getAttemptModelRedirect(activeAttempt);
       }
 
-      if (attempt.session !== session) {
-        // The winner is an alternative; syncWinningAttemptSession is about to overwrite the
-        // ORIGINAL session's model/context with the winner's. Snapshot the initial-provider
-        // loser's own billing context FIRST so it is priced against its own model, not the winner's.
-        for (const other of attempts) {
-          if (other !== attempt && other.session === session && other.billAsLoser) {
-            const loserRequest = session.request.message as Record<string, unknown>;
-            other.billingSnapshot = {
-              originalModel: session.getOriginalModel(),
-              redirectedModel: session.getCurrentModel(),
-              requestedServiceTier:
-                typeof loserRequest.service_tier === "string" ? loserRequest.service_tier : null,
-              context1mApplied: session.getContext1mApplied(),
-              groupCostMultiplier: session.getGroupCostMultiplier(),
-            };
-          }
-        }
-        ProxyForwarder.syncWinningAttemptSession(session, attempt.session);
-      }
+      // Every hedge attempt, including the initial provider, owns an isolated session. Only the
+      // winner is synchronized into the tracking session; losers keep the exact request they sent.
+      ProxyForwarder.syncWinningAttemptSession(session, attempt.session);
       const detailSnapshotSession = attempt.session as ProxySessionWithDetailSnapshotRuntime;
       void persistRequestAfterSnapshot(session, detailSnapshotSession.detailSnapshotRequestAfter);
       void persistResponseBeforeSnapshot(
@@ -4524,7 +4496,7 @@ export class ProxyForwarder {
 
     const startAttempt = async (
       provider: Provider,
-      useOriginalSession: boolean
+      isInitialAttempt: boolean
     ): Promise<boolean> => {
       if (settled || winnerCommitted || noMoreProviders || launchedProviderIds.has(provider.id)) {
         return false;
@@ -4532,7 +4504,7 @@ export class ProxyForwarder {
 
       launchedProviderIds.add(provider.id);
 
-      if (!useOriginalSession && session.sessionId) {
+      if (!isInitialAttempt && session.sessionId) {
         const limit = provider.limitConcurrentSessions || 0;
         const checkResult = await RateLimitService.checkAndTrackProviderSession(
           provider.id,
@@ -4573,9 +4545,7 @@ export class ProxyForwarder {
 
       launchedProviderCount += 1;
 
-      const attemptSession = useOriginalSession
-        ? session
-        : ProxyForwarder.createStreamingShadowSession(session, provider);
+      const attemptSession = ProxyForwarder.createStreamingShadowSession(session, provider);
       attemptSession.setProvider(provider);
 
       const attempt: StreamingHedgeAttempt = {
@@ -4610,7 +4580,6 @@ export class ProxyForwarder {
         billAsLoser: billHedgeLosers && session.messageContext?.id != null,
         loserBillingStarted: false,
         firstChunk: null,
-        billingSnapshot: null,
       };
 
       attempts.add(attempt);
@@ -4812,7 +4781,10 @@ export class ProxyForwarder {
     shadow.setCacheTtlResolved(session.getCacheTtlResolved());
     shadow.setContext1mApplied(session.getContext1mApplied());
     shadow.forwardedRequestBody = null;
-    shadow.sessionId = null;
+    // Keep stable request identity for metadata/cache-affinity shaping, but prevent each racing
+    // attempt from independently persisting debug/session state. The tracking session owns writes.
+    shadow.shouldPersistSessionDebugArtifacts = () => false;
+    shadow.shouldTrackSessionObservability = () => false;
     shadow.messageContext = null;
     shadow.setProvider(provider);
 

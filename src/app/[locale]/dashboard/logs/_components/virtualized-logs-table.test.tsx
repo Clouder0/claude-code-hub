@@ -13,6 +13,7 @@ let mockError: unknown = null;
 let mockHasNextPage = false;
 let mockIsFetchingNextPage = false;
 const useInfiniteQuerySpy = vi.hoisted(() => vi.fn());
+const errorDetailsDialogSpy = vi.hoisted(() => vi.fn());
 
 vi.mock("next-intl", () => ({
   useTranslations: () => (key: string, values?: Record<string, string>) =>
@@ -104,7 +105,10 @@ vi.mock("./model-display-with-redirect", () => ({
 }));
 
 vi.mock("./error-details-dialog", () => ({
-  ErrorDetailsDialog: () => <div data-slot="error-details-dialog" />,
+  ErrorDetailsDialog: (props: Record<string, unknown>) => {
+    errorDetailsDialogSpy(props);
+    return <div data-slot="error-details-dialog" />;
+  },
 }));
 
 let mockIsProviderFinalized = true;
@@ -129,7 +133,10 @@ function makeLog(overrides: Partial<UsageLogRow>): UsageLogRow {
     endpoint: "/v1/messages",
     statusCode: 200,
     inputTokens: 1,
+    observedInputTokens: null,
     outputTokens: 1,
+    cacheWriteTokensReported: null,
+    cacheWriteAccounting: null,
     cacheCreationInputTokens: 0,
     cacheReadInputTokens: 0,
     cacheCreation5mInputTokens: 0,
@@ -185,6 +192,23 @@ function renderCostTooltipWithLog(overrides: Partial<UsageLogRow>) {
 }
 
 describe("virtualized-logs-table multiplier badge", () => {
+  test("forwards cache-write accounting evidence to request details", () => {
+    errorDetailsDialogSpy.mockClear();
+    renderTableWithLog({
+      observedInputTokens: 9016,
+      cacheWriteTokensReported: 0,
+      cacheWriteAccounting: "inferred_input_minus_cache_read_v1",
+    });
+
+    expect(errorDetailsDialogSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        observedInputTokens: 9016,
+        cacheWriteTokensReported: 0,
+        cacheWriteAccounting: "inferred_input_minus_cache_read_v1",
+      })
+    );
+  });
+
   test("does not cap cached pages so deep scroll can return to the latest rows", () => {
     mockIsLoading = false;
     mockIsError = false;
@@ -660,6 +684,47 @@ describe("virtualized-logs-table multiplier badge", () => {
     expect(tooltip.textContent).toContain("logs.billingDetails.hedgeTokenTotal");
     expect(tooltip.textContent).toContain("logs.billingDetails.hedgeColCacheRead");
     expect(tooltip.textContent).not.toContain("logs.billingDetails.hedgeColCacheWrite");
+  });
+
+  test("renders a request-level unsupported settlement instead of a zero cost", () => {
+    const html = renderTableWithLog({
+      costUsd: "0.000000000000000",
+      specialSettings: [
+        {
+          type: "billing_settlement",
+          scope: "billing",
+          hit: true,
+          status: "unsupported",
+          reason: "gpt56_priority_long_context_unsupported",
+          observedInputTokens: 272001,
+          missingFields: [],
+        },
+      ],
+    });
+
+    expect(html).toContain("logs.billingDetails.settlementUnsupported");
+    expect(html).not.toContain("$0.000000");
+  });
+
+  test("renders an unsupported hedge loser status instead of a zero attempt cost", () => {
+    const tooltip = renderCostTooltipWithLog({
+      costUsd: "0.010000",
+      costBreakdown: null,
+      hedgeLosers: [
+        {
+          providerId: 2,
+          providerName: "unsupported-loser",
+          attemptNumber: 2,
+          costUsd: "0",
+          billingStatus: "unsupported",
+          billingReason: "gpt56_priority_long_context_unsupported",
+        },
+      ],
+    });
+
+    expect(tooltip.textContent).toContain("unsupported-loser");
+    expect(tooltip.textContent).toContain("logs.billingDetails.settlementUnsupported");
+    expect(tooltip.textContent).not.toContain("$0.000000");
   });
 });
 

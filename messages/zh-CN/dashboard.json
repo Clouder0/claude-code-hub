@@ -298,7 +298,43 @@
       "billingDetails": {
         "title": "计费详情",
         "input": "输入",
+        "observedInput": "观测输入总量",
+        "ordinaryInput": "普通输入",
         "output": "输出",
+        "cacheWriteReported": "上游报告的缓存写入",
+        "cacheWriteEffective": "有效缓存写入",
+        "cacheWriteNotReported": "未报告",
+        "cacheWriteAccounting": "缓存写入计量方式",
+        "cacheWriteAccountingSource": {
+          "reported_positive": "由上游报告",
+          "inferred_input_minus_cache_read_v1": "按观测输入减缓存命中估算",
+          "none": "未分配缓存写入"
+        },
+        "effectiveServiceTier": "生效服务层级",
+        "serviceTier": {
+          "standard": "标准",
+          "priority": "优先"
+        },
+        "longContextPricing": "长上下文计费",
+        "longContextApplied": "超过 {threshold} tokens 时生效",
+        "longContextAppliedUnknown": "已生效",
+        "pricingTier": "计费档位",
+        "pricingTierValue": {
+          "standard": "标准",
+          "standard_long_context": "标准长上下文",
+          "priority": "优先"
+        },
+        "pricingRateSource": "单价来源",
+        "priceBook": "价格簿",
+        "settlementStatus": "结算状态",
+        "settlementUnsupported": "不支持",
+        "settlementReason": {
+          "gpt56_standard_rates_incomplete": "标准服务单价字段不完整；本请求未结算费用。",
+          "gpt56_long_context_rates_incomplete": "标准长上下文单价字段不完整；本请求未结算费用。",
+          "gpt56_priority_rates_incomplete": "优先服务单价字段不完整；本请求未结算费用。",
+          "gpt56_priority_long_context_unsupported": "优先服务不支持长上下文计费；本请求未结算费用。"
+        },
+        "settlementMissingFields": "缺失价格字段：{fields}",
         "cacheWrite5m": "缓存写入 (5m)",
         "cacheWrite1h": "缓存写入 (1h)",
         "cacheRead": "缓存读取",

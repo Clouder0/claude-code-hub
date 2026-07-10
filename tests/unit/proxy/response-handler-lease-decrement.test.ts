@@ -51,7 +51,9 @@ vi.mock("@/repository/system-config", () => ({
 
 vi.mock("@/repository/message", () => ({
   updateMessageRequestCost: vi.fn(),
-  updateMessageRequestCostWithBreakdown: vi.fn(),
+  updateMessageRequestCostWithBreakdown: vi.fn(async (_id: number, costUsd: unknown) =>
+    String(costUsd)
+  ),
   updateMessageRequestDetails: vi.fn(),
   updateMessageRequestDuration: vi.fn(),
 }));

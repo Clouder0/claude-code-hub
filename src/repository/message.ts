@@ -10,7 +10,7 @@ import {
   getConfiguredPublicStatusGroupsForRollupResolution,
   queuePublicStatusRollupWrite,
 } from "@/lib/public-status/rollup-store";
-import { formatCostForStorage } from "@/lib/utils/currency";
+import { Decimal, formatCostForStorage } from "@/lib/utils/currency";
 import type { HedgeLoserBilling, StoredCostBreakdown } from "@/types/cost-breakdown";
 import type { CreateMessageRequestData, MessageRequest, ProviderChainItem } from "@/types/message";
 import type { SpecialSetting } from "@/types/special-settings";
@@ -233,6 +233,9 @@ export async function createMessageRequest(
         ? sanitizeMessageRequestJsonbValue(data.special_settings)
         : undefined, // 特殊设置（审计/展示）
     cacheTtlApplied: data.cache_ttl_applied,
+    observedInputTokens: data.observed_input_tokens,
+    cacheWriteTokensReported: data.cache_write_tokens_reported,
+    cacheWriteAccounting: data.cache_write_accounting,
     cacheCreationInputTokens: data.cache_creation_input_tokens,
     cacheCreation5mInputTokens: data.cache_creation_5m_input_tokens,
     cacheCreation1hInputTokens: data.cache_creation_1h_input_tokens,
@@ -256,6 +259,9 @@ export async function createMessageRequest(
     endpoint: messageRequest.endpoint, // 新增：返回端点
     messagesCount: messageRequest.messagesCount, // 新增
     cacheTtlApplied: messageRequest.cacheTtlApplied,
+    observedInputTokens: messageRequest.observedInputTokens,
+    cacheWriteTokensReported: messageRequest.cacheWriteTokensReported,
+    cacheWriteAccounting: messageRequest.cacheWriteAccounting,
     cacheCreationInputTokens: messageRequest.cacheCreationInputTokens,
     cacheCreation5mInputTokens: messageRequest.cacheCreation5mInputTokens,
     cacheCreation1hInputTokens: messageRequest.cacheCreation1hInputTokens,
@@ -321,38 +327,149 @@ export async function updateMessageRequestCost(
     .where(eq(messageRequest.id, id));
 }
 
+export interface MessageRequestBillingSettlement {
+  providerId: number;
+  model?: string;
+  costMultiplier: number;
+  groupCostMultiplier: number;
+  providerChain: CreateMessageRequestData["provider_chain"];
+  specialSettings: CreateMessageRequestData["special_settings"];
+  context1mApplied: boolean;
+  swapCacheTtlApplied: boolean;
+  inputTokens?: number;
+  observedInputTokens?: number | null;
+  outputTokens?: number;
+  cacheCreationInputTokens?: number;
+  cacheReadInputTokens?: number;
+  cacheCreation5mInputTokens?: number;
+  cacheCreation1hInputTokens?: number;
+  cacheWriteTokensReported?: number | null;
+  cacheWriteAccounting?: CreateMessageRequestData["cache_write_accounting"];
+  cacheTtlApplied?: string | null;
+}
+
+function buildBillingSettlementUpdate(
+  settlement: MessageRequestBillingSettlement
+): Record<string, unknown> {
+  const sanitized = sanitizeMessageRequestJsonbPatch({
+    providerId: settlement.providerId,
+    model: settlement.model,
+    providerChain: settlement.providerChain,
+    specialSettings: settlement.specialSettings,
+    context1mApplied: settlement.context1mApplied,
+    swapCacheTtlApplied: settlement.swapCacheTtlApplied,
+    inputTokens: settlement.inputTokens,
+    observedInputTokens: settlement.observedInputTokens,
+    outputTokens: settlement.outputTokens,
+    cacheCreationInputTokens: settlement.cacheCreationInputTokens,
+    cacheReadInputTokens: settlement.cacheReadInputTokens,
+    cacheCreation5mInputTokens: settlement.cacheCreation5mInputTokens,
+    cacheCreation1hInputTokens: settlement.cacheCreation1hInputTokens,
+    cacheWriteTokensReported: settlement.cacheWriteTokensReported,
+    cacheWriteAccounting: settlement.cacheWriteAccounting,
+    cacheTtlApplied: settlement.cacheTtlApplied,
+  });
+
+  return {
+    ...sanitized,
+    costMultiplier: settlement.costMultiplier.toString(),
+    groupCostMultiplier: settlement.groupCostMultiplier.toString(),
+  };
+}
+
+class MessageRequestSettlementTargetMissingError extends Error {}
+
+async function retryDurableSettlement<T>(
+  id: number,
+  settlementKind: "cost" | "winner" | "unsupported billing",
+  write: () => Promise<T | undefined>
+): Promise<T> {
+  const maxAttempts = 3;
+  let lastError: unknown;
+
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    try {
+      const updated = await write();
+      if (updated === undefined) {
+        throw new MessageRequestSettlementTargetMissingError(
+          `Message request ${id} not found during ${settlementKind} settlement`
+        );
+      }
+      return updated;
+    } catch (error) {
+      if (error instanceof MessageRequestSettlementTargetMissingError) {
+        throw error;
+      }
+      lastError = error;
+      if (attempt < maxAttempts - 1) {
+        await new Promise((resolve) => setTimeout(resolve, 50 * (attempt + 1)));
+      }
+    }
+  }
+
+  throw lastError;
+}
+
 /**
- * Update cost with optional breakdown for billing detail display.
+ * Durably settle authoritative request cost before any Redis/session/trace publication.
+ * Non-authoritative request details may remain buffered, but billing state cannot be dropped.
  */
 export async function updateMessageRequestCostWithBreakdown(
   id: number,
   costUsd: CreateMessageRequestData["cost_usd"],
-  costBreakdown?: StoredCostBreakdown
-): Promise<void> {
+  costBreakdown: StoredCostBreakdown | undefined,
+  settlement: MessageRequestBillingSettlement
+): Promise<string | null> {
   const formattedCost = formatCostForStorage(costUsd);
   if (!formattedCost) {
-    return;
+    return null;
   }
   const sanitizedCostBreakdown = costBreakdown
     ? sanitizeMessageRequestJsonbValue(costBreakdown)
     : undefined;
+  const settlementUpdate = buildBillingSettlementUpdate(settlement);
 
-  if (getEnvConfig().MESSAGE_REQUEST_WRITE_MODE === "async") {
-    enqueueMessageRequestUpdate(id, {
-      costUsd: formattedCost,
-      ...(sanitizedCostBreakdown ? { costBreakdown: sanitizedCostBreakdown } : {}),
-    });
-    return;
-  }
+  const updated = await retryDurableSettlement(id, "cost", async () => {
+    const [row] = await db
+      .update(messageRequest)
+      .set({
+        costUsd: formattedCost,
+        ...(sanitizedCostBreakdown ? { costBreakdown: sanitizedCostBreakdown } : {}),
+        ...settlementUpdate,
+        updatedAt: new Date(),
+      })
+      .where(and(eq(messageRequest.id, id), isNull(messageRequest.deletedAt)))
+      .returning({ costUsd: messageRequest.costUsd });
+    return row;
+  });
 
-  await db
-    .update(messageRequest)
-    .set({
-      costUsd: formattedCost,
-      ...(sanitizedCostBreakdown ? { costBreakdown: sanitizedCostBreakdown } : {}),
-      updatedAt: new Date(),
-    })
-    .where(eq(messageRequest.id, id));
+  return updated.costUsd;
+}
+
+/**
+ * Persist an unsupported pricing decision without manufacturing a zero-dollar charge.
+ *
+ * This deliberately bypasses the async details buffer. The provenance is authoritative billing
+ * state and must survive queue overflow or a process exit before the ordinary terminal patch is
+ * flushed. Keeping cost_usd untouched also prevents an unresolved request from looking settled.
+ */
+export async function updateMessageRequestUnsupportedBillingSettlement(
+  id: number,
+  settlement: MessageRequestBillingSettlement
+): Promise<void> {
+  const settlementUpdate = buildBillingSettlementUpdate(settlement);
+
+  await retryDurableSettlement(id, "unsupported billing", async () => {
+    const [row] = await db
+      .update(messageRequest)
+      .set({
+        ...settlementUpdate,
+        updatedAt: new Date(),
+      })
+      .where(and(eq(messageRequest.id, id), isNull(messageRequest.deletedAt)))
+      .returning({ id: messageRequest.id });
+    return row;
+  });
 }
 
 /**
@@ -373,42 +490,40 @@ export async function updateMessageRequestCostWithBreakdown(
 export async function updateMessageRequestWinnerCost(
   id: number,
   winnerCost: CreateMessageRequestData["cost_usd"],
-  costBreakdown?: StoredCostBreakdown
-): Promise<void> {
+  costBreakdown: StoredCostBreakdown | undefined,
+  settlement: MessageRequestBillingSettlement
+): Promise<string | null> {
   const formattedCost = formatCostForStorage(winnerCost);
   if (!formattedCost) {
-    return;
+    return null;
   }
   const sanitizedCostBreakdown = costBreakdown
     ? sanitizeMessageRequestJsonbValue(costBreakdown)
     : undefined;
+  const settlementUpdate = buildBillingSettlementUpdate(settlement);
 
-  const MAX_ATTEMPTS = 3;
-  let lastError: unknown;
-  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
-    try {
-      await db
-        .update(messageRequest)
-        .set({
-          costUsd: sql`${formattedCost}::numeric + COALESCE((SELECT SUM((entry->>'costUsd')::numeric) FROM jsonb_array_elements(COALESCE(${messageRequest.hedgeLosers}, '[]'::jsonb)) AS entry), 0)`,
-          ...(sanitizedCostBreakdown ? { costBreakdown: sanitizedCostBreakdown } : {}),
-          updatedAt: new Date(),
-        })
-        .where(eq(messageRequest.id, id));
-      return;
-    } catch (error) {
-      lastError = error;
-      if (attempt < MAX_ATTEMPTS - 1) {
-        await new Promise((resolve) => setTimeout(resolve, 50 * (attempt + 1)));
-      }
-    }
-  }
-  throw lastError;
+  const updated = await retryDurableSettlement(id, "winner", async () => {
+    const [row] = await db
+      .update(messageRequest)
+      .set({
+        costUsd: sql`${formattedCost}::numeric + COALESCE((SELECT SUM((entry->>'costUsd')::numeric) FROM jsonb_array_elements(COALESCE(${messageRequest.hedgeLosers}, '[]'::jsonb)) AS entry), 0)`,
+        ...(sanitizedCostBreakdown ? { costBreakdown: sanitizedCostBreakdown } : {}),
+        ...settlementUpdate,
+        updatedAt: new Date(),
+      })
+      .where(and(eq(messageRequest.id, id), isNull(messageRequest.deletedAt)))
+      .returning({ costUsd: messageRequest.costUsd });
+    return row;
+  });
+
+  return updated.costUsd;
 }
 
 /**
  * Accumulate a hedge (provider racing) loser's billed cost onto an existing
  * request row, and append the loser's billing detail to the hedge_losers array.
+ * Unsupported attempts append audit provenance without touching cost_usd, so an
+ * unresolved request cannot be materialized as a successful zero-dollar charge.
  *
  * Both writes happen in ONE atomic, IDEMPOTENT statement:
  * - cost_usd     += deltaCost
@@ -430,10 +545,14 @@ export async function addMessageRequestHedgeLoserCost(
   id: number,
   deltaCost: CreateMessageRequestData["cost_usd"],
   loserEntry: HedgeLoserBilling
-): Promise<void> {
+): Promise<string | null> {
   const formattedDelta = formatCostForStorage(deltaCost);
   if (!formattedDelta) {
-    return;
+    return null;
+  }
+  const isUnsupported = loserEntry.billingStatus === "unsupported";
+  if (isUnsupported && !new Decimal(formattedDelta).eq(0)) {
+    throw new Error("Unsupported hedge-loser billing audit must not include a non-zero cost");
   }
 
   const sanitizedLoserEntry = sanitizeMessageRequestJsonbValue(loserEntry);
@@ -447,10 +566,14 @@ export async function addMessageRequestHedgeLoserCost(
   let lastError: unknown;
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
     try {
-      await db
+      const [updated] = await db
         .update(messageRequest)
         .set({
-          costUsd: sql`COALESCE(${messageRequest.costUsd}, 0) + ${formattedDelta}::numeric`,
+          ...(isUnsupported
+            ? {}
+            : {
+                costUsd: sql`COALESCE(${messageRequest.costUsd}, 0) + ${formattedDelta}::numeric`,
+              }),
           hedgeLosers: sql`COALESCE(${messageRequest.hedgeLosers}, '[]'::jsonb) || ${loserJson}::jsonb`,
           updatedAt: new Date(),
         })
@@ -459,8 +582,26 @@ export async function addMessageRequestHedgeLoserCost(
             eq(messageRequest.id, id),
             sql`NOT (COALESCE(${messageRequest.hedgeLosers}, '[]'::jsonb) @> ${guardJson}::jsonb)`
           )
-        );
-      return;
+        )
+        .returning({ costUsd: messageRequest.costUsd });
+      if (updated) {
+        return updated.costUsd;
+      }
+
+      // A retry after an ambiguous commit is expected to hit the idempotency guard.
+      // Read back the request total so downstream session accounting still receives
+      // the authoritative loser-inclusive amount instead of treating the no-op as missing.
+      const [existing] = await db
+        .select({ costUsd: messageRequest.costUsd })
+        .from(messageRequest)
+        .where(eq(messageRequest.id, id));
+      if (!existing) {
+        throw new Error(`Message request ${id} not found after hedge-loser settlement`);
+      }
+      if (existing.costUsd == null && !isUnsupported) {
+        throw new Error(`Message request ${id} has no authoritative cost after settlement`);
+      }
+      return existing.costUsd;
     } catch (error) {
       lastError = error;
       if (attempt < MAX_ATTEMPTS - 1) {
@@ -480,7 +621,10 @@ export async function updateMessageRequestDetails(
   details: {
     statusCode?: number;
     inputTokens?: number;
+    observedInputTokens?: number | null;
     outputTokens?: number;
+    cacheWriteTokensReported?: number | null;
+    cacheWriteAccounting?: CreateMessageRequestData["cache_write_accounting"];
     ttfbMs?: number | null;
     cacheCreationInputTokens?: number;
     cacheReadInputTokens?: number;
@@ -521,8 +665,17 @@ export async function updateMessageRequestDetails(
   if (details.inputTokens !== undefined) {
     updateData.inputTokens = details.inputTokens;
   }
+  if (details.observedInputTokens !== undefined) {
+    updateData.observedInputTokens = details.observedInputTokens;
+  }
   if (details.outputTokens !== undefined) {
     updateData.outputTokens = details.outputTokens;
+  }
+  if (details.cacheWriteTokensReported !== undefined) {
+    updateData.cacheWriteTokensReported = details.cacheWriteTokensReported;
+  }
+  if (details.cacheWriteAccounting !== undefined) {
+    updateData.cacheWriteAccounting = details.cacheWriteAccounting;
   }
   if (details.ttfbMs !== undefined) {
     updateData.ttfbMs = details.ttfbMs;
@@ -624,7 +777,10 @@ export async function findMessageRequestById(id: number): Promise<MessageRequest
       messagesCount: messageRequest.messagesCount,
       statusCode: messageRequest.statusCode,
       inputTokens: messageRequest.inputTokens,
+      observedInputTokens: messageRequest.observedInputTokens,
       outputTokens: messageRequest.outputTokens,
+      cacheWriteTokensReported: messageRequest.cacheWriteTokensReported,
+      cacheWriteAccounting: messageRequest.cacheWriteAccounting,
       cacheCreationInputTokens: messageRequest.cacheCreationInputTokens,
       cacheReadInputTokens: messageRequest.cacheReadInputTokens,
       cacheCreation5mInputTokens: messageRequest.cacheCreation5mInputTokens,
@@ -637,6 +793,7 @@ export async function findMessageRequestById(id: number): Promise<MessageRequest
       context1mApplied: messageRequest.context1mApplied,
       swapCacheTtlApplied: messageRequest.swapCacheTtlApplied,
       specialSettings: messageRequest.specialSettings,
+      hedgeLosers: messageRequest.hedgeLosers,
       createdAt: messageRequest.createdAt,
       updatedAt: messageRequest.updatedAt,
       deletedAt: messageRequest.deletedAt,
@@ -666,7 +823,10 @@ export async function findMessageRequestById(id: number): Promise<MessageRequest
       costUsd: usageLedger.costUsd,
       costMultiplier: usageLedger.costMultiplier,
       inputTokens: usageLedger.inputTokens,
+      observedInputTokens: usageLedger.observedInputTokens,
       outputTokens: usageLedger.outputTokens,
+      cacheWriteTokensReported: usageLedger.cacheWriteTokensReported,
+      cacheWriteAccounting: usageLedger.cacheWriteAccounting,
       cacheCreationInputTokens: usageLedger.cacheCreationInputTokens,
       cacheReadInputTokens: usageLedger.cacheReadInputTokens,
       cacheCreation5mInputTokens: usageLedger.cacheCreation5mInputTokens,
@@ -674,6 +834,8 @@ export async function findMessageRequestById(id: number): Promise<MessageRequest
       cacheTtlApplied: usageLedger.cacheTtlApplied,
       context1mApplied: usageLedger.context1mApplied,
       swapCacheTtlApplied: usageLedger.swapCacheTtlApplied,
+      specialSettings: usageLedger.specialSettings,
+      hedgeLosers: usageLedger.hedgeLosers,
       durationMs: usageLedger.durationMs,
       ttfbMs: usageLedger.ttfbMs,
       sessionId: usageLedger.sessionId,
@@ -704,7 +866,10 @@ export async function findMessageRequestById(id: number): Promise<MessageRequest
     messagesCount: null,
     statusCode: ledgerRow.statusCode,
     inputTokens: ledgerRow.inputTokens,
+    observedInputTokens: ledgerRow.observedInputTokens,
     outputTokens: ledgerRow.outputTokens,
+    cacheWriteTokensReported: ledgerRow.cacheWriteTokensReported,
+    cacheWriteAccounting: ledgerRow.cacheWriteAccounting,
     cacheCreationInputTokens: ledgerRow.cacheCreationInputTokens,
     cacheReadInputTokens: ledgerRow.cacheReadInputTokens,
     cacheCreation5mInputTokens: ledgerRow.cacheCreation5mInputTokens,
@@ -716,7 +881,8 @@ export async function findMessageRequestById(id: number): Promise<MessageRequest
     blockedReason: null,
     context1mApplied: ledgerRow.context1mApplied,
     swapCacheTtlApplied: ledgerRow.swapCacheTtlApplied,
-    specialSettings: null,
+    specialSettings: ledgerRow.specialSettings,
+    hedgeLosers: ledgerRow.hedgeLosers,
     createdAt: ledgerRow.createdAt,
     updatedAt: ledgerRow.createdAt,
     deletedAt: null,
@@ -747,7 +913,10 @@ export async function findMessageRequestBySessionId(
       messagesCount: messageRequest.messagesCount,
       statusCode: messageRequest.statusCode,
       inputTokens: messageRequest.inputTokens,
+      observedInputTokens: messageRequest.observedInputTokens,
       outputTokens: messageRequest.outputTokens,
+      cacheWriteTokensReported: messageRequest.cacheWriteTokensReported,
+      cacheWriteAccounting: messageRequest.cacheWriteAccounting,
       cacheCreationInputTokens: messageRequest.cacheCreationInputTokens,
       cacheReadInputTokens: messageRequest.cacheReadInputTokens,
       cacheCreation5mInputTokens: messageRequest.cacheCreation5mInputTokens,
@@ -757,6 +926,7 @@ export async function findMessageRequestBySessionId(
       providerChain: messageRequest.providerChain,
       blockedBy: messageRequest.blockedBy,
       blockedReason: messageRequest.blockedReason,
+      hedgeLosers: messageRequest.hedgeLosers,
       createdAt: messageRequest.createdAt,
       updatedAt: messageRequest.updatedAt,
       deletedAt: messageRequest.deletedAt,
@@ -787,7 +957,10 @@ export async function findMessageRequestBySessionId(
       costUsd: usageLedger.costUsd,
       costMultiplier: usageLedger.costMultiplier,
       inputTokens: usageLedger.inputTokens,
+      observedInputTokens: usageLedger.observedInputTokens,
       outputTokens: usageLedger.outputTokens,
+      cacheWriteTokensReported: usageLedger.cacheWriteTokensReported,
+      cacheWriteAccounting: usageLedger.cacheWriteAccounting,
       cacheCreationInputTokens: usageLedger.cacheCreationInputTokens,
       cacheReadInputTokens: usageLedger.cacheReadInputTokens,
       cacheCreation5mInputTokens: usageLedger.cacheCreation5mInputTokens,
@@ -795,6 +968,8 @@ export async function findMessageRequestBySessionId(
       cacheTtlApplied: usageLedger.cacheTtlApplied,
       context1mApplied: usageLedger.context1mApplied,
       swapCacheTtlApplied: usageLedger.swapCacheTtlApplied,
+      specialSettings: usageLedger.specialSettings,
+      hedgeLosers: usageLedger.hedgeLosers,
       durationMs: usageLedger.durationMs,
       ttfbMs: usageLedger.ttfbMs,
       sessionId: usageLedger.sessionId,
@@ -826,7 +1001,10 @@ export async function findMessageRequestBySessionId(
     messagesCount: null,
     statusCode: ledgerRow.statusCode,
     inputTokens: ledgerRow.inputTokens,
+    observedInputTokens: ledgerRow.observedInputTokens,
     outputTokens: ledgerRow.outputTokens,
+    cacheWriteTokensReported: ledgerRow.cacheWriteTokensReported,
+    cacheWriteAccounting: ledgerRow.cacheWriteAccounting,
     cacheCreationInputTokens: ledgerRow.cacheCreationInputTokens,
     cacheReadInputTokens: ledgerRow.cacheReadInputTokens,
     cacheCreation5mInputTokens: ledgerRow.cacheCreation5mInputTokens,
@@ -838,7 +1016,8 @@ export async function findMessageRequestBySessionId(
     blockedReason: null,
     context1mApplied: ledgerRow.context1mApplied,
     swapCacheTtlApplied: ledgerRow.swapCacheTtlApplied,
-    specialSettings: null,
+    specialSettings: ledgerRow.specialSettings,
+    hedgeLosers: ledgerRow.hedgeLosers,
     createdAt: ledgerRow.createdAt,
     updatedAt: ledgerRow.createdAt,
     deletedAt: null,
@@ -1412,7 +1591,10 @@ export async function findUsageLogs(params: {
       costUsd: usageLedger.costUsd,
       costMultiplier: usageLedger.costMultiplier,
       inputTokens: usageLedger.inputTokens,
+      observedInputTokens: usageLedger.observedInputTokens,
       outputTokens: usageLedger.outputTokens,
+      cacheWriteTokensReported: usageLedger.cacheWriteTokensReported,
+      cacheWriteAccounting: usageLedger.cacheWriteAccounting,
       cacheCreationInputTokens: usageLedger.cacheCreationInputTokens,
       cacheReadInputTokens: usageLedger.cacheReadInputTokens,
       cacheCreation5mInputTokens: usageLedger.cacheCreation5mInputTokens,
@@ -1420,6 +1602,8 @@ export async function findUsageLogs(params: {
       cacheTtlApplied: usageLedger.cacheTtlApplied,
       context1mApplied: usageLedger.context1mApplied,
       swapCacheTtlApplied: usageLedger.swapCacheTtlApplied,
+      specialSettings: usageLedger.specialSettings,
+      hedgeLosers: usageLedger.hedgeLosers,
       durationMs: usageLedger.durationMs,
       ttfbMs: usageLedger.ttfbMs,
       sessionId: usageLedger.sessionId,
@@ -1449,7 +1633,10 @@ export async function findUsageLogs(params: {
       messagesCount: null,
       statusCode: row.statusCode,
       inputTokens: row.inputTokens,
+      observedInputTokens: row.observedInputTokens,
       outputTokens: row.outputTokens,
+      cacheWriteTokensReported: row.cacheWriteTokensReported,
+      cacheWriteAccounting: row.cacheWriteAccounting,
       cacheCreationInputTokens: row.cacheCreationInputTokens,
       cacheReadInputTokens: row.cacheReadInputTokens,
       cacheCreation5mInputTokens: row.cacheCreation5mInputTokens,
@@ -1461,7 +1648,8 @@ export async function findUsageLogs(params: {
       blockedReason: null,
       context1mApplied: row.context1mApplied,
       swapCacheTtlApplied: row.swapCacheTtlApplied,
-      specialSettings: null,
+      specialSettings: row.specialSettings,
+      hedgeLosers: row.hedgeLosers,
       createdAt: row.createdAt,
       updatedAt: row.createdAt,
       deletedAt: null,
@@ -1517,6 +1705,7 @@ export async function findRequestsBySessionId(
       inputTokens: messageRequest.inputTokens,
       outputTokens: messageRequest.outputTokens,
       errorMessage: messageRequest.errorMessage,
+      specialSettings: messageRequest.specialSettings,
     })
     .from(messageRequest)
     .where(and(eq(messageRequest.sessionId, sessionId), isNull(messageRequest.deletedAt)))
@@ -1532,7 +1721,13 @@ export async function findRequestsBySessionId(
       sequence: r.sequence ?? 1,
       model: r.model,
       statusCode: r.statusCode,
-      costUsd: r.costUsd,
+      costUsd:
+        Array.isArray(r.specialSettings) &&
+        r.specialSettings.some(
+          (setting) => setting.type === "billing_settlement" && setting.status === "unsupported"
+        )
+          ? null
+          : r.costUsd,
       createdAt: r.createdAt,
       inputTokens: r.inputTokens,
       outputTokens: r.outputTokens,

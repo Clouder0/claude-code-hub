@@ -32,6 +32,7 @@ function collectNumericCosts(priceData: ModelPriceData): unknown[] {
     priceData.cache_read_input_token_cost_above_272k_tokens_priority,
     priceData.input_cost_per_token_priority,
     priceData.output_cost_per_token_priority,
+    priceData.cache_creation_input_token_cost_priority,
     priceData.cache_read_input_token_cost_priority,
     priceData.output_cost_per_image,
     longContextPricing?.input_multiplier,

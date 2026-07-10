@@ -476,6 +476,63 @@ describe("ProxySession.getCachedPriceDataByBillingSource", () => {
   });
 });
 
+describe("ProxySession forwarded billing request", () => {
+  it("uses the final serialized request and invalidates the decoded cache between attempts", () => {
+    const session = createSession({
+      redirectedModel: "routed-model",
+      requestMessage: {
+        model: "routed-model",
+        service_tier: "default",
+      },
+    });
+    session.forwardedRequestBody = JSON.stringify({
+      model: "gpt-5.6-sol",
+      service_tier: "priority",
+      prompt_cache_options: { mode: "explicit" },
+    });
+
+    expect(session.getBillingModel()).toBe("gpt-5.6-sol");
+    expect(session.getBillingRequestMessage()).toEqual({
+      model: "gpt-5.6-sol",
+      service_tier: "priority",
+      prompt_cache_options: { mode: "explicit" },
+    });
+
+    session.forwardedRequestBody = JSON.stringify({
+      model: "gpt-5.6-terra",
+      service_tier: "default",
+    });
+    expect(session.getBillingModel()).toBe("gpt-5.6-terra");
+    expect(session.getBillingRequestMessage()).toEqual({
+      model: "gpt-5.6-terra",
+      service_tier: "default",
+    });
+  });
+
+  it("resolves redirected billing prices from the model actually sent upstream", async () => {
+    const finalPriceData: ModelPriceData = {
+      input_cost_per_token: 5,
+      output_cost_per_token: 30,
+    };
+    vi.mocked(getSystemSettings).mockResolvedValue(makeSystemSettings("redirected"));
+    vi.mocked(findLatestPriceByModel).mockImplementation(async (modelName: string) =>
+      modelName === "gpt-5.6-sol" ? makePriceRecord(modelName, finalPriceData) : null
+    );
+    const session = createSession({
+      originalModel: "client-model",
+      redirectedModel: "routed-model",
+      requestMessage: { model: "routed-model" },
+    });
+    session.forwardedRequestBody = JSON.stringify({ model: "gpt-5.6-sol" });
+
+    const resolved = await session.getResolvedPricingByBillingSource();
+
+    expect(resolved?.resolvedModelName).toBe("gpt-5.6-sol");
+    expect(resolved?.priceData).toEqual(finalPriceData);
+    expect(findLatestPriceByModel).toHaveBeenCalledWith("gpt-5.6-sol");
+  });
+});
+
 function createSessionForHeaders(headers: Headers): ProxySession {
   // 使用 ProxySession 的内部构造方法创建测试实例
   const testSession = ProxySession.fromContext as any;

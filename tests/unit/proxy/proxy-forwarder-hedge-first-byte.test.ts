@@ -468,6 +468,23 @@ describe("ProxyForwarder - first-byte hedge scheduling", () => {
     expect(sessionState.currentModelRedirect.redirect.redirectedModel).toBe(fireworksRedirect);
   });
 
+  test("attempt sessions retain stable request identity without owning persistence", () => {
+    const provider = createProvider({ id: 2, name: "attempt" });
+    const session = createSession();
+    session.messageContext = { id: 123 } as never;
+
+    const attempt = (
+      ProxyForwarder as unknown as {
+        createStreamingShadowSession: (session: ProxySession, provider: Provider) => ProxySession;
+      }
+    ).createStreamingShadowSession(session, provider);
+
+    expect(attempt.sessionId).toBe("sess-hedge");
+    expect(attempt.messageContext).toBeNull();
+    expect(attempt.shouldPersistSessionDebugArtifacts()).toBe(false);
+    expect(attempt.shouldTrackSessionObservability()).toBe(false);
+  });
+
   test("switching to provider without redirect should clear stale redirect snapshot", () => {
     const requestedModel = "claude-haiku-4-5-20251001";
     const fireworksRedirect = "accounts/fireworks/routers/kimi-k2p5-turbo";
@@ -2007,6 +2024,112 @@ describe("ProxyForwarder - first-byte hedge scheduling", () => {
       expect(winnerEntry).toBeDefined();
       expect(winnerEntry!.reason).toBe("request_success");
       expect(mocks.releaseProviderSession).toHaveBeenCalledWith(1, "sess-hedge");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("isolates the initial attempt when an alternative wins before initial preparation completes", async () => {
+    vi.useFakeTimers();
+
+    try {
+      const initialProvider = createProvider({
+        id: 1,
+        name: "initial",
+        firstByteTimeoutStreamingMs: 100,
+      });
+      const alternativeProvider = createProvider({
+        id: 2,
+        name: "alternative",
+        firstByteTimeoutStreamingMs: 100,
+      });
+      const session = createSession();
+      setProviderWithSessionRef(session, initialProvider);
+      mocks.pickRandomProviderWithExclusion.mockResolvedValueOnce(alternativeProvider);
+
+      let releaseInitialPreparation!: () => void;
+      const initialPreparation = new Promise<void>((resolve) => {
+        releaseInitialPreparation = resolve;
+      });
+      let initialAttemptSession: ProxySession | null = null;
+      let alternativeAttemptSession: ProxySession | null = null;
+      const initialController = new AbortController();
+      const alternativeController = new AbortController();
+      const doForward = vi.spyOn(
+        ProxyForwarder as unknown as {
+          doForward: (...args: unknown[]) => Promise<Response>;
+        },
+        "doForward"
+      );
+
+      doForward.mockImplementationOnce(async (attemptSession) => {
+        initialAttemptSession = attemptSession as ProxySession;
+        await initialPreparation;
+        initialAttemptSession.request.model = "gpt-5.6-sol";
+        initialAttemptSession.request.message = {
+          model: "gpt-5.6-sol",
+          stream: true,
+          service_tier: "priority",
+          prompt_cache_options: { mode: "explicit" },
+        };
+        initialAttemptSession.forwardedRequestBody = JSON.stringify(
+          initialAttemptSession.request.message
+        );
+        const runtime = initialAttemptSession as ProxySession & AttemptRuntime;
+        runtime.responseController = initialController;
+        runtime.clearResponseTimeout = vi.fn();
+        return createStreamingResponse({
+          label: "initial",
+          firstChunkDelayMs: 0,
+          controller: initialController,
+        });
+      });
+      doForward.mockImplementationOnce(async (attemptSession) => {
+        alternativeAttemptSession = attemptSession as ProxySession;
+        alternativeAttemptSession.request.model = "gpt-5.6-terra";
+        alternativeAttemptSession.request.message = {
+          model: "gpt-5.6-terra",
+          stream: true,
+          service_tier: "default",
+        };
+        alternativeAttemptSession.forwardedRequestBody = JSON.stringify(
+          alternativeAttemptSession.request.message
+        );
+        const runtime = alternativeAttemptSession as ProxySession & AttemptRuntime;
+        runtime.responseController = alternativeController;
+        runtime.clearResponseTimeout = vi.fn();
+        return createStreamingResponse({
+          label: "alternative",
+          firstChunkDelayMs: 0,
+          controller: alternativeController,
+        });
+      });
+
+      const responsePromise = ProxyForwarder.send(session);
+      await vi.advanceTimersByTimeAsync(101);
+      const response = await responsePromise;
+
+      expect(await response.text()).toContain('"provider":"alternative"');
+      expect(initialAttemptSession).not.toBe(session);
+      expect(alternativeAttemptSession).not.toBe(session);
+      expect(initialAttemptSession).not.toBe(alternativeAttemptSession);
+      expect(session.getBillingRequestMessage()).toMatchObject({
+        model: "gpt-5.6-terra",
+        service_tier: "default",
+      });
+
+      releaseInitialPreparation();
+      await vi.advanceTimersByTimeAsync(1);
+
+      expect(initialAttemptSession?.getBillingRequestMessage()).toMatchObject({
+        model: "gpt-5.6-sol",
+        service_tier: "priority",
+        prompt_cache_options: { mode: "explicit" },
+      });
+      expect(session.getBillingRequestMessage()).toMatchObject({
+        model: "gpt-5.6-terra",
+        service_tier: "default",
+      });
     } finally {
       vi.useRealTimers();
     }

@@ -153,6 +153,13 @@ describe("resolvePricingForModelRecords", () => {
       output_cost_per_token: 0.000015,
       input_cost_per_token_above_200k_tokens: 0.000006,
       output_cost_per_token_above_200k_tokens: 0.0000225,
+      cache_creation_input_token_cost_priority: 0.0000125,
+      openai_official_pricing_supplement: {
+        id: "test",
+        source: "https://developers.openai.com/api/docs/pricing",
+        applied_fields: ["cache_creation_input_token_cost_priority"],
+        conflicting_fields: [],
+      },
       pricing: {
         anthropic: {
           input_cost_per_token: 0.000003,
@@ -181,6 +188,8 @@ describe("resolvePricingForModelRecords", () => {
     expect(resolved?.priceData.input_cost_per_token).toBe(0.000003);
     expect(resolved?.priceData.input_cost_per_token_above_200k_tokens).toBeUndefined();
     expect(resolved?.priceData.output_cost_per_token_above_200k_tokens).toBeUndefined();
+    expect(resolved?.priceData.cache_creation_input_token_cost_priority).toBeUndefined();
+    expect(resolved?.priceData.openai_official_pricing_supplement).toBeUndefined();
   });
 
   test("provider merge keeps shared top-level request fees and long_context_pricing", () => {

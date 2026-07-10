@@ -17,6 +17,7 @@ describe("model-price-fields", () => {
       mode: "chat",
       display_name: "Demo",
       input_cost_per_request: 0.25,
+      cache_creation_input_token_cost_priority: 0.0000125,
       input_cost_per_second: 0.5,
       supports_reasoning: true,
       long_context_pricing: {
@@ -35,6 +36,9 @@ describe("model-price-fields", () => {
     expect(entries.find((entry) => entry.path === "input_cost_per_request")?.kind).toBe(
       "supported"
     );
+    expect(
+      entries.find((entry) => entry.path === "cache_creation_input_token_cost_priority")?.kind
+    ).toBe("supported");
     expect(entries.find((entry) => entry.path === "input_cost_per_second")?.kind).toBe(
       "unsupported"
     );

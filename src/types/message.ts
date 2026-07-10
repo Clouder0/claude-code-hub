@@ -1,4 +1,5 @@
 import type { Numeric } from "decimal.js-light";
+import type { CacheWriteAccounting } from "@/lib/billing/openai-usage-accounting";
 import type { CacheTtlApplied } from "./cache";
 import type { HedgeLoserBilling } from "./cost-breakdown";
 import type { ProviderType } from "./provider";
@@ -283,7 +284,10 @@ export interface MessageRequest {
 
   // Token 使用信息
   inputTokens?: number;
+  observedInputTokens?: number | null;
   outputTokens?: number;
+  cacheWriteTokensReported?: number | null;
+  cacheWriteAccounting?: CacheWriteAccounting | null;
   cacheCreationInputTokens?: number;
   cacheReadInputTokens?: number;
   cacheCreation5mInputTokens?: number;
@@ -359,7 +363,10 @@ export interface CreateMessageRequestData {
 
   // Token 使用信息
   input_tokens?: number;
+  observed_input_tokens?: number | null;
   output_tokens?: number;
+  cache_write_tokens_reported?: number | null;
+  cache_write_accounting?: CacheWriteAccounting | null;
   cache_creation_input_tokens?: number;
   cache_read_input_tokens?: number;
   cache_creation_5m_input_tokens?: number;

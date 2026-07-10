@@ -159,6 +159,24 @@ function buildSettingKey(setting: SpecialSetting): string {
         setting.resolvedFrom ?? null,
         setting.effectivePriority,
       ]);
+    case "openai_service_tier_result":
+      return JSON.stringify([
+        setting.type,
+        setting.hit,
+        setting.providerType,
+        setting.requestedServiceTier,
+        setting.actualServiceTier,
+        setting.resolvedFrom,
+        setting.effectivePriority,
+      ]);
+    case "billing_settlement":
+      return JSON.stringify([
+        setting.type,
+        setting.status,
+        setting.reason,
+        setting.observedInputTokens,
+        [...setting.missingFields].sort(),
+      ]);
     case "response_input_rectifier":
       return JSON.stringify([setting.type, setting.hit, setting.action, setting.originalType]);
     case "thinking_signature_model_detection":
@@ -250,6 +268,14 @@ export function hasPriorityServiceTierSpecialSetting(
       return codexServiceTierResult.actualServiceTier === "priority";
     }
     return codexServiceTierResult.effectivePriority;
+  }
+
+  const openAIServiceTierResult = specialSettings.find(
+    (setting): setting is Extract<SpecialSetting, { type: "openai_service_tier_result" }> =>
+      setting.type === "openai_service_tier_result"
+  );
+  if (openAIServiceTierResult) {
+    return openAIServiceTierResult.effectivePriority;
   }
 
   return specialSettings.some(

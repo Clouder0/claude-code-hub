@@ -107,6 +107,141 @@ type SessionDetailResponseSnapshotInput = Omit<
   headers?: SessionDetailSnapshotHeadersInput;
 };
 
+const SESSION_USAGE_OPTIONAL_FIELDS = [
+  "inputTokens",
+  "outputTokens",
+  "cacheCreationInputTokens",
+  "cacheReadInputTokens",
+  "statusCode",
+  "errorMessage",
+] as const;
+
+const UPDATE_SESSION_USAGE_FOR_REQUEST = `
+local usage_key = KEYS[1]
+local info_key = KEYS[2]
+local incoming_sequence = tonumber(ARGV[1])
+local incoming_cost_raw = ARGV[2]
+local ttl_seconds = tonumber(ARGV[3])
+local incoming_status = ARGV[4]
+
+if not incoming_sequence or not ttl_seconds or incoming_status == '' then
+  return 0
+end
+
+local incoming_cost = nil
+if incoming_cost_raw ~= '' then
+  incoming_cost = tonumber(incoming_cost_raw)
+  if not incoming_cost or incoming_cost < 0 then
+    return 0
+  end
+end
+
+local usage_sequence = tonumber(redis.call('HGET', usage_key, 'requestSequence'))
+local cost_sequence = tonumber(redis.call('HGET', usage_key, 'costRequestSequence'))
+local current_sequence = usage_sequence
+if not current_sequence or (cost_sequence and cost_sequence > current_sequence) then
+  current_sequence = cost_sequence
+end
+
+if current_sequence and incoming_sequence < current_sequence then
+  return 0
+end
+
+local usage_is_complete = usage_sequence == incoming_sequence
+  and redis.call('HEXISTS', usage_key, 'status') == 1
+local should_replace_usage = not usage_is_complete
+
+if should_replace_usage then
+  redis.call('HSET', usage_key,
+    'requestSequence', tostring(incoming_sequence),
+    'status', incoming_status
+  )
+  redis.call('HDEL', usage_key,
+    'inputTokens',
+    'outputTokens',
+    'cacheCreationInputTokens',
+    'cacheReadInputTokens',
+    'statusCode',
+    'errorMessage'
+  )
+
+  local fields = {
+    'inputTokens',
+    'outputTokens',
+    'cacheCreationInputTokens',
+    'cacheReadInputTokens',
+    'statusCode',
+    'errorMessage'
+  }
+  for index, field in ipairs(fields) do
+    local value = ARGV[index + 4]
+    if value and value ~= '' then
+      redis.call('HSET', usage_key, field, value)
+    end
+  end
+
+  redis.call('HSET', info_key,
+    'statusRequestSequence', tostring(incoming_sequence),
+    'status', incoming_status
+  )
+end
+
+if not cost_sequence or incoming_sequence > cost_sequence then
+  redis.call('HSET', usage_key, 'costRequestSequence', tostring(incoming_sequence))
+  if incoming_cost then
+    redis.call('HSET', usage_key, 'costUsd', incoming_cost_raw)
+  else
+    redis.call('HDEL', usage_key, 'costUsd')
+  end
+elseif incoming_sequence == cost_sequence and incoming_cost then
+  local current_cost = tonumber(redis.call('HGET', usage_key, 'costUsd')) or 0
+  if incoming_cost >= current_cost then
+    redis.call('HSET', usage_key, 'costUsd', incoming_cost_raw)
+  end
+end
+
+redis.call('EXPIRE', usage_key, ttl_seconds)
+redis.call('EXPIRE', info_key, ttl_seconds)
+return should_replace_usage and 2 or 1
+`;
+
+const UPDATE_SESSION_REQUEST_COST = `
+local key = KEYS[1]
+local incoming_sequence = tonumber(ARGV[1])
+local incoming_cost = tonumber(ARGV[2])
+local ttl_seconds = tonumber(ARGV[3])
+
+if not incoming_sequence or not incoming_cost or incoming_cost < 0 then
+  return 0
+end
+
+local usage_sequence = tonumber(redis.call('HGET', key, 'requestSequence'))
+local cost_sequence = tonumber(redis.call('HGET', key, 'costRequestSequence'))
+local current_sequence = usage_sequence
+if not current_sequence or (cost_sequence and cost_sequence > current_sequence) then
+  current_sequence = cost_sequence
+end
+
+if current_sequence and incoming_sequence < current_sequence then
+  return 0
+end
+
+if not cost_sequence or incoming_sequence > cost_sequence then
+  redis.call('HSET', key,
+    'costRequestSequence', tostring(incoming_sequence),
+    'costUsd', ARGV[2]
+  )
+elseif incoming_sequence == cost_sequence then
+  local current_cost = tonumber(redis.call('HGET', key, 'costUsd')) or 0
+  if incoming_cost >= current_cost then
+    redis.call('HSET', key, 'costUsd', ARGV[2])
+  end
+end
+
+redis.call('EXPIRE', key, ttl_seconds)
+return 1
+`;
+
 function buildSessionDetailSnapshotKey(
   sessionId: string,
   sequence: number,
@@ -1079,9 +1214,53 @@ export class SessionManager {
     if (!redis || redis.status !== "ready") return;
 
     try {
+      const requestSequence = normalizeRequestSequence(usage.requestSequence);
+      const usageKey = `session:${sessionId}:usage`;
+      const infoKey = `session:${sessionId}:info`;
+
+      if (requestSequence !== null) {
+        let costUsd = "";
+        if (usage.costUsd !== undefined) {
+          const numericCost = Number(usage.costUsd);
+          if (Number.isFinite(numericCost) && numericCost >= 0) {
+            costUsd = usage.costUsd;
+          } else {
+            logger.warn("SessionManager: Ignored invalid sequenced request cost", {
+              sessionId,
+              requestSequence,
+              costUsd: usage.costUsd,
+            });
+          }
+        }
+
+        const optionalValues = SESSION_USAGE_OPTIONAL_FIELDS.map((field) => {
+          const value = usage[field];
+          return value === undefined ? "" : value.toString();
+        });
+        const applied = (await redis.eval(
+          UPDATE_SESSION_USAGE_FOR_REQUEST,
+          2,
+          usageKey,
+          infoKey,
+          requestSequence.toString(),
+          costUsd,
+          SessionManager.SESSION_TTL.toString(),
+          usage.status,
+          ...optionalValues
+        )) as number;
+
+        logger.trace("SessionManager: Updated sequenced session usage", {
+          sessionId,
+          requestSequence,
+          status: usage.status,
+          applied: applied > 0,
+        });
+        return;
+      }
+
       const pipeline = redis.pipeline();
 
-      // 存储使用量到单独的 Hash
+      // Legacy callers without a request sequence retain the original last-write-wins path.
       const usageData: Record<string, string> = {
         status: usage.status,
       };
@@ -1108,14 +1287,14 @@ export class SessionManager {
         usageData.errorMessage = usage.errorMessage;
       }
 
-      pipeline.hset(`session:${sessionId}:usage`, usageData);
+      pipeline.hset(usageKey, usageData);
 
       // 同时更新 info Hash 中的 status
-      pipeline.hset(`session:${sessionId}:info`, "status", usage.status);
+      pipeline.hset(infoKey, "status", usage.status);
 
       // 刷新 TTL
-      pipeline.expire(`session:${sessionId}:usage`, SessionManager.SESSION_TTL);
-      pipeline.expire(`session:${sessionId}:info`, SessionManager.SESSION_TTL);
+      pipeline.expire(usageKey, SessionManager.SESSION_TTL);
+      pipeline.expire(infoKey, SessionManager.SESSION_TTL);
 
       await pipeline.exec();
       logger.trace("SessionManager: Updated session usage", {
@@ -1124,6 +1303,46 @@ export class SessionManager {
       });
     } catch (error) {
       logger.error("SessionManager: Failed to update session usage", { error });
+    }
+  }
+
+  /**
+   * Publish the authoritative total cost for one request into active-session state.
+   *
+   * Costs are monotonic within a request because billed hedge losers only add to the
+   * winner total. A larger request sequence replaces the previous request even when its
+   * cost is lower; a late update from an older sequence is ignored.
+   */
+  static async updateSessionCostFromRequest(
+    sessionId: string,
+    requestSequence: number,
+    costUsd: string
+  ): Promise<void> {
+    const redis = getRedisClient();
+    if (!redis || redis.status !== "ready") return;
+
+    const normalizedSequence = normalizeRequestSequence(requestSequence);
+    const numericCost = Number(costUsd);
+    if (normalizedSequence === null || !Number.isFinite(numericCost) || numericCost < 0) {
+      logger.warn("SessionManager: Ignored invalid request cost update", {
+        sessionId,
+        requestSequence,
+        costUsd,
+      });
+      return;
+    }
+
+    try {
+      await redis.eval(
+        UPDATE_SESSION_REQUEST_COST,
+        1,
+        `session:${sessionId}:usage`,
+        normalizedSequence.toString(),
+        costUsd,
+        SessionManager.SESSION_TTL.toString()
+      );
+    } catch (error) {
+      logger.error("SessionManager: Failed to update request cost", { error });
     }
   }
 

@@ -4,6 +4,10 @@ import { ProxyForwarder } from "@/app/v1/_lib/proxy/forwarder";
 import { ProxySession } from "@/app/v1/_lib/proxy/session";
 import type { Provider } from "@/types/provider";
 
+const mocks = vi.hoisted(() => ({
+  applyFinal: vi.fn(async () => {}),
+}));
+
 vi.mock("@/lib/logger", () => ({
   logger: {
     debug: vi.fn(),
@@ -17,7 +21,7 @@ vi.mock("@/lib/logger", () => ({
 
 vi.mock("@/lib/request-filter-engine", () => ({
   requestFilterEngine: {
-    applyFinal: vi.fn(async () => {}),
+    applyFinal: mocks.applyFinal,
   },
 }));
 
@@ -99,6 +103,42 @@ function createSession(
 describe("ProxyForwarder - official OpenAI endpoints stay on provider URL", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.applyFinal.mockImplementation(async () => {});
+  });
+
+  it("records the final filtered JSON body used by upstream billing", async () => {
+    const provider = createProvider("openai-compatible");
+    const session = createSession("/v1/responses", "openai-compatible");
+    (session as unknown as { method: string }).method = "POST";
+    session.request.model = "gpt-5.6-sol";
+    session.request.message = {
+      model: "gpt-5.6-sol",
+      stream: true,
+      service_tier: "default",
+    };
+    mocks.applyFinal.mockImplementation(async (_session, body) => {
+      body.service_tier = "priority";
+      body.prompt_cache_options = { mode: "explicit" };
+    });
+    let capturedBody: BodyInit | null | undefined;
+    const fetchWithoutAutoDecode = vi.spyOn(ProxyForwarder as never, "fetchWithoutAutoDecode");
+    fetchWithoutAutoDecode.mockImplementationOnce(async (_url: string, init: RequestInit) => {
+      capturedBody = init.body;
+      return new Response("ok", { status: 200, headers: { "content-type": "application/json" } });
+    });
+    const { doForward } = ProxyForwarder as unknown as {
+      doForward: (session: ProxySession, provider: Provider, baseUrl: string) => Promise<Response>;
+    };
+
+    await doForward(session, provider, provider.url);
+
+    expect(typeof capturedBody).toBe("string");
+    expect(session.forwardedRequestBody).toBe(capturedBody);
+    expect(session.getBillingRequestMessage()).toMatchObject({
+      model: "gpt-5.6-sol",
+      service_tier: "priority",
+      prompt_cache_options: { mode: "explicit" },
+    });
   });
 
   it("does not route /v1/files through MCP passthrough URL", async () => {

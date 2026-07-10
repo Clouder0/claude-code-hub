@@ -102,6 +102,36 @@ describe("buildHedgeBillingTable", () => {
     expect(table?.hasCacheWrite).toBe(true);
   });
 
+  it("preserves unsupported loser settlement and price-book provenance", () => {
+    const table = buildHedgeBillingTable("0.02", [
+      loser({
+        providerId: 2,
+        attemptNumber: 2,
+        costUsd: "0",
+        billingStatus: "unsupported",
+        billingReason: "gpt56_priority_long_context_unsupported",
+        missingPricingFields: [],
+        pricingContext: {
+          source: "cloud_official",
+          model: "gpt-5.6-sol",
+          provider: "openai",
+        },
+      }),
+    ]);
+
+    expect(table?.attempts[1]).toMatchObject({
+      kind: "loser",
+      billingStatus: "unsupported",
+      billingReason: "gpt56_priority_long_context_unsupported",
+      missingPricingFields: [],
+      pricingContext: {
+        source: "cloud_official",
+        model: "gpt-5.6-sol",
+        provider: "openai",
+      },
+    });
+  });
+
   it("coerces missing/invalid token counts to zero and defaults provider fields to null", () => {
     const table = buildHedgeBillingTable("0.01", [
       loser({ providerId: 2, attemptNumber: 2, costUsd: "0.001", inputTokens: undefined }),

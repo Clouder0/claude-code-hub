@@ -7,7 +7,10 @@ import type { CostBreakdown } from "@/lib/utils/cost-calculation";
 const LANGFUSE_JSON_PARSE_MAX_CHARS = 1024 * 1024;
 const LANGFUSE_TEXT_PREVIEW_EDGE_CHARS = 128 * 1024;
 
-function buildRequestBodySummary(session: ProxySession): Record<string, unknown> {
+function buildRequestBodySummary(
+  session: ProxySession,
+  billingModel: string | null
+): Record<string, unknown> {
   const msg = session.request.message as Record<string, unknown>;
   const hasSystemPrompt =
     typeof msg.hasSystemPrompt === "boolean"
@@ -21,7 +24,7 @@ function buildRequestBodySummary(session: ProxySession): Record<string, unknown>
         : 0;
 
   return {
-    model: session.request.model,
+    model: billingModel,
     messageCount: session.getMessagesLength(),
     hasSystemPrompt,
     toolsCount,
@@ -164,6 +167,7 @@ export async function traceProxyRequest(ctx: TraceContext): Promise<void> {
     const { session, durationMs, statusCode, isStreaming } = ctx;
     const provider = session.provider;
     const messageContext = session.messageContext;
+    const billingModel = session.getBillingModel() ?? session.getCurrentModel();
 
     // Compute actual request timing from session data
     const requestStartTime = new Date(session.startTime);
@@ -212,7 +216,7 @@ export async function traceProxyRequest(ctx: TraceContext): Promise<void> {
     const rootSpanMetadata: Record<string, unknown> = {
       endpoint: session.getEndpoint(),
       method: session.method,
-      model: session.getCurrentModel(),
+      model: billingModel,
       clientFormat: session.originalFormat,
       providerName: provider?.name,
       statusCode,
@@ -229,7 +233,7 @@ export async function traceProxyRequest(ctx: TraceContext): Promise<void> {
     if (provider?.providerType) tags.push(provider.providerType);
     if (provider?.name) tags.push(provider.name);
     if (session.originalFormat) tags.push(session.originalFormat);
-    if (session.getCurrentModel()) tags.push(session.getCurrentModel()!);
+    if (billingModel) tags.push(billingModel);
     tags.push(getStatusCategory(statusCode));
 
     // Build trace-level metadata (propagateAttributes requires all values to be strings)
@@ -250,9 +254,11 @@ export async function traceProxyRequest(ctx: TraceContext): Promise<void> {
       providerType: provider?.providerType,
       providerChain: session.getProviderChain(),
       // Model
-      model: session.getCurrentModel(),
+      model: billingModel,
       originalModel: session.getOriginalModel(),
-      modelRedirected: session.isModelRedirected(),
+      modelRedirected:
+        session.isModelRedirected() ||
+        (billingModel != null && billingModel !== session.getOriginalModel()),
       // Special settings
       specialSettings: session.getSpecialSettings(),
       // Request context
@@ -271,10 +277,13 @@ export async function traceProxyRequest(ctx: TraceContext): Promise<void> {
       isStreaming,
       cacheTtlApplied: session.getCacheTtlResolved(),
       context1mApplied: session.getContext1mApplied(),
+      cacheReadTokensObserved: ctx.usageMetrics?.cache_read_tokens_observed,
+      cacheWriteTokensReported: ctx.usageMetrics?.cache_write_tokens_reported,
+      cacheWriteAccounting: ctx.usageMetrics?.cache_write_accounting,
       // Error
       errorMessage: ctx.errorMessage,
       // Request summary (quick overview)
-      requestSummary: buildRequestBodySummary(session),
+      requestSummary: buildRequestBodySummary(session, billingModel),
       // SSE
       sseEventCount: ctx.sseEventCount,
       // Headers (raw, no redaction)
@@ -285,8 +294,14 @@ export async function traceProxyRequest(ctx: TraceContext): Promise<void> {
     // Build usage details for Langfuse generation
     const usageDetails: Record<string, number> | undefined = ctx.usageMetrics
       ? {
+          ...(ctx.usageMetrics.observed_input_tokens != null
+            ? { observed_input_tokens: ctx.usageMetrics.observed_input_tokens }
+            : {}),
           ...(ctx.usageMetrics.input_tokens != null
-            ? { input: ctx.usageMetrics.input_tokens }
+            ? {
+                input: ctx.usageMetrics.input_tokens,
+                ordinary_input_tokens: ctx.usageMetrics.input_tokens,
+              }
             : {}),
           ...(ctx.usageMetrics.output_tokens != null
             ? { output: ctx.usageMetrics.output_tokens }
@@ -295,7 +310,10 @@ export async function traceProxyRequest(ctx: TraceContext): Promise<void> {
             ? { cache_read_input_tokens: ctx.usageMetrics.cache_read_input_tokens }
             : {}),
           ...(ctx.usageMetrics.cache_creation_input_tokens != null
-            ? { cache_creation_input_tokens: ctx.usageMetrics.cache_creation_input_tokens }
+            ? {
+                cache_creation_input_tokens: ctx.usageMetrics.cache_creation_input_tokens,
+                cache_write_input_tokens: ctx.usageMetrics.cache_creation_input_tokens,
+              }
             : {}),
         }
       : undefined;
@@ -408,7 +426,7 @@ export async function traceProxyRequest(ctx: TraceContext): Promise<void> {
         const generation = rootSpan.startObservation(
           "llm-call",
           {
-            model: session.getCurrentModel() ?? undefined,
+            model: billingModel ?? undefined,
             input: generationInput,
             output: generationOutput,
             ...(usageDetails && Object.keys(usageDetails).length > 0 ? { usageDetails } : {}),

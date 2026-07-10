@@ -39,6 +39,7 @@ const SUPPORTED_TOP_LEVEL_BILLING_KEYS = new Set([
   "cache_read_input_token_cost_above_272k_tokens_priority",
   "input_cost_per_token_priority",
   "output_cost_per_token_priority",
+  "cache_creation_input_token_cost_priority",
   "cache_read_input_token_cost_priority",
   "output_cost_per_image",
   "input_cost_per_image",

@@ -148,6 +148,39 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql IMMUTABLE;
 
+CREATE OR REPLACE FUNCTION fn_resolve_message_request_final_provider_id(
+  fallback_provider_id integer,
+  provider_chain jsonb
+)
+RETURNS integer AS $$
+  SELECT COALESCE(
+    (
+      SELECT resolved.provider_id
+      FROM jsonb_array_elements(
+        CASE
+          WHEN jsonb_typeof(provider_chain) = 'array' THEN provider_chain
+          ELSE '[]'::jsonb
+        END
+      ) WITH ORDINALITY AS item(value, ordinality)
+      CROSS JOIN LATERAL (
+        SELECT CASE
+          WHEN (item.value ->> 'id') ~ '^[0-9]+$'
+          THEN CASE
+            WHEN (item.value ->> 'id')::numeric BETWEEN 1 AND 2147483647
+            THEN (item.value ->> 'id')::numeric::integer
+          END
+        END AS provider_id
+      ) AS resolved
+      WHERE jsonb_typeof(item.value) = 'object'
+        AND item.value ->> 'reason' IN ('hedge_winner', 'request_success', 'retry_success')
+        AND resolved.provider_id IS NOT NULL
+      ORDER BY item.ordinality DESC
+      LIMIT 1
+    ),
+    fallback_provider_id
+  );
+$$ LANGUAGE sql IMMUTABLE;
+
 CREATE OR REPLACE FUNCTION fn_upsert_usage_ledger()
 RETURNS TRIGGER AS $$
 DECLARE
@@ -179,16 +212,10 @@ BEGIN
     RETURN NEW;
   END IF;
 
-  IF NEW.provider_chain IS NOT NULL
-     AND jsonb_typeof(NEW.provider_chain) = 'array'
-     AND jsonb_array_length(NEW.provider_chain) > 0
-     AND jsonb_typeof(NEW.provider_chain -> -1) = 'object'
-     AND (NEW.provider_chain -> -1 ? 'id')
-     AND (NEW.provider_chain -> -1 ->> 'id') ~ '^[0-9]+$' THEN
-    v_final_provider_id := (NEW.provider_chain -> -1 ->> 'id')::integer;
-  ELSE
-    v_final_provider_id := NEW.provider_id;
-  END IF;
+  v_final_provider_id := fn_resolve_message_request_final_provider_id(
+    NEW.provider_id,
+    NEW.provider_chain
+  );
 
   v_is_success := (NEW.error_message IS NULL OR NEW.error_message = '')
                   AND (NEW.status_code IS NULL OR NEW.status_code < 400);
@@ -198,20 +225,26 @@ BEGIN
     model, original_model, actual_response_model, endpoint, api_type, session_id,
     status_code, is_success, success_rate_outcome, blocked_by,
     cost_usd, cost_multiplier, group_cost_multiplier,
-    input_tokens, output_tokens,
+    cost_breakdown,
+    input_tokens, observed_input_tokens, output_tokens,
+    cache_write_tokens_reported, cache_write_accounting,
     cache_creation_input_tokens, cache_read_input_tokens,
     cache_creation_5m_input_tokens, cache_creation_1h_input_tokens,
     cache_ttl_applied, context_1m_applied, swap_cache_ttl_applied,
+    special_settings, hedge_losers,
     duration_ms, ttfb_ms, client_ip, created_at
   ) VALUES (
     NEW.id, NEW.user_id, NEW.key, NEW.provider_id, v_final_provider_id,
     NEW.model, NEW.original_model, NEW.actual_response_model, NEW.endpoint, NEW.api_type, NEW.session_id,
     NEW.status_code, v_is_success, v_success_rate_outcome, NEW.blocked_by,
     NEW.cost_usd, NEW.cost_multiplier, NEW.group_cost_multiplier,
-    NEW.input_tokens, NEW.output_tokens,
+    NEW.cost_breakdown,
+    NEW.input_tokens, NEW.observed_input_tokens, NEW.output_tokens,
+    NEW.cache_write_tokens_reported, NEW.cache_write_accounting,
     NEW.cache_creation_input_tokens, NEW.cache_read_input_tokens,
     NEW.cache_creation_5m_input_tokens, NEW.cache_creation_1h_input_tokens,
     NEW.cache_ttl_applied, NEW.context_1m_applied, NEW.swap_cache_ttl_applied,
+    NEW.special_settings, NEW.hedge_losers,
     NEW.duration_ms, NEW.ttfb_ms, NEW.client_ip, NEW.created_at
   )
   ON CONFLICT (request_id) DO UPDATE SET
@@ -232,8 +265,12 @@ BEGIN
     cost_usd = EXCLUDED.cost_usd,
     cost_multiplier = EXCLUDED.cost_multiplier,
     group_cost_multiplier = EXCLUDED.group_cost_multiplier,
+    cost_breakdown = EXCLUDED.cost_breakdown,
     input_tokens = EXCLUDED.input_tokens,
+    observed_input_tokens = EXCLUDED.observed_input_tokens,
     output_tokens = EXCLUDED.output_tokens,
+    cache_write_tokens_reported = EXCLUDED.cache_write_tokens_reported,
+    cache_write_accounting = EXCLUDED.cache_write_accounting,
     cache_creation_input_tokens = EXCLUDED.cache_creation_input_tokens,
     cache_read_input_tokens = EXCLUDED.cache_read_input_tokens,
     cache_creation_5m_input_tokens = EXCLUDED.cache_creation_5m_input_tokens,
@@ -241,6 +278,8 @@ BEGIN
     cache_ttl_applied = EXCLUDED.cache_ttl_applied,
     context_1m_applied = EXCLUDED.context_1m_applied,
     swap_cache_ttl_applied = EXCLUDED.swap_cache_ttl_applied,
+    special_settings = EXCLUDED.special_settings,
+    hedge_losers = EXCLUDED.hedge_losers,
     duration_ms = EXCLUDED.duration_ms,
     ttfb_ms = EXCLUDED.ttfb_ms,
     client_ip = EXCLUDED.client_ip;

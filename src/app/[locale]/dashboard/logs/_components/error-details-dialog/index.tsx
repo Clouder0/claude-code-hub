@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { hasSessionMessages } from "@/lib/api-client/v1/actions/active-sessions";
+import type { CacheWriteAccounting } from "@/lib/billing/openai-usage-accounting";
 import { cn } from "@/lib/utils";
 import type { HedgeLoserBilling, StoredCostBreakdown } from "@/types/cost-breakdown";
 import type { ProviderChainItem } from "@/types/message";
@@ -33,8 +34,11 @@ interface ErrorDetailsDialogProps {
   billingModelSource?: BillingModelSource;
   specialSettings?: SpecialSetting[] | null;
   inputTokens?: number | null;
+  observedInputTokens?: number | null;
   outputTokens?: number | null;
   cacheCreationInputTokens?: number | null;
+  cacheWriteTokensReported?: number | null;
+  cacheWriteAccounting?: CacheWriteAccounting | null;
   cacheCreation5mInputTokens?: number | null;
   cacheCreation1hInputTokens?: number | null;
   cacheReadInputTokens?: number | null;
@@ -77,8 +81,11 @@ export function ErrorDetailsDialog({
   billingModelSource = "original",
   specialSettings,
   inputTokens,
+  observedInputTokens,
   outputTokens,
   cacheCreationInputTokens,
+  cacheWriteTokensReported,
+  cacheWriteAccounting,
   cacheCreation5mInputTokens,
   cacheCreation1hInputTokens,
   cacheReadInputTokens,
@@ -226,8 +233,11 @@ export function ErrorDetailsDialog({
     billingModelSource,
     specialSettings,
     inputTokens,
+    observedInputTokens,
     outputTokens,
     cacheCreationInputTokens,
+    cacheWriteTokensReported,
+    cacheWriteAccounting,
     cacheCreation5mInputTokens,
     cacheCreation1hInputTokens,
     cacheReadInputTokens,

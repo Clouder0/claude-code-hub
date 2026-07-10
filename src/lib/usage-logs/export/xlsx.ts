@@ -186,6 +186,7 @@ function detailSheetXml(detailRowsXml: string[], timezone: string): string {
 function summaryRowCells(row: SummaryRow, rowNumber: number, periodStyle: number): string[] {
   const integers = [
     row.requests,
+    row.unsettledRequests,
     row.inputTokens,
     row.outputTokens,
     row.cacheWrite5m,
@@ -201,8 +202,8 @@ function summaryRowCells(row: SummaryRow, rowNumber: number, periodStyle: number
   });
   cells.push(
     numberCell(
-      `${SUMMARY_COLUMN_REFS[8]}${rowNumber}`,
-      normalizeDecimalForSpreadsheet(row.cost),
+      `${SUMMARY_COLUMN_REFS[SUMMARY_COLUMN_REFS.length - 1]}${rowNumber}`,
+      row.cost == null ? null : normalizeDecimalForSpreadsheet(row.cost),
       STYLE.cost
     )
   );

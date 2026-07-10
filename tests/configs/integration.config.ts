@@ -6,6 +6,9 @@ export default createTestRunnerConfig({
   hookTimeout: 20000,
   fileParallelism: false,
   testFiles: [
+    "tests/integration/billing-model-source.test.ts",
+    "tests/integration/gpt56-billing-lifecycle.test.ts",
+    "tests/integration/ledger-consistency.test.ts",
     "tests/integration/usage-ledger.test.ts",
     "tests/integration/my-usage-imported-ledger.test.ts",
   ],

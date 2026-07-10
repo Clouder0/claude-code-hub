@@ -25,6 +25,12 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { Link } from "@/i18n/routing";
+import {
+  resolveBillingSettlement,
+  resolveEffectiveServiceTier,
+  resolveLongContextPricingAudit,
+  resolveUnitRatePerMillion,
+} from "@/lib/usage-logs/billing-audit";
 import { cn, formatTokenAmount } from "@/lib/utils";
 import { extractAnthropicEffortInfo } from "@/lib/utils/anthropic-effort";
 import { formatCurrency } from "@/lib/utils/currency";
@@ -53,8 +59,11 @@ export function SummaryTab({
   actualResponseModel,
   billingModelSource = "original",
   inputTokens,
+  observedInputTokens,
   outputTokens,
   cacheCreationInputTokens,
+  cacheWriteTokensReported,
+  cacheWriteAccounting,
   cacheCreation5mInputTokens,
   cacheCreation1hInputTokens,
   cacheReadInputTokens,
@@ -86,7 +95,16 @@ export function SummaryTab({
   const isInProgress = isInProgressStatus(statusCode);
   const outputRate = calculateOutputRate(outputTokens, durationMs, ttfbMs);
   const hideRate = shouldHideOutputRate(outputRate, durationMs, ttfbMs);
-  const totalTokens = (inputTokens ?? 0) + (outputTokens ?? 0);
+  const allocatedInputTokens =
+    (inputTokens ?? 0) + (cacheCreationInputTokens ?? 0) + (cacheReadInputTokens ?? 0);
+  const totalTokens = (observedInputTokens ?? allocatedInputTokens) + (outputTokens ?? 0);
+  const billingSettlement = resolveBillingSettlement(specialSettings);
+  const settledCostUsd = billingSettlement ? null : costUsd;
+  const hasUsageAccountingAudit =
+    observedInputTokens != null ||
+    cacheWriteTokensReported != null ||
+    cacheWriteAccounting != null ||
+    billingSettlement != null;
   const hasRedirect = originalModel && currentModel && originalModel !== currentModel;
   const modelAudit = resolveModelAuditDisplay({
     originalModel: originalModel ?? null,
@@ -103,6 +121,32 @@ export function SummaryTab({
     ? t(`billingDetails.pricingSource.${pricingResolution.source}`)
     : null;
   const hasPriorityServiceTier = hasPriorityServiceTierSpecialSetting(specialSettings);
+  const pricingSnapshot = costBreakdown?.pricing;
+  const effectiveServiceTier =
+    resolveEffectiveServiceTier(specialSettings, pricingSnapshot?.tier) ??
+    (hasPriorityServiceTier ? "priority" : null);
+  const effectiveServiceTierLabel =
+    effectiveServiceTier === "standard" || effectiveServiceTier === "priority"
+      ? t(`billingDetails.serviceTier.${effectiveServiceTier}`)
+      : effectiveServiceTier;
+  const longContextPricingAudit = resolveLongContextPricingAudit(
+    specialSettings,
+    pricingSnapshot?.tier
+  );
+  const formatUnitRate = (storedRatePerToken: string | number | null | undefined) => {
+    const rate = resolveUnitRatePerMillion({
+      storedRatePerToken,
+    });
+    return rate == null
+      ? null
+      : t("billingDetails.unitPricePer1M", {
+          price: formatCurrency(rate, "USD", 2),
+        });
+  };
+  const inputUnitRate = formatUnitRate(pricingSnapshot?.unit_rates.input);
+  const outputUnitRate = formatUnitRate(pricingSnapshot?.unit_rates.output);
+  const cacheWriteUnitRate = formatUnitRate(pricingSnapshot?.unit_rates.cache_write);
+  const cacheReadUnitRate = formatUnitRate(pricingSnapshot?.unit_rates.cache_read);
   const thinkingSignatureDetection =
     getThinkingSignatureModelDetectionSpecialSetting(specialSettings);
   const showNoSignatureBadge =
@@ -212,12 +256,12 @@ export function SummaryTab({
       </div>
 
       {/* Key Metrics Grid */}
-      {(costUsd || totalTokens > 0 || durationMs || (outputRate && !hideRate)) && (
+      {(settledCostUsd || totalTokens > 0 || durationMs || (outputRate && !hideRate)) && (
         <div className="space-y-2">
           <h4 className="text-sm font-semibold text-muted-foreground">{t("summary.keyMetrics")}</h4>
           <div className="grid grid-cols-2 gap-3">
             {/* Total Cost */}
-            {costUsd && (
+            {settledCostUsd && (
               <div className="flex items-center gap-3 p-3 rounded-lg border bg-card">
                 <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-emerald-100 dark:bg-emerald-900/30">
                   <DollarSign className="h-4 w-4 text-emerald-600" />
@@ -225,7 +269,7 @@ export function SummaryTab({
                 <div>
                   <p className="text-xs text-muted-foreground">{t("summary.totalCost")}</p>
                   <p className="text-sm font-semibold font-mono">
-                    {formatCurrency(costUsd, "USD", 6)}
+                    {formatCurrency(settledCostUsd, "USD", 6)}
                   </p>
                 </div>
               </div>
@@ -391,18 +435,58 @@ export function SummaryTab({
       )}
 
       {/* Billing Details */}
-      {costUsd && (
+      {(costUsd != null || hasUsageAccountingAudit) && (
         <div className="space-y-2">
           <h4 className="text-sm font-semibold flex items-center gap-2">
             <DollarSign className="h-4 w-4 text-emerald-600" />
             {t("metadata.billingInfo")}
           </h4>
           <div className="rounded-lg border bg-card p-4 space-y-3">
+            {billingSettlement ? (
+              <div className="rounded-md border border-destructive/30 bg-destructive/5 p-3 space-y-2">
+                <div className="flex items-center justify-between gap-3">
+                  <span className="flex items-center gap-2 text-sm font-medium">
+                    <AlertCircle className="h-4 w-4 text-destructive" />
+                    {t("billingDetails.settlementStatus")}
+                  </span>
+                  <Badge variant="destructive">{t("billingDetails.settlementUnsupported")}</Badge>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  {t(`billingDetails.settlementReason.${billingSettlement.reason}`)}
+                </p>
+                {billingSettlement.missingFields.length > 0 ? (
+                  <p className="text-xs font-mono text-muted-foreground break-all">
+                    {t("billingDetails.settlementMissingFields", {
+                      fields: billingSettlement.missingFields.join(", "),
+                    })}
+                  </p>
+                ) : null}
+              </div>
+            ) : null}
+
             {/* Token breakdown with optional per-component costs */}
             <div className="space-y-2 text-sm">
+              {hasUsageAccountingAudit && observedInputTokens != null ? (
+                <div className="flex justify-between">
+                  <span className="text-muted-foreground">
+                    {t("billingDetails.observedInput")}:
+                  </span>
+                  <span className="font-mono">
+                    {formatTokenAmount(observedInputTokens)} {t("billingDetails.unit.tokens")}
+                  </span>
+                </div>
+              ) : null}
+
               {/* Input */}
               <div className="flex justify-between">
-                <span className="text-muted-foreground">{t("billingDetails.input")}:</span>
+                <span className="text-muted-foreground">
+                  {t(
+                    hasUsageAccountingAudit
+                      ? "billingDetails.ordinaryInput"
+                      : "billingDetails.input"
+                  )}
+                  :
+                </span>
                 <span className="font-mono">
                   {formatTokenAmount(inputTokens)} {t("billingDetails.unit.tokens")}
                   {costBreakdown ? (
@@ -410,8 +494,57 @@ export function SummaryTab({
                       {formatCurrency(costBreakdown.input, "USD", 6)}
                     </span>
                   ) : null}
+                  {inputUnitRate ? (
+                    <span className="ml-2 text-muted-foreground">{inputUnitRate}</span>
+                  ) : null}
                 </span>
               </div>
+
+              {hasUsageAccountingAudit ? (
+                <>
+                  <div className="flex justify-between">
+                    <span className="text-muted-foreground">
+                      {t("billingDetails.cacheWriteReported")}:
+                    </span>
+                    <span className="font-mono">
+                      {cacheWriteTokensReported == null
+                        ? t("billingDetails.cacheWriteNotReported")
+                        : `${formatTokenAmount(cacheWriteTokensReported)} ${t("billingDetails.unit.tokens")}`}
+                    </span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-muted-foreground">
+                      {t("billingDetails.cacheWriteEffective")}:
+                    </span>
+                    <span className="font-mono">
+                      {formatTokenAmount(cacheCreationInputTokens)}{" "}
+                      {t("billingDetails.unit.tokens")}
+                      {costBreakdown ? (
+                        <span className="ml-3 text-muted-foreground">
+                          {formatCurrency(
+                            costBreakdown.cache_creation_default ?? costBreakdown.cache_creation,
+                            "USD",
+                            6
+                          )}
+                        </span>
+                      ) : null}
+                      {cacheWriteUnitRate ? (
+                        <span className="ml-2 text-muted-foreground">{cacheWriteUnitRate}</span>
+                      ) : null}
+                    </span>
+                  </div>
+                  {cacheWriteAccounting ? (
+                    <div className="flex justify-between gap-4">
+                      <span className="text-muted-foreground">
+                        {t("billingDetails.cacheWriteAccounting")}:
+                      </span>
+                      <span className="text-right">
+                        {t(`billingDetails.cacheWriteAccountingSource.${cacheWriteAccounting}`)}
+                      </span>
+                    </div>
+                  ) : null}
+                </>
+              ) : null}
 
               {/* Output */}
               <div className="flex justify-between">
@@ -423,12 +556,17 @@ export function SummaryTab({
                       {formatCurrency(costBreakdown.output, "USD", 6)}
                     </span>
                   ) : null}
+                  {outputUnitRate ? (
+                    <span className="ml-2 text-muted-foreground">{outputUnitRate}</span>
+                  ) : null}
                 </span>
               </div>
 
               {/* Cache Write 5m */}
               {((cacheCreation5mInputTokens ?? 0) > 0 ||
-                ((cacheCreationInputTokens ?? 0) > 0 && cacheTtlApplied !== "1h")) && (
+                (!hasUsageAccountingAudit &&
+                  (cacheCreationInputTokens ?? 0) > 0 &&
+                  cacheTtlApplied !== "1h")) && (
                 <div className="flex justify-between">
                   <span className="text-muted-foreground">{t("billingDetails.cacheWrite5m")}:</span>
                   <span className="font-mono">
@@ -450,7 +588,9 @@ export function SummaryTab({
 
               {/* Cache Write 1h */}
               {((cacheCreation1hInputTokens ?? 0) > 0 ||
-                ((cacheCreationInputTokens ?? 0) > 0 && cacheTtlApplied === "1h")) && (
+                (!hasUsageAccountingAudit &&
+                  (cacheCreationInputTokens ?? 0) > 0 &&
+                  cacheTtlApplied === "1h")) && (
                 <div className="flex justify-between">
                   <span className="text-muted-foreground">{t("billingDetails.cacheWrite1h")}:</span>
                   <span className="font-mono">
@@ -480,6 +620,9 @@ export function SummaryTab({
                       <span className="ml-3 text-muted-foreground">
                         {formatCurrency(costBreakdown.cache_read, "USD", 6)}
                       </span>
+                    ) : null}
+                    {cacheReadUnitRate ? (
+                      <span className="ml-2 text-muted-foreground">{cacheReadUnitRate}</span>
                     ) : null}
                   </span>
                 </div>
@@ -523,16 +666,64 @@ export function SummaryTab({
                 </div>
               )}
 
-              {hasPriorityServiceTier ? (
+              {effectiveServiceTierLabel ? (
                 <div className="flex justify-between items-center">
-                  <span className="text-muted-foreground">{t("billingDetails.fast")}:</span>
+                  <span className="text-muted-foreground">
+                    {t("billingDetails.effectiveServiceTier")}:
+                  </span>
                   <Badge
                     variant="outline"
-                    className="text-xs bg-orange-50 text-orange-700 border-orange-200 dark:bg-orange-950/30 dark:text-orange-300 dark:border-orange-800"
+                    className={cn(
+                      "text-xs",
+                      effectiveServiceTier === "priority"
+                        ? "bg-orange-50 text-orange-700 border-orange-200 dark:bg-orange-950/30 dark:text-orange-300 dark:border-orange-800"
+                        : "bg-slate-50 text-slate-700 border-slate-200 dark:bg-slate-950/30 dark:text-slate-300 dark:border-slate-800"
+                    )}
                   >
-                    {t("billingDetails.fastPriority")}
+                    {effectiveServiceTierLabel}
                   </Badge>
                 </div>
+              ) : null}
+
+              {longContextPricingAudit ? (
+                <div className="flex justify-between items-center gap-4">
+                  <span className="text-muted-foreground">
+                    {t("billingDetails.longContextPricing")}:
+                  </span>
+                  <Badge
+                    variant="outline"
+                    className="text-xs bg-purple-50 text-purple-700 border-purple-200 dark:bg-purple-950/30 dark:text-purple-300 dark:border-purple-800"
+                  >
+                    {longContextPricingAudit.thresholdTokens == null
+                      ? t("billingDetails.longContextAppliedUnknown")
+                      : t("billingDetails.longContextApplied", {
+                          threshold: formatTokenAmount(longContextPricingAudit.thresholdTokens),
+                        })}
+                  </Badge>
+                </div>
+              ) : null}
+
+              {pricingSnapshot ? (
+                <>
+                  <div className="flex justify-between gap-4">
+                    <span className="text-muted-foreground">
+                      {t("billingDetails.pricingTier")}:
+                    </span>
+                    <span>{t(`billingDetails.pricingTierValue.${pricingSnapshot.tier}`)}</span>
+                  </div>
+                  <div className="flex justify-between gap-4">
+                    <span className="text-muted-foreground">
+                      {t("billingDetails.pricingRateSource")}:
+                    </span>
+                    <span className="font-mono text-right">{pricingSnapshot.rate_source}</span>
+                  </div>
+                  <div className="flex justify-between gap-4">
+                    <span className="text-muted-foreground">{t("billingDetails.priceBook")}:</span>
+                    <span className="font-mono text-right">
+                      {pricingSnapshot.price_book_provider} / {pricingSnapshot.price_book_model}
+                    </span>
+                  </div>
+                </>
               ) : null}
 
               {pricingResolution && pricingSourceLabel ? (
@@ -680,6 +871,9 @@ export function SummaryTab({
                       <tbody>
                         {hedgeTable.attempts.map((attempt) => {
                           const isWinner = attempt.kind === "winner";
+                          const isAttemptUnsupported =
+                            attempt.billingStatus === "unsupported" ||
+                            (isWinner && billingSettlement != null);
                           return (
                             <tr
                               key={`${attempt.kind}-${attempt.providerId ?? "na"}-${attempt.attemptNumber ?? 0}`}
@@ -734,7 +928,47 @@ export function SummaryTab({
                                   isWinner ? "" : "text-rose-600 dark:text-rose-400"
                                 )}
                               >
-                                {formatCurrency(attempt.costUsd, "USD", 6)}
+                                {isAttemptUnsupported ? (
+                                  <TooltipProvider delayDuration={0}>
+                                    <Tooltip>
+                                      <TooltipTrigger asChild>
+                                        <Badge variant="destructive" className="text-[10px]">
+                                          {t("billingDetails.settlementUnsupported")}
+                                        </Badge>
+                                      </TooltipTrigger>
+                                      <TooltipContent className="max-w-xs space-y-1 text-left">
+                                        {attempt.billingReason ? (
+                                          <p>
+                                            {t(
+                                              `billingDetails.settlementReason.${attempt.billingReason}`
+                                            )}
+                                          </p>
+                                        ) : null}
+                                        {attempt.missingPricingFields?.length ? (
+                                          <p className="text-muted-foreground">
+                                            {t("billingDetails.settlementMissingFields", {
+                                              fields: attempt.missingPricingFields.join(", "),
+                                            })}
+                                          </p>
+                                        ) : null}
+                                        {attempt.pricingContext ? (
+                                          <div className="space-y-0.5 font-mono text-[10px] text-muted-foreground">
+                                            <p>
+                                              {attempt.pricingContext.source} /{" "}
+                                              {attempt.pricingContext.provider} /{" "}
+                                              {attempt.pricingContext.model}
+                                            </p>
+                                            {attempt.pricingContext.supplement ? (
+                                              <p>{attempt.pricingContext.supplement.id}</p>
+                                            ) : null}
+                                          </div>
+                                        ) : null}
+                                      </TooltipContent>
+                                    </Tooltip>
+                                  </TooltipProvider>
+                                ) : (
+                                  formatCurrency(attempt.costUsd, "USD", 6)
+                                )}
                               </td>
                             </tr>
                           );
@@ -746,7 +980,13 @@ export function SummaryTab({
                             {t("billingDetails.hedgeMergedCount", { count: hedgeTable.count })}
                           </td>
                           <td className="px-2 py-1.5 text-right font-mono text-emerald-600">
-                            {formatCurrency(hedgeTable.total, "USD", 6)}
+                            {billingSettlement ? (
+                              <Badge variant="destructive" className="text-[10px]">
+                                {t("billingDetails.settlementUnsupported")}
+                              </Badge>
+                            ) : (
+                              formatCurrency(hedgeTable.total, "USD", 6)
+                            )}
                           </td>
                         </tr>
                       </tfoot>
@@ -758,18 +998,20 @@ export function SummaryTab({
 
             {/* Total Cost — costBreakdown.total is the winner-only base; when hedge losers
                 were billed the grand total lives in costUsd, so prefer it then. */}
-            <div className="pt-3 border-t flex justify-between items-center">
-              <span className="font-medium">{t("billingDetails.totalCost")}:</span>
-              <span className="font-mono text-lg font-semibold text-emerald-600">
-                {formatCurrency(
-                  hedgeLosers && hedgeLosers.length > 0
-                    ? costUsd
-                    : (costBreakdown?.total ?? costUsd),
-                  "USD",
-                  6
-                )}
-              </span>
-            </div>
+            {!billingSettlement && (costUsd != null || costBreakdown) ? (
+              <div className="pt-3 border-t flex justify-between items-center">
+                <span className="font-medium">{t("billingDetails.totalCost")}:</span>
+                <span className="font-mono text-lg font-semibold text-emerald-600">
+                  {formatCurrency(
+                    hedgeLosers && hedgeLosers.length > 0
+                      ? costUsd
+                      : (costBreakdown?.total ?? costUsd),
+                    "USD",
+                    6
+                  )}
+                </span>
+              </div>
+            ) : null}
           </div>
         </div>
       )}

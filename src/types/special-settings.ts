@@ -1,3 +1,5 @@
+import type { StoredPricingContext } from "@/types/cost-breakdown";
+
 /**
  * 特殊设置（通用审计字段）
  *
@@ -23,6 +25,8 @@ export type SpecialSetting =
   | GeminiGoogleSearchOverrideSpecialSetting
   | PricingResolutionSpecialSetting
   | CodexServiceTierResultSpecialSetting
+  | OpenAIServiceTierResultSpecialSetting
+  | BillingSettlementSpecialSetting
   | ResponseInputRectifierSpecialSetting
   | ThinkingSignatureModelDetectionSpecialSetting;
 
@@ -300,6 +304,32 @@ export type CodexServiceTierResultSpecialSetting = {
   billingSourcePreference?: "requested" | "actual" | null;
   resolvedFrom?: "requested" | "actual" | null;
   effectivePriority: boolean;
+};
+
+export type OpenAIServiceTierResultSpecialSetting = {
+  type: "openai_service_tier_result";
+  scope: "response";
+  hit: boolean;
+  providerType: "openai-compatible";
+  requestedServiceTier: string | null;
+  actualServiceTier: string | null;
+  resolvedFrom: "requested" | "actual" | null;
+  effectivePriority: boolean;
+};
+
+export type BillingSettlementSpecialSetting = {
+  type: "billing_settlement";
+  scope: "billing";
+  hit: true;
+  status: "unsupported";
+  reason:
+    | "gpt56_standard_rates_incomplete"
+    | "gpt56_long_context_rates_incomplete"
+    | "gpt56_priority_rates_incomplete"
+    | "gpt56_priority_long_context_unsupported";
+  observedInputTokens: number;
+  missingFields: string[];
+  pricingContext?: StoredPricingContext;
 };
 
 /**

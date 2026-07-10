@@ -1,5 +1,14 @@
 import { CONTEXT_1M_TOKEN_THRESHOLD } from "@/lib/special-attributes";
+import type { ResolvedPricingSource } from "@/lib/utils/pricing-resolution";
+import type { StoredPricingSnapshot } from "@/types/cost-breakdown";
 import type { ModelPriceData } from "@/types/model-price";
+import {
+  type Gpt56UnsupportedPricingReason,
+  isGpt56PriceData,
+  type RequestBillingRateResolution,
+  type ResolvedBillingRateSnapshot,
+  resolveRequestBillingRates,
+} from "./billing-rate-resolution";
 import { COST_SCALE, Decimal, toDecimal } from "./currency";
 
 const OPENAI_LONG_CONTEXT_TOKEN_THRESHOLD = 272000;
@@ -32,10 +41,11 @@ export interface RequestCostCalculationOptions {
   groupMultiplier?: number;
   context1mApplied?: boolean;
   priorityServiceTierApplied?: boolean;
+  modelName?: string | null;
   longContextPricing?: ResolvedLongContextPricing | null;
 }
 
-type RequestCostBreakdownOptions = Omit<
+export type RequestCostBreakdownOptions = Omit<
   RequestCostCalculationOptions,
   "multiplier" | "groupMultiplier"
 >;
@@ -45,6 +55,45 @@ export interface LongContextPricingMatch {
   scope: "request" | "session";
   observedInputTokens: number;
   pricing: ResolvedLongContextPricing;
+}
+
+export class UnsupportedPricingCombinationError extends Error {
+  readonly reason: Gpt56UnsupportedPricingReason;
+  readonly missingFields: string[];
+
+  constructor(reason: UnsupportedPricingCombinationError["reason"], missingFields: string[] = []) {
+    const missing = missingFields.join(", ");
+    const message =
+      reason === "gpt56_standard_rates_incomplete"
+        ? `GPT-5.6 Standard pricing is incomplete: ${missing}`
+        : reason === "gpt56_long_context_rates_incomplete"
+          ? `GPT-5.6 long-context pricing is incomplete: ${missing}`
+          : reason === "gpt56_priority_rates_incomplete"
+            ? `GPT-5.6 Priority pricing is incomplete: ${missing}`
+            : "GPT-5.6 Priority pricing does not support long-context requests";
+    super(message);
+    this.name = "UnsupportedPricingCombinationError";
+    this.reason = reason;
+    this.missingFields = missingFields;
+  }
+}
+
+function assertSupportedGpt56Pricing(
+  usage: UsageMetrics,
+  priceData: ModelPriceData,
+  priorityServiceTierApplied: boolean,
+  modelName: string | null
+): Extract<RequestBillingRateResolution, { status: "resolved" }> | null {
+  const resolution = resolveRequestBillingRates({
+    usage,
+    priceData,
+    priorityServiceTierApplied,
+    modelName,
+  });
+  if (resolution?.status === "unsupported") {
+    throw new UnsupportedPricingCombinationError(resolution.reason, resolution.missingFields);
+  }
+  return resolution;
 }
 
 function isFiniteNonNegativeNumber(value: unknown): value is number {
@@ -109,6 +158,35 @@ function multiplyCost(quantity: number | undefined, unitCost: number | undefined
   }
 
   return qtyDecimal.mul(costDecimal);
+}
+
+interface CacheCreationTokenBuckets {
+  defaultTokens?: number;
+  fiveMinuteTokens?: number;
+  oneHourTokens?: number;
+}
+
+export function splitCacheCreationTokens(usage: UsageMetrics): CacheCreationTokenBuckets {
+  let defaultTokens: number | undefined;
+  let fiveMinuteTokens = usage.cache_creation_5m_input_tokens;
+  let oneHourTokens = usage.cache_creation_1h_input_tokens;
+
+  if (typeof usage.cache_creation_input_tokens === "number") {
+    const remaining =
+      usage.cache_creation_input_tokens - (fiveMinuteTokens ?? 0) - (oneHourTokens ?? 0);
+
+    if (remaining > 0) {
+      if (usage.cache_ttl === "1h") {
+        oneHourTokens = (oneHourTokens ?? 0) + remaining;
+      } else if (usage.cache_ttl === "5m") {
+        fiveMinuteTokens = (fiveMinuteTokens ?? 0) + remaining;
+      } else {
+        defaultTokens = remaining;
+      }
+    }
+  }
+
+  return { defaultTokens, fiveMinuteTokens, oneHourTokens };
 }
 
 function resolveLongContextThreshold(priceData: ModelPriceData): number {
@@ -262,6 +340,7 @@ function normalizeRequestCostOptions(
       groupMultiplier: sanitizeMultiplier(multiplierOrOptions.groupMultiplier),
       context1mApplied: multiplierOrOptions.context1mApplied ?? false,
       priorityServiceTierApplied: multiplierOrOptions.priorityServiceTierApplied ?? false,
+      modelName: multiplierOrOptions.modelName ?? null,
       longContextPricing: multiplierOrOptions.longContextPricing ?? null,
     };
   }
@@ -271,6 +350,7 @@ function normalizeRequestCostOptions(
     groupMultiplier: 1.0,
     context1mApplied,
     priorityServiceTierApplied,
+    modelName: null,
     longContextPricing: null,
   };
 }
@@ -283,6 +363,7 @@ function normalizeRequestCostBreakdownOptions(
     return {
       context1mApplied: context1mAppliedOrOptions.context1mApplied ?? false,
       priorityServiceTierApplied: context1mAppliedOrOptions.priorityServiceTierApplied ?? false,
+      modelName: context1mAppliedOrOptions.modelName ?? null,
       longContextPricing: context1mAppliedOrOptions.longContextPricing ?? null,
     };
   }
@@ -290,6 +371,7 @@ function normalizeRequestCostBreakdownOptions(
   return {
     context1mApplied: context1mAppliedOrOptions,
     priorityServiceTierApplied,
+    modelName: null,
     longContextPricing: null,
   };
 }
@@ -332,8 +414,15 @@ export function getLongContextTriggerInputTokens(
 
 export function matchLongContextPricing(
   usage: UsageMetrics,
-  priceData: ModelPriceData
+  priceData: ModelPriceData,
+  modelName?: string | null
 ): LongContextPricingMatch | null {
+  // GPT-5.6 resolves one authoritative four-rate tier for the whole request. Generic
+  // long-context metadata must neither override the charge nor claim it was applied.
+  if (isGpt56PriceData(priceData, modelName)) {
+    return null;
+  }
+
   const pricing = resolveLongContextPricing(priceData);
   if (!pricing) {
     return null;
@@ -355,14 +444,72 @@ export function matchLongContextPricing(
 export interface CostBreakdown {
   input: number;
   output: number;
-  /** Aggregate of 5m + 1h cache creation cost (kept for Langfuse back-compat). */
+  /** Aggregate of default + 5m + 1h cache creation cost (kept for Langfuse back-compat). */
   cache_creation: number;
+  /** Cache creation cost without an Anthropic TTL classification. */
+  cache_creation_default: number;
   /** Cache creation cost for 5-minute TTL tokens only. */
   cache_creation_5m: number;
   /** Cache creation cost for 1-hour TTL tokens only. */
   cache_creation_1h: number;
   cache_read: number;
   total: number;
+}
+
+export function resolvePricingSnapshotForCostBreakdown(
+  usage: UsageMetrics,
+  priceData: ModelPriceData,
+  context1mAppliedOrOptions: boolean | RequestCostBreakdownOptions = false,
+  priorityServiceTierApplied: boolean = false
+): ResolvedBillingRateSnapshot | undefined {
+  const options = normalizeRequestCostBreakdownOptions(
+    context1mAppliedOrOptions,
+    priorityServiceTierApplied
+  );
+  const resolution = assertSupportedGpt56Pricing(
+    usage,
+    priceData,
+    options.priorityServiceTierApplied,
+    options.modelName
+  );
+  if (resolution?.status !== "resolved") return undefined;
+
+  return {
+    tier: resolution.pricingTier,
+    unitRates: resolution.rates,
+    rateSource: resolution.rateSource,
+    ...(resolution.rateSourceId ? { rateSourceId: resolution.rateSourceId } : {}),
+    ...(resolution.rateSourceUrl ? { rateSourceUrl: resolution.rateSourceUrl } : {}),
+  };
+}
+
+export interface PricingSnapshotPriceBookProvenance {
+  source: ResolvedPricingSource;
+  model: string;
+  provider: string;
+}
+
+export function toStoredPricingSnapshot(
+  snapshot: ResolvedBillingRateSnapshot | undefined,
+  priceBook: PricingSnapshotPriceBookProvenance
+): StoredPricingSnapshot | undefined {
+  if (!snapshot) return undefined;
+
+  return {
+    tier: snapshot.tier,
+    unit_rates: {
+      input: new Decimal(snapshot.unitRates.input).toString(),
+      cache_read: new Decimal(snapshot.unitRates.cacheRead).toString(),
+      cache_write: new Decimal(snapshot.unitRates.cacheWrite).toString(),
+      output: new Decimal(snapshot.unitRates.output).toString(),
+    },
+    rate_source: snapshot.rateSource,
+    ...(snapshot.rateSourceId ? { rate_source_id: snapshot.rateSourceId } : {}),
+    ...(snapshot.rateSourceUrl ? { rate_source_url: snapshot.rateSourceUrl } : {}),
+    price_book_source: priceBook.source,
+    price_book_model: priceBook.model,
+    price_book_provider: priceBook.provider,
+  };
 }
 
 /**
@@ -379,8 +526,16 @@ export function calculateRequestCostBreakdown(
     context1mAppliedOrOptions,
     priorityServiceTierApplied
   );
+  const gpt56Resolution = assertSupportedGpt56Pricing(
+    usage,
+    priceData,
+    options.priorityServiceTierApplied,
+    options.modelName
+  );
+  const gpt56Rates = gpt56Resolution?.rates;
   let inputBucket = new Decimal(0);
   let outputBucket = new Decimal(0);
+  let cacheCreationDefaultBucket = new Decimal(0);
   let cacheCreation5mBucket = new Decimal(0);
   let cacheCreation1hBucket = new Decimal(0);
   let cacheReadBucket = new Decimal(0);
@@ -388,17 +543,21 @@ export function calculateRequestCostBreakdown(
   const baseInputCostPerToken = priceData.input_cost_per_token;
   const baseOutputCostPerToken = priceData.output_cost_per_token;
   const inputCostPerToken =
-    options.priorityServiceTierApplied &&
+    gpt56Rates?.input ??
+    (options.priorityServiceTierApplied &&
     typeof priceData.input_cost_per_token_priority === "number"
       ? priceData.input_cost_per_token_priority
-      : baseInputCostPerToken;
+      : baseInputCostPerToken);
   const outputCostPerToken =
-    options.priorityServiceTierApplied &&
+    gpt56Rates?.output ??
+    (options.priorityServiceTierApplied &&
     typeof priceData.output_cost_per_token_priority === "number"
       ? priceData.output_cost_per_token_priority
-      : baseOutputCostPerToken;
+      : baseOutputCostPerToken);
   const inputCostPerRequest = priceData.input_cost_per_request;
-  const longContextPricing = options.longContextPricing;
+  // GPT-5.6 resolves one complete, auditable four-rate tier for the whole request. A generic
+  // long_context_pricing override must not make the charged rates diverge from that snapshot.
+  const longContextPricing = gpt56Resolution ? null : options.longContextPricing;
 
   // Per-request cost -> input bucket
   if (
@@ -413,15 +572,25 @@ export function calculateRequestCostBreakdown(
   }
 
   const cacheCreation5mCost =
+    gpt56Rates?.cacheWrite ??
     priceData.cache_creation_input_token_cost ??
     (baseInputCostPerToken != null ? baseInputCostPerToken * 1.25 : undefined);
+  const cacheCreationDefaultCost =
+    gpt56Rates?.cacheWrite ??
+    (options.priorityServiceTierApplied &&
+    typeof priceData.cache_creation_input_token_cost_priority === "number"
+      ? priceData.cache_creation_input_token_cost_priority
+      : undefined) ??
+    cacheCreation5mCost;
 
   const cacheCreation1hCost =
+    gpt56Rates?.cacheWrite ??
     priceData.cache_creation_input_token_cost_above_1hr ??
     (baseInputCostPerToken != null ? baseInputCostPerToken * 2 : undefined) ??
     cacheCreation5mCost;
 
   const cacheReadCost =
+    gpt56Rates?.cacheRead ??
     (options.priorityServiceTierApplied &&
     typeof priceData.cache_read_input_token_cost_priority === "number"
       ? priceData.cache_read_input_token_cost_priority
@@ -432,63 +601,51 @@ export function calculateRequestCostBreakdown(
         ? baseOutputCostPerToken * 0.1
         : undefined);
 
-  // Derive cache creation tokens by TTL
-  let cache5mTokens = usage.cache_creation_5m_input_tokens;
-  let cache1hTokens = usage.cache_creation_1h_input_tokens;
+  const {
+    defaultTokens: cacheDefaultTokens,
+    fiveMinuteTokens: cache5mTokens,
+    oneHourTokens: cache1hTokens,
+  } = splitCacheCreationTokens(usage);
 
-  if (typeof usage.cache_creation_input_tokens === "number") {
-    const remaining =
-      usage.cache_creation_input_tokens - (cache5mTokens ?? 0) - (cache1hTokens ?? 0);
-
-    if (remaining > 0) {
-      const target = usage.cache_ttl === "1h" ? "1h" : "5m";
-      if (target === "1h") {
-        cache1hTokens = (cache1hTokens ?? 0) + remaining;
-      } else {
-        cache5mTokens = (cache5mTokens ?? 0) + remaining;
-      }
-    }
-  }
-
-  const inputAboveThreshold = resolvePriorityAwareLongContextRate(
-    options.priorityServiceTierApplied,
-    {
+  const inputAboveThreshold =
+    gpt56Rates?.input ??
+    resolvePriorityAwareLongContextRate(options.priorityServiceTierApplied, {
       above272k: priceData.input_cost_per_token_above_272k_tokens,
       above272kPriority: priceData.input_cost_per_token_above_272k_tokens_priority,
       above200k: priceData.input_cost_per_token_above_200k_tokens,
       above200kPriority: priceData.input_cost_per_token_above_200k_tokens_priority,
-    }
-  );
-  const outputAboveThreshold = resolvePriorityAwareLongContextRate(
-    options.priorityServiceTierApplied,
-    {
+    });
+  const outputAboveThreshold =
+    gpt56Rates?.output ??
+    resolvePriorityAwareLongContextRate(options.priorityServiceTierApplied, {
       above272k: priceData.output_cost_per_token_above_272k_tokens,
       above272kPriority: priceData.output_cost_per_token_above_272k_tokens_priority,
       above200k: priceData.output_cost_per_token_above_200k_tokens,
       above200kPriority: priceData.output_cost_per_token_above_200k_tokens_priority,
-    }
-  );
+    });
   const cacheCreationAboveThreshold =
+    gpt56Rates?.cacheWrite ??
     priceData.cache_creation_input_token_cost_above_272k_tokens ??
     priceData.cache_creation_input_token_cost_above_200k_tokens;
   const cacheCreation1hAboveThreshold =
+    gpt56Rates?.cacheWrite ??
     priceData.cache_creation_input_token_cost_above_1hr_above_272k_tokens ??
     priceData.cache_creation_input_token_cost_above_1hr_above_200k_tokens ??
     cacheCreationAboveThreshold;
-  const cacheReadAboveThreshold = resolvePriorityAwareLongContextRate(
-    options.priorityServiceTierApplied,
-    {
+  const cacheReadAboveThreshold =
+    gpt56Rates?.cacheRead ??
+    resolvePriorityAwareLongContextRate(options.priorityServiceTierApplied, {
       above272k: priceData.cache_read_input_token_cost_above_272k_tokens,
       above272kPriority: priceData.cache_read_input_token_cost_above_272k_tokens_priority,
       above200k: priceData.cache_read_input_token_cost_above_200k_tokens,
       above200kPriority: priceData.cache_read_input_token_cost_above_200k_tokens_priority,
-    }
-  );
+    });
   const longContextThreshold = resolveLongContextThreshold(priceData);
   const longContextThresholdExceeded =
     getLongContextTriggerInputTokens(usage, cache5mTokens, cache1hTokens) > longContextThreshold;
-  const hasRealCacheCreationBase = priceData.cache_creation_input_token_cost != null;
-  const hasRealCacheReadBase = priceData.cache_read_input_token_cost != null;
+  const hasRealCacheCreationBase =
+    gpt56Rates != null || priceData.cache_creation_input_token_cost != null;
+  const hasRealCacheReadBase = gpt56Rates != null || priceData.cache_read_input_token_cost != null;
 
   // Input tokens -> input bucket
   // 注意：一旦请求的“输入上下文总量”超过阈值，供应商官方定价按整次请求的全量 token
@@ -532,6 +689,30 @@ export function calculateRequestCostBreakdown(
   }
 
   // Cache costs
+
+  // Cache creation without a TTL classification -> cache_creation_default bucket
+  if (
+    longContextPricing &&
+    longContextPricing.cacheCreationInputTokenCost != null &&
+    cacheDefaultTokens != null
+  ) {
+    cacheCreationDefaultBucket = cacheCreationDefaultBucket.add(
+      multiplyCost(cacheDefaultTokens, longContextPricing.cacheCreationInputTokenCost)
+    );
+  } else if (
+    longContextThresholdExceeded &&
+    hasRealCacheCreationBase &&
+    cacheCreationAboveThreshold != null &&
+    cacheDefaultTokens != null
+  ) {
+    cacheCreationDefaultBucket = cacheCreationDefaultBucket.add(
+      multiplyCost(cacheDefaultTokens, cacheCreationAboveThreshold)
+    );
+  } else {
+    cacheCreationDefaultBucket = cacheCreationDefaultBucket.add(
+      multiplyCost(cacheDefaultTokens, cacheCreationDefaultCost)
+    );
+  }
 
   // Cache creation 5m -> cache_creation_5m bucket
   if (
@@ -608,23 +789,28 @@ export function calculateRequestCostBreakdown(
   // Image tokens -> respective buckets
   if (usage.output_image_tokens != null && usage.output_image_tokens > 0) {
     const imageCostPerToken =
-      priceData.output_cost_per_image_token ?? priceData.output_cost_per_token;
+      priceData.output_cost_per_image_token ??
+      gpt56Rates?.output ??
+      priceData.output_cost_per_token;
     outputBucket = outputBucket.add(multiplyCost(usage.output_image_tokens, imageCostPerToken));
   }
 
   if (usage.input_image_tokens != null && usage.input_image_tokens > 0) {
     const imageCostPerToken =
-      priceData.input_cost_per_image_token ?? priceData.input_cost_per_token;
+      priceData.input_cost_per_image_token ?? gpt56Rates?.input ?? priceData.input_cost_per_token;
     inputBucket = inputBucket.add(multiplyCost(usage.input_image_tokens, imageCostPerToken));
   }
 
-  const cacheCreationBucket = cacheCreation5mBucket.add(cacheCreation1hBucket);
+  const cacheCreationBucket = cacheCreationDefaultBucket
+    .add(cacheCreation5mBucket)
+    .add(cacheCreation1hBucket);
   const total = inputBucket.add(outputBucket).add(cacheCreationBucket).add(cacheReadBucket);
 
   return {
     input: inputBucket.toDecimalPlaces(COST_SCALE).toNumber(),
     output: outputBucket.toDecimalPlaces(COST_SCALE).toNumber(),
     cache_creation: cacheCreationBucket.toDecimalPlaces(COST_SCALE).toNumber(),
+    cache_creation_default: cacheCreationDefaultBucket.toDecimalPlaces(COST_SCALE).toNumber(),
     cache_creation_5m: cacheCreation5mBucket.toDecimalPlaces(COST_SCALE).toNumber(),
     cache_creation_1h: cacheCreation1hBucket.toDecimalPlaces(COST_SCALE).toNumber(),
     cache_read: cacheReadBucket.toDecimalPlaces(COST_SCALE).toNumber(),
@@ -652,22 +838,31 @@ export function calculateRequestCost(
     context1mApplied,
     priorityServiceTierApplied
   );
+  const gpt56Resolution = assertSupportedGpt56Pricing(
+    usage,
+    priceData,
+    options.priorityServiceTierApplied,
+    options.modelName
+  );
+  const gpt56Rates = gpt56Resolution?.rates;
   const segments: Decimal[] = [];
 
   const baseInputCostPerToken = priceData.input_cost_per_token;
   const baseOutputCostPerToken = priceData.output_cost_per_token;
   const inputCostPerToken =
-    options.priorityServiceTierApplied &&
+    gpt56Rates?.input ??
+    (options.priorityServiceTierApplied &&
     typeof priceData.input_cost_per_token_priority === "number"
       ? priceData.input_cost_per_token_priority
-      : baseInputCostPerToken;
+      : baseInputCostPerToken);
   const outputCostPerToken =
-    options.priorityServiceTierApplied &&
+    gpt56Rates?.output ??
+    (options.priorityServiceTierApplied &&
     typeof priceData.output_cost_per_token_priority === "number"
       ? priceData.output_cost_per_token_priority
-      : baseOutputCostPerToken;
+      : baseOutputCostPerToken);
   const inputCostPerRequest = priceData.input_cost_per_request;
-  const longContextPricing = options.longContextPricing;
+  const longContextPricing = gpt56Resolution ? null : options.longContextPricing;
 
   if (
     typeof inputCostPerRequest === "number" &&
@@ -681,15 +876,25 @@ export function calculateRequestCost(
   }
 
   const cacheCreation5mCost =
+    gpt56Rates?.cacheWrite ??
     priceData.cache_creation_input_token_cost ??
     (baseInputCostPerToken != null ? baseInputCostPerToken * 1.25 : undefined);
+  const cacheCreationDefaultCost =
+    gpt56Rates?.cacheWrite ??
+    (options.priorityServiceTierApplied &&
+    typeof priceData.cache_creation_input_token_cost_priority === "number"
+      ? priceData.cache_creation_input_token_cost_priority
+      : undefined) ??
+    cacheCreation5mCost;
 
   const cacheCreation1hCost =
+    gpt56Rates?.cacheWrite ??
     priceData.cache_creation_input_token_cost_above_1hr ??
     (baseInputCostPerToken != null ? baseInputCostPerToken * 2 : undefined) ??
     cacheCreation5mCost;
 
   const cacheReadCost =
+    gpt56Rates?.cacheRead ??
     (options.priorityServiceTierApplied &&
     typeof priceData.cache_read_input_token_cost_priority === "number"
       ? priceData.cache_read_input_token_cost_priority
@@ -700,63 +905,51 @@ export function calculateRequestCost(
         ? baseOutputCostPerToken * 0.1
         : undefined);
 
-  // Derive cache creation tokens by TTL
-  let cache5mTokens = usage.cache_creation_5m_input_tokens;
-  let cache1hTokens = usage.cache_creation_1h_input_tokens;
+  const {
+    defaultTokens: cacheDefaultTokens,
+    fiveMinuteTokens: cache5mTokens,
+    oneHourTokens: cache1hTokens,
+  } = splitCacheCreationTokens(usage);
 
-  if (typeof usage.cache_creation_input_tokens === "number") {
-    const remaining =
-      usage.cache_creation_input_tokens - (cache5mTokens ?? 0) - (cache1hTokens ?? 0);
-
-    if (remaining > 0) {
-      const target = usage.cache_ttl === "1h" ? "1h" : "5m";
-      if (target === "1h") {
-        cache1hTokens = (cache1hTokens ?? 0) + remaining;
-      } else {
-        cache5mTokens = (cache5mTokens ?? 0) + remaining;
-      }
-    }
-  }
-
-  const inputAboveThreshold = resolvePriorityAwareLongContextRate(
-    options.priorityServiceTierApplied,
-    {
+  const inputAboveThreshold =
+    gpt56Rates?.input ??
+    resolvePriorityAwareLongContextRate(options.priorityServiceTierApplied, {
       above272k: priceData.input_cost_per_token_above_272k_tokens,
       above272kPriority: priceData.input_cost_per_token_above_272k_tokens_priority,
       above200k: priceData.input_cost_per_token_above_200k_tokens,
       above200kPriority: priceData.input_cost_per_token_above_200k_tokens_priority,
-    }
-  );
-  const outputAboveThreshold = resolvePriorityAwareLongContextRate(
-    options.priorityServiceTierApplied,
-    {
+    });
+  const outputAboveThreshold =
+    gpt56Rates?.output ??
+    resolvePriorityAwareLongContextRate(options.priorityServiceTierApplied, {
       above272k: priceData.output_cost_per_token_above_272k_tokens,
       above272kPriority: priceData.output_cost_per_token_above_272k_tokens_priority,
       above200k: priceData.output_cost_per_token_above_200k_tokens,
       above200kPriority: priceData.output_cost_per_token_above_200k_tokens_priority,
-    }
-  );
+    });
   const cacheCreationAboveThreshold =
+    gpt56Rates?.cacheWrite ??
     priceData.cache_creation_input_token_cost_above_272k_tokens ??
     priceData.cache_creation_input_token_cost_above_200k_tokens;
   const cacheCreation1hAboveThreshold =
+    gpt56Rates?.cacheWrite ??
     priceData.cache_creation_input_token_cost_above_1hr_above_272k_tokens ??
     priceData.cache_creation_input_token_cost_above_1hr_above_200k_tokens ??
     cacheCreationAboveThreshold;
-  const cacheReadAboveThreshold = resolvePriorityAwareLongContextRate(
-    options.priorityServiceTierApplied,
-    {
+  const cacheReadAboveThreshold =
+    gpt56Rates?.cacheRead ??
+    resolvePriorityAwareLongContextRate(options.priorityServiceTierApplied, {
       above272k: priceData.cache_read_input_token_cost_above_272k_tokens,
       above272kPriority: priceData.cache_read_input_token_cost_above_272k_tokens_priority,
       above200k: priceData.cache_read_input_token_cost_above_200k_tokens,
       above200kPriority: priceData.cache_read_input_token_cost_above_200k_tokens_priority,
-    }
-  );
+    });
   const longContextThreshold = resolveLongContextThreshold(priceData);
   const longContextThresholdExceeded =
     getLongContextTriggerInputTokens(usage, cache5mTokens, cache1hTokens) > longContextThreshold;
-  const hasRealCacheCreationBase = priceData.cache_creation_input_token_cost != null;
-  const hasRealCacheReadBase = priceData.cache_read_input_token_cost != null;
+  const hasRealCacheCreationBase =
+    gpt56Rates != null || priceData.cache_creation_input_token_cost != null;
+  const hasRealCacheReadBase = gpt56Rates != null || priceData.cache_read_input_token_cost != null;
 
   // Input tokens
   // 注意：阈值命中后按整次请求的全量 token 应用 long-context 价格。
@@ -796,6 +989,24 @@ export function calculateRequestCost(
   // 缓存相关费用
   // 检查是否有 200K 分层的缓存价格
   // 注意：只有当价格表中的原始基础价格存在时才启用分层计费，避免派生价格与分层价格混用导致误计费
+
+  // 未标注 TTL 的缓存创建费用
+  if (
+    longContextPricing &&
+    longContextPricing.cacheCreationInputTokenCost != null &&
+    cacheDefaultTokens != null
+  ) {
+    segments.push(multiplyCost(cacheDefaultTokens, longContextPricing.cacheCreationInputTokenCost));
+  } else if (
+    longContextThresholdExceeded &&
+    hasRealCacheCreationBase &&
+    cacheCreationAboveThreshold != null &&
+    cacheDefaultTokens != null
+  ) {
+    segments.push(multiplyCost(cacheDefaultTokens, cacheCreationAboveThreshold));
+  } else {
+    segments.push(multiplyCost(cacheDefaultTokens, cacheCreationDefaultCost));
+  }
 
   // 缓存创建费用（5分钟 TTL）：优先级 explicit long-context > 显式分层价格 > 普通
   if (
@@ -859,14 +1070,16 @@ export function calculateRequestCost(
   // 输出图片 token：优先使用 output_cost_per_image_token，否则回退到 output_cost_per_token
   if (usage.output_image_tokens != null && usage.output_image_tokens > 0) {
     const imageCostPerToken =
-      priceData.output_cost_per_image_token ?? priceData.output_cost_per_token;
+      priceData.output_cost_per_image_token ??
+      gpt56Rates?.output ??
+      priceData.output_cost_per_token;
     segments.push(multiplyCost(usage.output_image_tokens, imageCostPerToken));
   }
 
   // 输入图片 token：优先使用 input_cost_per_image_token，否则回退到 input_cost_per_token
   if (usage.input_image_tokens != null && usage.input_image_tokens > 0) {
     const imageCostPerToken =
-      priceData.input_cost_per_image_token ?? priceData.input_cost_per_token;
+      priceData.input_cost_per_image_token ?? gpt56Rates?.input ?? priceData.input_cost_per_token;
     segments.push(multiplyCost(usage.input_image_tokens, imageCostPerToken));
   }
 

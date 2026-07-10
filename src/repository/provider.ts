@@ -19,6 +19,7 @@ import type {
   ProviderModelRedirectRule,
   UpdateProviderData,
 } from "@/types/provider";
+import { buildProviderBillingEventsQuery } from "./_shared/provider-billing-events";
 import { toProvider } from "./_shared/transformers";
 import {
   ensureProviderEndpointExistsForUrl,
@@ -1620,28 +1621,30 @@ export async function getProviderStatistics(): Promise<ProviderStatisticsRow[]> 
              ((DATE_TRUNC('day', CURRENT_TIMESTAMP AT TIME ZONE ${timezone}) + INTERVAL '1 day') AT TIME ZONE ${timezone}) AS tomorrow_start,
              ((DATE_TRUNC('day', CURRENT_TIMESTAMP AT TIME ZONE ${timezone}) - INTERVAL '7 days') AT TIME ZONE ${timezone}) AS last7_start
          ),
+         provider_billing_event AS (
+           ${buildProviderBillingEventsQuery({
+             startTimeSql: sql`(SELECT last7_start FROM bounds)`,
+           })}
+         ),
          provider_stats AS (
-           -- 先按最终供应商聚合，再与 providers 做 LEFT JOIN，避免 providers × 今日请求 的笛卡尔积
+           -- Provider billing events split a request total into winner and hedge-loser costs.
            SELECT
-            final_provider_id,
+            provider_id,
             COALESCE(SUM(cost_usd), 0) AS today_cost,
             COUNT(*)::integer AS today_calls
-          FROM usage_ledger
-          WHERE blocked_by IS NULL
-            AND created_at >= (SELECT today_start FROM bounds)
+          FROM provider_billing_event
+          WHERE created_at >= (SELECT today_start FROM bounds)
             AND created_at < (SELECT tomorrow_start FROM bounds)
-          GROUP BY final_provider_id
+          GROUP BY provider_id
         ),
         latest_call AS (
-          SELECT DISTINCT ON (final_provider_id)
-            final_provider_id,
+          SELECT DISTINCT ON (provider_id)
+            provider_id,
             created_at AS last_call_time,
             model AS last_call_model
-          FROM usage_ledger
-          WHERE blocked_by IS NULL
-            AND created_at >= (SELECT last7_start FROM bounds)
-          -- 性能优化：添加 7 天时间范围限制（避免扫描历史数据）
-          ORDER BY final_provider_id, created_at DESC, id DESC
+          FROM provider_billing_event
+          WHERE created_at >= (SELECT last7_start FROM bounds)
+          ORDER BY provider_id, created_at DESC, request_id DESC, billing_event_id DESC
         )
         SELECT
           p.id,
@@ -1650,8 +1653,8 @@ export async function getProviderStatistics(): Promise<ProviderStatisticsRow[]> 
           lc.last_call_time,
           lc.last_call_model
         FROM providers p
-        LEFT JOIN provider_stats ps ON p.id = ps.final_provider_id
-        LEFT JOIN latest_call lc ON p.id = lc.final_provider_id
+        LEFT JOIN provider_stats ps ON p.id = ps.provider_id
+        LEFT JOIN latest_call lc ON p.id = lc.provider_id
         WHERE p.deleted_at IS NULL
         ORDER BY p.id ASC
       `;

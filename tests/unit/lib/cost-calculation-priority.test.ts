@@ -1,5 +1,9 @@
 import { describe, expect, test } from "vitest";
-import { calculateRequestCost } from "@/lib/utils/cost-calculation";
+import {
+  calculateRequestCost,
+  calculateRequestCostBreakdown,
+  UnsupportedPricingCombinationError,
+} from "@/lib/utils/cost-calculation";
 import type { ModelPriceData } from "@/types/model-price";
 
 function makePriceData(overrides: Partial<ModelPriceData> = {}): ModelPriceData {
@@ -16,6 +20,113 @@ function makePriceData(overrides: Partial<ModelPriceData> = {}): ModelPriceData 
 }
 
 describe("calculateRequestCost priority service tier", () => {
+  test("uses the Priority cache-write rate for generic cache writes", () => {
+    const cost = calculateRequestCost(
+      { cache_creation_input_tokens: 4 },
+      makePriceData({
+        cache_creation_input_token_cost: 1.25,
+        cache_creation_input_token_cost_priority: 3,
+      }),
+      1,
+      false,
+      true
+    );
+
+    expect(Number(cost.toString())).toBe(12);
+  });
+
+  test("rejects an incomplete GPT-5.6 Priority rate set instead of mixing Standard rates", () => {
+    expect(() =>
+      calculateRequestCost(
+        {
+          input_tokens: 2,
+          output_tokens: 3,
+          cache_creation_input_tokens: 4,
+          cache_read_input_tokens: 5,
+        },
+        makePriceData({
+          slug: "openai/gpt-5.6-sol",
+          cache_creation_input_token_cost: 1.25,
+          cache_creation_input_token_cost_priority: undefined,
+        }),
+        1,
+        false,
+        true
+      )
+    ).toThrowError(UnsupportedPricingCombinationError);
+  });
+
+  test("rejects GPT-5.6 Priority long context instead of inventing a combined price", () => {
+    expect(() =>
+      calculateRequestCost(
+        { input_tokens: 272001 },
+        makePriceData({
+          slug: "openai/gpt-5.6-sol",
+          cache_creation_input_token_cost_priority: 2.5,
+          input_cost_per_token_above_272k_tokens: 5,
+          output_cost_per_token_above_272k_tokens: 50,
+          cache_creation_input_token_cost_above_272k_tokens: 6.25,
+          cache_read_input_token_cost_above_272k_tokens: 0.5,
+        }),
+        1,
+        false,
+        true
+      )
+    ).toThrowError(expect.objectContaining({ reason: "gpt56_priority_long_context_unsupported" }));
+  });
+
+  test("uses the resolved model name to reject Priority long context when price data has no slug", () => {
+    expect(() =>
+      calculateRequestCost(
+        { input_tokens: 272001 },
+        makePriceData({
+          slug: undefined,
+          cache_creation_input_token_cost_priority: 2.5,
+          input_cost_per_token_above_272k_tokens: 5,
+          output_cost_per_token_above_272k_tokens: 50,
+          cache_creation_input_token_cost_above_272k_tokens: 6.25,
+          cache_read_input_token_cost_above_272k_tokens: 0.5,
+        }),
+        {
+          priorityServiceTierApplied: true,
+          modelName: "gpt-5.6-sol",
+        }
+      )
+    ).toThrowError(expect.objectContaining({ reason: "gpt56_priority_long_context_unsupported" }));
+  });
+
+  test("uses the resolved model name to reject incomplete Priority rates when price data has no slug", () => {
+    expect(() =>
+      calculateRequestCost(
+        { input_tokens: 1000, cache_creation_input_tokens: 100 },
+        makePriceData({
+          slug: undefined,
+          cache_creation_input_token_cost_priority: undefined,
+        }),
+        {
+          priorityServiceTierApplied: true,
+          modelName: "gpt-5.6-sol",
+        }
+      )
+    ).toThrowError(expect.objectContaining({ reason: "gpt56_priority_rates_incomplete" }));
+  });
+
+  test("propagates the resolved model name through breakdown pricing validation", () => {
+    expect(() =>
+      calculateRequestCostBreakdown(
+        { input_tokens: 272001 },
+        makePriceData({
+          slug: undefined,
+          cache_creation_input_token_cost_priority: 2.5,
+        }),
+        {
+          priorityServiceTierApplied: true,
+          modelName: "gpt-5.6-sol",
+        }
+      )
+    ).toThrowError(expect.objectContaining({ reason: "gpt56_priority_long_context_unsupported" }));
+  });
+
   test("uses priority pricing fields when priority service tier is applied", () => {
     const cost = calculateRequestCost(
       { input_tokens: 2, output_tokens: 3, cache_read_input_tokens: 5 },
@@ -42,6 +153,31 @@ describe("calculateRequestCost priority service tier", () => {
     );
 
     expect(Number(cost.toString())).toBe(32.5);
+  });
+
+  test.each([
+    undefined,
+    null,
+  ])("keeps generic Priority fallback semantics when modelName is %s", (modelName) => {
+    const priceData = makePriceData({
+      input_cost_per_token_priority: undefined,
+      output_cost_per_token_priority: undefined,
+      cache_read_input_token_cost_priority: undefined,
+    });
+
+    const cost = calculateRequestCost(
+      { input_tokens: 2, output_tokens: 3, cache_read_input_tokens: 5 },
+      priceData,
+      { priorityServiceTierApplied: true, modelName }
+    );
+    const breakdown = calculateRequestCostBreakdown(
+      { input_tokens: 2, output_tokens: 3, cache_read_input_tokens: 5 },
+      priceData,
+      { priorityServiceTierApplied: true, modelName }
+    );
+
+    expect(cost.toNumber()).toBe(32.5);
+    expect(breakdown.total).toBe(32.5);
   });
 
   test("uses priority long-context pricing fields when available", () => {

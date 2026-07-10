@@ -23,7 +23,10 @@ function sqlToString(sqlObj: unknown): string {
   return walk(sqlObj);
 }
 
-function mockDbWithWhere(whereImpl: () => Promise<unknown>) {
+function mockDbWithWhere(
+  whereImpl: () => Promise<unknown>,
+  selectWhereImpl: () => Promise<unknown> = async () => []
+) {
   const whereArgs: unknown[] = [];
   const setArgs: unknown[] = [];
   const update = vi.fn(() => ({
@@ -32,19 +35,22 @@ function mockDbWithWhere(whereImpl: () => Promise<unknown>) {
       return {
         where: vi.fn((cond: unknown) => {
           whereArgs.push(cond);
-          return whereImpl();
+          return { returning: vi.fn(() => whereImpl()) };
         }),
       };
     }),
   }));
+  const select = vi.fn(() => ({
+    from: vi.fn(() => ({ where: vi.fn(() => selectWhereImpl()) })),
+  }));
   vi.doMock("@/drizzle/db", () => ({
     db: {
       update,
-      select: () => ({ from: () => ({ where: async () => [] }) }),
+      select,
       execute: vi.fn(async () => []),
     },
   }));
-  return { update, whereArgs, setArgs };
+  return { update, select, whereArgs, setArgs };
 }
 
 const LOSER = {
@@ -54,10 +60,56 @@ const LOSER = {
   costUsd: "0.01",
 };
 
+const BILLING_SETTLEMENT = {
+  providerId: 10,
+  model: "gpt-5.6-sol",
+  costMultiplier: 1,
+  groupCostMultiplier: 1,
+  providerChain: [{ id: 10, name: "winner", reason: "hedge_winner" }],
+  specialSettings: [],
+  context1mApplied: false,
+  swapCacheTtlApplied: false,
+  inputTokens: 10,
+  observedInputTokens: 10,
+  outputTokens: 2,
+  cacheCreationInputTokens: 0,
+  cacheReadInputTokens: 0,
+  cacheCreation5mInputTokens: 0,
+  cacheCreation1hInputTokens: 0,
+  cacheWriteTokensReported: null,
+  cacheWriteAccounting: "none" as const,
+};
+
 describe("addMessageRequestHedgeLoserCost (idempotent + retried direct write)", () => {
+  test("返回写入后的权威请求总成本", async () => {
+    vi.resetModules();
+    mockDbWithWhere(async () => [{ costUsd: "0.11" }]);
+
+    const { addMessageRequestHedgeLoserCost } = await import("@/repository/message");
+    await expect(addMessageRequestHedgeLoserCost(1, "0.01", LOSER)).resolves.toBe("0.11");
+  });
+
+  test("写入已提交但客户端报错时，幂等重试回读权威请求总成本", async () => {
+    vi.resetModules();
+    let updateCalls = 0;
+    const { update, select } = mockDbWithWhere(
+      async () => {
+        updateCalls++;
+        if (updateCalls === 1) throw new Error("ambiguous commit");
+        return [];
+      },
+      async () => [{ costUsd: "0.11" }]
+    );
+
+    const { addMessageRequestHedgeLoserCost } = await import("@/repository/message");
+    await expect(addMessageRequestHedgeLoserCost(1, "0.01", LOSER)).resolves.toBe("0.11");
+    expect(update).toHaveBeenCalledTimes(2);
+    expect(select).toHaveBeenCalledTimes(1);
+  });
+
   test("成功时只写一次，并带幂等 guard（NOT ... @>）与累加 SQL", async () => {
     vi.resetModules();
-    const { update, whereArgs, setArgs } = mockDbWithWhere(async () => []);
+    const { update, whereArgs, setArgs } = mockDbWithWhere(async () => [{ costUsd: "0.11" }]);
 
     const { addMessageRequestHedgeLoserCost } = await import("@/repository/message");
     await addMessageRequestHedgeLoserCost(1, "0.01", LOSER);
@@ -75,18 +127,90 @@ describe("addMessageRequestHedgeLoserCost (idempotent + retried direct write)", 
     expect(whereSql).toContain("hedge_losers");
   });
 
+  test("unsupported loser 只追加审计，不把 NULL cost_usd 物化为零", async () => {
+    vi.resetModules();
+    const { update, setArgs } = mockDbWithWhere(async () => [{ costUsd: null }]);
+
+    const { addMessageRequestHedgeLoserCost } = await import("@/repository/message");
+    await expect(
+      addMessageRequestHedgeLoserCost(1, "0", {
+        ...LOSER,
+        costUsd: "0",
+        billingStatus: "unsupported",
+      })
+    ).resolves.toBeNull();
+
+    expect(update).toHaveBeenCalledTimes(1);
+    const setSql = sqlToString(setArgs[0]).toLowerCase();
+    expect(setSql).toContain("hedge_losers");
+    expect(setSql).not.toContain("cost_usd");
+  });
+
+  test("unsupported loser 模糊提交后的幂等回读允许权威成本保持 NULL", async () => {
+    vi.resetModules();
+    let updateCalls = 0;
+    const { update, select } = mockDbWithWhere(
+      async () => {
+        updateCalls++;
+        if (updateCalls === 1) throw new Error("ambiguous commit");
+        return [];
+      },
+      async () => [{ costUsd: null }]
+    );
+
+    const { addMessageRequestHedgeLoserCost } = await import("@/repository/message");
+    await expect(
+      addMessageRequestHedgeLoserCost(1, "0", {
+        ...LOSER,
+        costUsd: "0",
+        billingStatus: "unsupported",
+      })
+    ).resolves.toBeNull();
+    expect(update).toHaveBeenCalledTimes(2);
+    expect(select).toHaveBeenCalledTimes(1);
+  });
+
+  test("unsupported loser 拒绝非零费用，避免审计状态与账单互相矛盾", async () => {
+    vi.resetModules();
+    const { update } = mockDbWithWhere(async () => []);
+
+    const { addMessageRequestHedgeLoserCost } = await import("@/repository/message");
+    await expect(
+      addMessageRequestHedgeLoserCost(1, "0.01", {
+        ...LOSER,
+        billingStatus: "unsupported",
+      })
+    ).rejects.toThrow("Unsupported hedge-loser billing audit must not include a non-zero cost");
+    expect(update).not.toHaveBeenCalled();
+  });
+
   test("瞬时失败后重试，最终成功不抛错", async () => {
     vi.resetModules();
     let calls = 0;
     const { update } = mockDbWithWhere(async () => {
       calls++;
       if (calls < 3) throw new Error("transient db error");
-      return [];
+      return [{ costUsd: "0.11" }];
     });
 
     const { addMessageRequestHedgeLoserCost } = await import("@/repository/message");
-    await expect(addMessageRequestHedgeLoserCost(1, "0.01", LOSER)).resolves.toBeUndefined();
+    await expect(addMessageRequestHedgeLoserCost(1, "0.01", LOSER)).resolves.toBe("0.11");
     expect(update).toHaveBeenCalledTimes(3);
+  });
+
+  test("请求行不存在时显式失败，禁止调用方继续追踪未落库费用", async () => {
+    vi.resetModules();
+    const { update, select } = mockDbWithWhere(
+      async () => [],
+      async () => []
+    );
+
+    const { addMessageRequestHedgeLoserCost } = await import("@/repository/message");
+    await expect(addMessageRequestHedgeLoserCost(404, "0.01", LOSER)).rejects.toThrow(
+      "Message request 404 not found"
+    );
+    expect(update).toHaveBeenCalledTimes(3);
+    expect(select).toHaveBeenCalledTimes(3);
   });
 
   test("持续失败：重试 MAX 次后抛错（让调用方记录，不静默丢失）", async () => {
@@ -112,7 +236,7 @@ describe("addMessageRequestHedgeLoserCost (idempotent + retried direct write)", 
 
   test("写入 hedge_losers 前清理 providerName 中的 JSONB 非法字符", async () => {
     vi.resetModules();
-    const { setArgs } = mockDbWithWhere(async () => []);
+    const { setArgs } = mockDbWithWhere(async () => [{ costUsd: "0.11" }]);
 
     const { addMessageRequestHedgeLoserCost } = await import("@/repository/message");
     await addMessageRequestHedgeLoserCost(1, "0.01", {
@@ -127,12 +251,22 @@ describe("addMessageRequestHedgeLoserCost (idempotent + retried direct write)", 
 });
 
 describe("updateMessageRequestWinnerCost (direct, idempotent, loser-sum-aware)", () => {
-  test("SET 为 winnerCost::numeric + SUM(hedge_losers[].costUsd)，幂等可重试", async () => {
+  test("返回包含已落库输家费用的权威请求总成本", async () => {
     vi.resetModules();
-    const { update, setArgs } = mockDbWithWhere(async () => []);
+    mockDbWithWhere(async () => [{ costUsd: "0.12" }]);
 
     const { updateMessageRequestWinnerCost } = await import("@/repository/message");
-    await updateMessageRequestWinnerCost(1, "0.1");
+    await expect(
+      updateMessageRequestWinnerCost(1, "0.1", undefined, BILLING_SETTLEMENT)
+    ).resolves.toBe("0.12");
+  });
+
+  test("SET 为 winnerCost::numeric + SUM(hedge_losers[].costUsd)，幂等可重试", async () => {
+    vi.resetModules();
+    const { update, setArgs } = mockDbWithWhere(async () => [{ costUsd: "0.12" }]);
+
+    const { updateMessageRequestWinnerCost } = await import("@/repository/message");
+    await updateMessageRequestWinnerCost(1, "0.1", undefined, BILLING_SETTLEMENT);
 
     expect(update).toHaveBeenCalledTimes(1);
     const setSql = sqlToString(setArgs[0]).toLowerCase();
@@ -149,11 +283,24 @@ describe("updateMessageRequestWinnerCost (direct, idempotent, loser-sum-aware)",
     const { update } = mockDbWithWhere(async () => {
       calls++;
       if (calls < 3) throw new Error("transient");
-      return [];
+      return [{ costUsd: "0.12" }];
     });
 
     const { updateMessageRequestWinnerCost } = await import("@/repository/message");
-    await expect(updateMessageRequestWinnerCost(1, "0.1")).resolves.toBeUndefined();
+    await expect(
+      updateMessageRequestWinnerCost(1, "0.1", undefined, BILLING_SETTLEMENT)
+    ).resolves.toBe("0.12");
     expect(update).toHaveBeenCalledTimes(3);
+  });
+
+  test("请求行不存在时显式失败，禁止后续 Redis 形成幽灵账单", async () => {
+    vi.resetModules();
+    const { update } = mockDbWithWhere(async () => []);
+
+    const { updateMessageRequestWinnerCost } = await import("@/repository/message");
+    await expect(
+      updateMessageRequestWinnerCost(404, "0.1", undefined, BILLING_SETTLEMENT)
+    ).rejects.toThrow("Message request 404 not found");
+    expect(update).toHaveBeenCalledTimes(1);
   });
 });

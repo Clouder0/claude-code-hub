@@ -3,6 +3,7 @@ import "server-only";
 import { and, desc, eq, gte, isNull, lt, sql } from "drizzle-orm";
 import { db } from "@/drizzle/db";
 import { keys as keysTable, messageRequest, providers, usageLedger, users } from "@/drizzle/schema";
+import type { CacheWriteAccounting } from "@/lib/billing/openai-usage-accounting";
 import { TTLMap } from "@/lib/cache/ttl-map";
 import { isLedgerOnlyMode } from "@/lib/ledger-fallback";
 import { extractAnthropicEffortFromSpecialSettings } from "@/lib/utils/anthropic-effort";
@@ -59,7 +60,10 @@ export interface UsageLogRow {
   endpoint: string | null;
   statusCode: number | null;
   inputTokens: number | null;
+  observedInputTokens: number | null;
   outputTokens: number | null;
+  cacheWriteTokensReported: number | null;
+  cacheWriteAccounting: CacheWriteAccounting | null;
   cacheCreationInputTokens: number | null;
   cacheReadInputTokens: number | null;
   cacheCreation5mInputTokens: number | null;
@@ -196,7 +200,10 @@ export async function findUsageLogsBatch(
       endpoint: messageRequest.endpoint,
       statusCode: messageRequest.statusCode,
       inputTokens: messageRequest.inputTokens,
+      observedInputTokens: messageRequest.observedInputTokens,
       outputTokens: messageRequest.outputTokens,
+      cacheWriteTokensReported: messageRequest.cacheWriteTokensReported,
+      cacheWriteAccounting: messageRequest.cacheWriteAccounting,
       cacheCreationInputTokens: messageRequest.cacheCreationInputTokens,
       cacheReadInputTokens: messageRequest.cacheReadInputTokens,
       cacheCreation5mInputTokens: messageRequest.cacheCreation5mInputTokens,
@@ -377,7 +384,10 @@ export async function findUsageLogsBatch(
       endpoint: usageLedger.endpoint,
       statusCode: usageLedger.statusCode,
       inputTokens: usageLedger.inputTokens,
+      observedInputTokens: usageLedger.observedInputTokens,
       outputTokens: usageLedger.outputTokens,
+      cacheWriteTokensReported: usageLedger.cacheWriteTokensReported,
+      cacheWriteAccounting: usageLedger.cacheWriteAccounting,
       cacheCreationInputTokens: usageLedger.cacheCreationInputTokens,
       cacheReadInputTokens: usageLedger.cacheReadInputTokens,
       cacheCreation5mInputTokens: usageLedger.cacheCreation5mInputTokens,
@@ -386,11 +396,14 @@ export async function findUsageLogsBatch(
       costUsd: usageLedger.costUsd,
       costMultiplier: usageLedger.costMultiplier,
       groupCostMultiplier: usageLedger.groupCostMultiplier,
+      costBreakdown: usageLedger.costBreakdown,
       durationMs: usageLedger.durationMs,
       ttfbMs: usageLedger.ttfbMs,
       clientIp: usageLedger.clientIp,
       context1mApplied: usageLedger.context1mApplied,
       swapCacheTtlApplied: usageLedger.swapCacheTtlApplied,
+      specialSettings: usageLedger.specialSettings,
+      hedgeLosers: usageLedger.hedgeLosers,
     })
     .from(usageLedger)
     .leftJoin(users, eq(usageLedger.userId, users.id))
@@ -430,7 +443,10 @@ export async function findUsageLogsBatch(
       endpoint: row.endpoint,
       statusCode: row.statusCode,
       inputTokens: row.inputTokens,
+      observedInputTokens: row.observedInputTokens,
       outputTokens: row.outputTokens,
+      cacheWriteTokensReported: row.cacheWriteTokensReported,
+      cacheWriteAccounting: row.cacheWriteAccounting,
       cacheCreationInputTokens: row.cacheCreationInputTokens,
       cacheReadInputTokens: row.cacheReadInputTokens,
       cacheCreation5mInputTokens: row.cacheCreation5mInputTokens,
@@ -440,8 +456,8 @@ export async function findUsageLogsBatch(
       costUsd: row.costUsd?.toString() ?? null,
       costMultiplier: row.costMultiplier?.toString() ?? null,
       groupCostMultiplier: row.groupCostMultiplier?.toString() ?? null,
-      costBreakdown: null,
-      hedgeLosers: null,
+      costBreakdown: row.costBreakdown ?? null,
+      hedgeLosers: Array.isArray(row.hedgeLosers) ? row.hedgeLosers : null,
       durationMs: row.durationMs,
       ttfbMs: row.ttfbMs,
       errorMessage: null,
@@ -453,7 +469,7 @@ export async function findUsageLogsBatch(
       messagesCount: null,
       context1mApplied: row.context1mApplied ?? null,
       swapCacheTtlApplied: row.swapCacheTtlApplied ?? null,
-      specialSettings: null,
+      specialSettings: Array.isArray(row.specialSettings) ? row.specialSettings : null,
     };
   });
 
@@ -492,7 +508,10 @@ interface UsageLogSlimRow {
   endpoint: string | null;
   statusCode: number | null;
   inputTokens: number | null;
+  observedInputTokens: number | null;
   outputTokens: number | null;
+  cacheWriteTokensReported: number | null;
+  cacheWriteAccounting: CacheWriteAccounting | null;
   costUsd: string | null;
   durationMs: number | null;
   cacheCreationInputTokens: number | null;
@@ -625,7 +644,10 @@ function mapUsageLogSlimRow(row: {
   endpoint: string | null;
   statusCode: number | null;
   inputTokens: number | null;
+  observedInputTokens: number | null;
   outputTokens: number | null;
+  cacheWriteTokensReported: number | null;
+  cacheWriteAccounting: CacheWriteAccounting | null;
   costUsd: string | null | { toString(): string };
   durationMs: number | null;
   cacheCreationInputTokens: number | null;
@@ -799,7 +821,10 @@ async function selectKeyScopedMessageSlimRows(
       endpoint: messageRequest.endpoint,
       statusCode: messageRequest.statusCode,
       inputTokens: messageRequest.inputTokens,
+      observedInputTokens: messageRequest.observedInputTokens,
       outputTokens: messageRequest.outputTokens,
+      cacheWriteTokensReported: messageRequest.cacheWriteTokensReported,
+      cacheWriteAccounting: messageRequest.cacheWriteAccounting,
       costUsd: messageRequest.costUsd,
       durationMs: messageRequest.durationMs,
       cacheCreationInputTokens: messageRequest.cacheCreationInputTokens,
@@ -843,7 +868,10 @@ async function selectKeyScopedLedgerSlimRows(
       endpoint: usageLedger.endpoint,
       statusCode: usageLedger.statusCode,
       inputTokens: usageLedger.inputTokens,
+      observedInputTokens: usageLedger.observedInputTokens,
       outputTokens: usageLedger.outputTokens,
+      cacheWriteTokensReported: usageLedger.cacheWriteTokensReported,
+      cacheWriteAccounting: usageLedger.cacheWriteAccounting,
       costUsd: usageLedger.costUsd,
       durationMs: usageLedger.durationMs,
       cacheCreationInputTokens: usageLedger.cacheCreationInputTokens,
@@ -851,6 +879,7 @@ async function selectKeyScopedLedgerSlimRows(
       cacheCreation5mInputTokens: usageLedger.cacheCreation5mInputTokens,
       cacheCreation1hInputTokens: usageLedger.cacheCreation1hInputTokens,
       cacheTtlApplied: usageLedger.cacheTtlApplied,
+      specialSettings: usageLedger.specialSettings,
     })
     .from(usageLedger)
     .where(and(...ledgerConditions))
@@ -868,7 +897,10 @@ async function selectKeyScopedLedgerSlimRows(
     endpoint: row.endpoint,
     statusCode: row.statusCode,
     inputTokens: row.inputTokens,
+    observedInputTokens: row.observedInputTokens,
     outputTokens: row.outputTokens,
+    cacheWriteTokensReported: row.cacheWriteTokensReported,
+    cacheWriteAccounting: row.cacheWriteAccounting,
     costUsd: row.costUsd?.toString() ?? null,
     durationMs: row.durationMs,
     cacheCreationInputTokens: row.cacheCreationInputTokens,
@@ -876,7 +908,9 @@ async function selectKeyScopedLedgerSlimRows(
     cacheCreation5mInputTokens: row.cacheCreation5mInputTokens,
     cacheCreation1hInputTokens: row.cacheCreation1hInputTokens,
     cacheTtlApplied: row.cacheTtlApplied,
-    anthropicEffort: null,
+    anthropicEffort: extractAnthropicEffortFromSpecialSettings(
+      Array.isArray(row.specialSettings) ? row.specialSettings : null
+    ),
   }));
 }
 
@@ -974,7 +1008,10 @@ function mapUsageLogRowFromMessageResult(row: {
   endpoint: string | null;
   statusCode: number | null;
   inputTokens: number | null;
+  observedInputTokens: number | null;
   outputTokens: number | null;
+  cacheWriteTokensReported: number | null;
+  cacheWriteAccounting: CacheWriteAccounting | null;
   cacheCreationInputTokens: number | null;
   cacheReadInputTokens: number | null;
   cacheCreation5mInputTokens: number | null;
@@ -1044,7 +1081,10 @@ function mapUsageLogRowFromLedgerResult(row: {
   endpoint: string | null;
   statusCode: number | null;
   inputTokens: number | null;
+  observedInputTokens: number | null;
   outputTokens: number | null;
+  cacheWriteTokensReported: number | null;
+  cacheWriteAccounting: CacheWriteAccounting | null;
   cacheCreationInputTokens: number | null;
   cacheReadInputTokens: number | null;
   cacheCreation5mInputTokens: number | null;
@@ -1053,11 +1093,14 @@ function mapUsageLogRowFromLedgerResult(row: {
   costUsd: string | null | { toString(): string };
   costMultiplier: string | null | { toString(): string };
   groupCostMultiplier: string | null | { toString(): string };
+  costBreakdown: StoredCostBreakdown | null;
   durationMs: number | null;
   ttfbMs: number | null;
   clientIp: string | null;
   context1mApplied: boolean | null;
   swapCacheTtlApplied: boolean | null;
+  specialSettings: SpecialSetting[] | null;
+  hedgeLosers: HedgeLoserBilling[] | null;
 }) {
   const totalRowTokens =
     (row.inputTokens ?? 0) +
@@ -1079,7 +1122,10 @@ function mapUsageLogRowFromLedgerResult(row: {
     endpoint: row.endpoint,
     statusCode: row.statusCode,
     inputTokens: row.inputTokens,
+    observedInputTokens: row.observedInputTokens,
     outputTokens: row.outputTokens,
+    cacheWriteTokensReported: row.cacheWriteTokensReported,
+    cacheWriteAccounting: row.cacheWriteAccounting,
     cacheCreationInputTokens: row.cacheCreationInputTokens,
     cacheReadInputTokens: row.cacheReadInputTokens,
     cacheCreation5mInputTokens: row.cacheCreation5mInputTokens,
@@ -1089,7 +1135,7 @@ function mapUsageLogRowFromLedgerResult(row: {
     costUsd: row.costUsd?.toString() ?? null,
     costMultiplier: row.costMultiplier?.toString() ?? null,
     groupCostMultiplier: row.groupCostMultiplier?.toString() ?? null,
-    costBreakdown: null,
+    costBreakdown: row.costBreakdown ?? null,
     durationMs: row.durationMs,
     ttfbMs: row.ttfbMs,
     errorMessage: null,
@@ -1101,10 +1147,11 @@ function mapUsageLogRowFromLedgerResult(row: {
     messagesCount: null,
     context1mApplied: row.context1mApplied ?? null,
     swapCacheTtlApplied: row.swapCacheTtlApplied ?? null,
-    specialSettings: null,
-    anthropicEffort: null,
-    // usage_ledger 没有 hedge_losers 列（竞速明细仅存于 message_request）
-    hedgeLosers: null,
+    specialSettings: Array.isArray(row.specialSettings) ? row.specialSettings : null,
+    anthropicEffort: extractAnthropicEffortFromSpecialSettings(
+      Array.isArray(row.specialSettings) ? row.specialSettings : null
+    ),
+    hedgeLosers: Array.isArray(row.hedgeLosers) ? row.hedgeLosers : null,
   } satisfies UsageLogRow;
 }
 
@@ -1135,7 +1182,10 @@ export async function findReadonlyUsageLogsBatchForKey(
         endpoint: messageRequest.endpoint,
         statusCode: messageRequest.statusCode,
         inputTokens: messageRequest.inputTokens,
+        observedInputTokens: messageRequest.observedInputTokens,
         outputTokens: messageRequest.outputTokens,
+        cacheWriteTokensReported: messageRequest.cacheWriteTokensReported,
+        cacheWriteAccounting: messageRequest.cacheWriteAccounting,
         cacheCreationInputTokens: messageRequest.cacheCreationInputTokens,
         cacheReadInputTokens: messageRequest.cacheReadInputTokens,
         cacheCreation5mInputTokens: messageRequest.cacheCreation5mInputTokens,
@@ -1184,7 +1234,10 @@ export async function findReadonlyUsageLogsBatchForKey(
             endpoint: usageLedger.endpoint,
             statusCode: usageLedger.statusCode,
             inputTokens: usageLedger.inputTokens,
+            observedInputTokens: usageLedger.observedInputTokens,
             outputTokens: usageLedger.outputTokens,
+            cacheWriteTokensReported: usageLedger.cacheWriteTokensReported,
+            cacheWriteAccounting: usageLedger.cacheWriteAccounting,
             cacheCreationInputTokens: usageLedger.cacheCreationInputTokens,
             cacheReadInputTokens: usageLedger.cacheReadInputTokens,
             cacheCreation5mInputTokens: usageLedger.cacheCreation5mInputTokens,
@@ -1193,11 +1246,14 @@ export async function findReadonlyUsageLogsBatchForKey(
             costUsd: usageLedger.costUsd,
             costMultiplier: usageLedger.costMultiplier,
             groupCostMultiplier: usageLedger.groupCostMultiplier,
+            costBreakdown: usageLedger.costBreakdown,
             durationMs: usageLedger.durationMs,
             ttfbMs: usageLedger.ttfbMs,
             clientIp: usageLedger.clientIp,
             context1mApplied: usageLedger.context1mApplied,
             swapCacheTtlApplied: usageLedger.swapCacheTtlApplied,
+            specialSettings: usageLedger.specialSettings,
+            hedgeLosers: usageLedger.hedgeLosers,
           })
           .from(usageLedger)
           .leftJoin(users, eq(usageLedger.userId, users.id))
@@ -1386,7 +1442,10 @@ export async function findUsageLogsWithDetails(filters: UsageLogFilters): Promis
       endpoint: messageRequest.endpoint,
       statusCode: messageRequest.statusCode,
       inputTokens: messageRequest.inputTokens,
+      observedInputTokens: messageRequest.observedInputTokens,
       outputTokens: messageRequest.outputTokens,
+      cacheWriteTokensReported: messageRequest.cacheWriteTokensReported,
+      cacheWriteAccounting: messageRequest.cacheWriteAccounting,
       cacheCreationInputTokens: messageRequest.cacheCreationInputTokens,
       cacheReadInputTokens: messageRequest.cacheReadInputTokens,
       cacheCreation5mInputTokens: messageRequest.cacheCreation5mInputTokens,

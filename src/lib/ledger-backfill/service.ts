@@ -46,18 +46,7 @@ export async function backfillUsageLedger(): Promise<BackfillUsageLedgerSummary>
             mr.user_id,
             mr.key,
             mr.provider_id,
-            COALESCE(
-              CASE
-                WHEN mr.provider_chain IS NOT NULL
-                  AND jsonb_typeof(mr.provider_chain) = 'array'
-                  AND jsonb_array_length(mr.provider_chain) > 0
-                  AND jsonb_typeof(mr.provider_chain -> -1) = 'object'
-                  AND (mr.provider_chain -> -1 ? 'id')
-                  AND (mr.provider_chain -> -1 ->> 'id') ~ '^[0-9]+$'
-                THEN (mr.provider_chain -> -1 ->> 'id')::integer
-              END,
-              mr.provider_id
-            ) AS final_provider_id,
+            resolved.final_provider_id,
             mr.model,
             mr.original_model,
             mr.actual_response_model,
@@ -71,12 +60,18 @@ export async function backfillUsageLedger(): Promise<BackfillUsageLedgerSummary>
               mr.error_message,
               mr.provider_chain
             ) AS success_rate_outcome,
-            (mr.error_message IS NULL OR mr.error_message = '') AS is_success,
+            (mr.error_message IS NULL OR mr.error_message = '')
+              AND (mr.status_code IS NULL OR mr.status_code < 400) AS is_success,
             mr.blocked_by,
             mr.cost_usd,
             mr.cost_multiplier,
+            mr.group_cost_multiplier,
+            mr.cost_breakdown,
             mr.input_tokens,
+            mr.observed_input_tokens,
             mr.output_tokens,
+            mr.cache_write_tokens_reported,
+            mr.cache_write_accounting,
             mr.cache_creation_input_tokens,
             mr.cache_read_input_tokens,
             mr.cache_creation_5m_input_tokens,
@@ -84,11 +79,20 @@ export async function backfillUsageLedger(): Promise<BackfillUsageLedgerSummary>
             mr.cache_ttl_applied,
             mr.context_1m_applied,
             mr.swap_cache_ttl_applied,
+            mr.special_settings,
+            mr.hedge_losers,
             mr.duration_ms,
             mr.ttfb_ms,
+            mr.client_ip,
             mr.created_at,
             ul.request_id AS existing_request_id
           FROM message_request mr
+          CROSS JOIN LATERAL (
+            SELECT fn_resolve_message_request_final_provider_id(
+              mr.provider_id,
+              mr.provider_chain
+            ) AS final_provider_id
+          ) AS resolved
           LEFT JOIN usage_ledger ul ON ul.request_id = mr.id
           WHERE mr.id > ${lastId}
             AND mr.blocked_by IS DISTINCT FROM 'warmup'
@@ -102,6 +106,11 @@ export async function backfillUsageLedger(): Promise<BackfillUsageLedgerSummary>
             AND (
               ul.request_id IS NULL
               OR ul.success_rate_outcome IS NULL
+              OR ul.final_provider_id IS DISTINCT FROM resolved.final_provider_id
+              OR ul.is_success IS DISTINCT FROM (
+                (mr.error_message IS NULL OR mr.error_message = '')
+                AND (mr.status_code IS NULL OR mr.status_code < 400)
+              )
             )
           ORDER BY mr.id ASC
           LIMIT 10000
@@ -111,12 +120,14 @@ export async function backfillUsageLedger(): Promise<BackfillUsageLedgerSummary>
             request_id, user_id, key, provider_id, final_provider_id,
             model, original_model, actual_response_model, endpoint, api_type, session_id,
             status_code, is_success, success_rate_outcome, blocked_by,
-            cost_usd, cost_multiplier,
-            input_tokens, output_tokens,
+            cost_usd, cost_multiplier, group_cost_multiplier, cost_breakdown,
+            input_tokens, observed_input_tokens, output_tokens,
+            cache_write_tokens_reported, cache_write_accounting,
             cache_creation_input_tokens, cache_read_input_tokens,
             cache_creation_5m_input_tokens, cache_creation_1h_input_tokens,
             cache_ttl_applied, context_1m_applied, swap_cache_ttl_applied,
-            duration_ms, ttfb_ms, created_at
+            special_settings, hedge_losers,
+            duration_ms, ttfb_ms, client_ip, created_at
           )
           SELECT
             batch.id,
@@ -136,8 +147,13 @@ export async function backfillUsageLedger(): Promise<BackfillUsageLedgerSummary>
             batch.blocked_by,
             batch.cost_usd,
             batch.cost_multiplier,
+            batch.group_cost_multiplier,
+            batch.cost_breakdown,
             batch.input_tokens,
+            batch.observed_input_tokens,
             batch.output_tokens,
+            batch.cache_write_tokens_reported,
+            batch.cache_write_accounting,
             batch.cache_creation_input_tokens,
             batch.cache_read_input_tokens,
             batch.cache_creation_5m_input_tokens,
@@ -145,11 +161,16 @@ export async function backfillUsageLedger(): Promise<BackfillUsageLedgerSummary>
             batch.cache_ttl_applied,
             batch.context_1m_applied,
             batch.swap_cache_ttl_applied,
+            batch.special_settings,
+            batch.hedge_losers,
             batch.duration_ms,
             batch.ttfb_ms,
+            batch.client_ip,
             batch.created_at
           FROM batch
           ON CONFLICT (request_id) DO UPDATE SET
+            final_provider_id = EXCLUDED.final_provider_id,
+            is_success = EXCLUDED.is_success,
             success_rate_outcome = EXCLUDED.success_rate_outcome
           RETURNING request_id
         )

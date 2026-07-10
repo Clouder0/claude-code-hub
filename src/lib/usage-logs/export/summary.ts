@@ -9,6 +9,7 @@
  */
 
 import { formatInTimeZone } from "date-fns-tz";
+import { resolveBillingSettlement } from "@/lib/usage-logs/billing-audit";
 import type { UsageLogRow } from "@/repository/usage-logs";
 import { isValidDate } from "./format";
 import { toFiniteNumber } from "./numeric";
@@ -18,13 +19,14 @@ export type SummaryGranularity = "daily" | "hourly";
 export interface SummaryRow {
   period: string;
   requests: number;
+  unsettledRequests: number;
   inputTokens: number;
   outputTokens: number;
   cacheWrite5m: number;
   cacheWrite1h: number;
   cacheRead: number;
   totalTokens: number;
-  cost: number;
+  cost: number | null;
 }
 
 export interface UsageLogsSummary {
@@ -36,6 +38,7 @@ export interface UsageLogsSummary {
 export const SUMMARY_HEADERS = [
   "Period",
   "Requests",
+  "Unsettled Requests",
   "Input Tokens",
   "Output Tokens",
   "Cache Write 5m",
@@ -51,6 +54,7 @@ function emptyRow(period: string): SummaryRow {
   return {
     period,
     requests: 0,
+    unsettledRequests: 0,
     inputTokens: 0,
     outputTokens: 0,
     cacheWrite5m: 0,
@@ -62,25 +66,34 @@ function emptyRow(period: string): SummaryRow {
 }
 
 function accumulate(row: SummaryRow, log: UsageLogRow): void {
+  const isUnsettled =
+    resolveBillingSettlement(log.specialSettings) != null ||
+    log.hedgeLosers?.some((loser) => loser.billingStatus === "unsupported") === true;
   row.requests += 1;
+  row.unsettledRequests += isUnsettled ? 1 : 0;
   row.inputTokens += log.inputTokens ?? 0;
   row.outputTokens += log.outputTokens ?? 0;
   row.cacheWrite5m += log.cacheCreation5mInputTokens ?? 0;
   row.cacheWrite1h += log.cacheCreation1hInputTokens ?? 0;
   row.cacheRead += log.cacheReadInputTokens ?? 0;
   row.totalTokens += log.totalTokens ?? 0;
-  row.cost += toFiniteNumber(log.costUsd) ?? 0;
+  if (isUnsettled) {
+    row.cost = null;
+  } else if (row.cost != null) {
+    row.cost += toFiniteNumber(log.costUsd) ?? 0;
+  }
 }
 
 function merge(target: SummaryRow, source: SummaryRow): void {
   target.requests += source.requests;
+  target.unsettledRequests += source.unsettledRequests;
   target.inputTokens += source.inputTokens;
   target.outputTokens += source.outputTokens;
   target.cacheWrite5m += source.cacheWrite5m;
   target.cacheWrite1h += source.cacheWrite1h;
   target.cacheRead += source.cacheRead;
   target.totalTokens += source.totalTokens;
-  target.cost += source.cost;
+  target.cost = target.cost == null || source.cost == null ? null : target.cost + source.cost;
 }
 
 function byPeriod(a: SummaryRow, b: SummaryRow): number {

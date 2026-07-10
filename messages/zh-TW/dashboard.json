@@ -298,7 +298,43 @@
       "billingDetails": {
         "title": "計費詳情",
         "input": "輸入",
+        "observedInput": "觀測輸入總量",
+        "ordinaryInput": "一般輸入",
         "output": "輸出",
+        "cacheWriteReported": "上游回報的快取寫入",
+        "cacheWriteEffective": "有效快取寫入",
+        "cacheWriteNotReported": "未回報",
+        "cacheWriteAccounting": "快取寫入計量方式",
+        "cacheWriteAccountingSource": {
+          "reported_positive": "由上游回報",
+          "inferred_input_minus_cache_read_v1": "依觀測輸入減快取命中估算",
+          "none": "未分配快取寫入"
+        },
+        "effectiveServiceTier": "生效服務層級",
+        "serviceTier": {
+          "standard": "標準",
+          "priority": "優先"
+        },
+        "longContextPricing": "長上下文計費",
+        "longContextApplied": "超過 {threshold} tokens 時生效",
+        "longContextAppliedUnknown": "已生效",
+        "pricingTier": "計費檔位",
+        "pricingTierValue": {
+          "standard": "標準",
+          "standard_long_context": "標準長上下文",
+          "priority": "優先"
+        },
+        "pricingRateSource": "單價來源",
+        "priceBook": "價格簿",
+        "settlementStatus": "結算狀態",
+        "settlementUnsupported": "不支援",
+        "settlementReason": {
+          "gpt56_standard_rates_incomplete": "標準服務單價欄位不完整；本請求未結算費用。",
+          "gpt56_long_context_rates_incomplete": "標準長上下文單價欄位不完整；本請求未結算費用。",
+          "gpt56_priority_rates_incomplete": "優先服務單價欄位不完整；本請求未結算費用。",
+          "gpt56_priority_long_context_unsupported": "優先服務不支援長上下文計費；本請求未結算費用。"
+        },
+        "settlementMissingFields": "缺少價格欄位：{fields}",
         "cacheWrite5m": "快取寫入（5m）",
         "cacheWrite1h": "快取寫入（1h）",
         "cacheRead": "快取讀取",

@@ -1,3 +1,4 @@
+import type { CacheWriteAccounting } from "@/lib/billing/openai-usage-accounting";
 import type { HedgeLoserBilling, StoredCostBreakdown } from "@/types/cost-breakdown";
 import type { ProviderChainItem } from "@/types/message";
 import type { SpecialSetting } from "@/types/special-settings";
@@ -41,10 +42,16 @@ export interface TabSharedProps {
   specialSettings?: SpecialSetting[] | null;
   /** Input tokens */
   inputTokens?: number | null;
+  /** Total input tokens observed in the upstream usage payload before bucket allocation */
+  observedInputTokens?: number | null;
   /** Output tokens */
   outputTokens?: number | null;
   /** Cache creation input tokens (total) */
   cacheCreationInputTokens?: number | null;
+  /** Raw cache-write token count reported by upstream; null means absent */
+  cacheWriteTokensReported?: number | null;
+  /** How the effective cache-write bucket was accounted */
+  cacheWriteAccounting?: CacheWriteAccounting | null;
   /** Cache creation 5m input tokens */
   cacheCreation5mInputTokens?: number | null;
   /** Cache creation 1h input tokens */

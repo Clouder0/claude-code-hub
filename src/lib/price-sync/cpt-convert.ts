@@ -20,6 +20,7 @@ import type {
   CptTrack,
   CptTrackTrigger,
 } from "./cpt-schema";
+import { applyOpenAiOfficialPricingSupplement } from "./openai-official-supplement";
 
 const MILLION = 1_000_000;
 
@@ -113,6 +114,9 @@ const PRIORITY_FIELD_BY_CHARGE: Record<
     base: "cache_read_input_token_cost_priority",
     above200k: "cache_read_input_token_cost_above_200k_tokens_priority",
     above272k: "cache_read_input_token_cost_above_272k_tokens_priority",
+  },
+  cache_write: {
+    base: "cache_creation_input_token_cost_priority",
   },
 };
 
@@ -385,8 +389,13 @@ export function convertCptModelEntry(
 
   for (const variant of variants) {
     if (!variant || typeof variant.provider !== "string" || !variant.provider) continue;
-    const converted = convertCptVariant(variant);
-    if (!converted) continue;
+    const rawConverted = convertCptVariant(variant);
+    if (!rawConverted) continue;
+    const converted = applyOpenAiOfficialPricingSupplement({
+      modelName: entry.model_name,
+      variant,
+      converted: rawConverted,
+    });
 
     const key = variantPricingKey(variant);
     const node: Record<string, unknown> = { ...converted };

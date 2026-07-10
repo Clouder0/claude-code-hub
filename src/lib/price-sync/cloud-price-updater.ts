@@ -7,7 +7,7 @@ import { type ConvertedCptTable, convertCptTable } from "./cpt-convert";
  * 转换器修订号:转换逻辑变更(如 alias 展开为独立模型行)时递增,
  * 使版本指纹失配、绕过短路,强制重写整表。
  */
-const CPT_CONVERTER_REV = 1;
+const CPT_CONVERTER_REV = 2;
 
 function versionFingerprint(version: string): string {
   return `${version}+cvt${CPT_CONVERTER_REV}`;

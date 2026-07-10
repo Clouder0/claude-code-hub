@@ -764,6 +764,20 @@
       "when": 1783320834802,
       "tag": "0108_rich_onslaught",
       "breakpoints": true
+    },
+    {
+      "idx": 109,
+      "version": "7",
+      "when": 1783665189037,
+      "tag": "0109_left_shooting_star",
+      "breakpoints": true
+    },
+    {
+      "idx": 110,
+      "version": "7",
+      "when": 1783666297344,
+      "tag": "0110_brief_synch",
+      "breakpoints": true
     }
   ]
 }

@@ -1,4 +1,5 @@
 import type { HedgeLoserBilling } from "@/types/cost-breakdown";
+import type { Gpt56UnsupportedPricingReason } from "./billing-rate-resolution";
 import { Decimal, sumCosts, toDecimal } from "./currency";
 
 /**
@@ -58,6 +59,11 @@ export interface HedgeAttemptRow {
   attemptNumber: number | null;
   /** Billed cost (decimal string) for this attempt. */
   costUsd: string;
+  billingStatus: "settled" | "unsupported";
+  billingReason?: Gpt56UnsupportedPricingReason;
+  missingPricingFields?: string[];
+  pricingTier?: "standard" | "standard_long_context" | "priority";
+  pricingContext?: HedgeLoserBilling["pricingContext"];
   inputTokens: number;
   outputTokens: number;
   cacheCreationInputTokens: number;
@@ -130,6 +136,7 @@ export function buildHedgeBillingTable(
     providerName: winner?.providerName ?? null,
     attemptNumber: winner?.attemptNumber ?? null,
     costUsd: summary.winnerCost,
+    billingStatus: "settled",
     inputTokens: toCount(winner?.inputTokens),
     outputTokens: toCount(winner?.outputTokens),
     cacheCreationInputTokens: toCount(winner?.cacheCreationInputTokens),
@@ -144,6 +151,15 @@ export function buildHedgeBillingTable(
       providerName: loser.providerName,
       attemptNumber: loser.attemptNumber,
       costUsd: loser.costUsd,
+      billingStatus: loser.billingStatus ?? "settled",
+      ...(loser.billingReason ? { billingReason: loser.billingReason } : {}),
+      ...(loser.missingPricingFields
+        ? { missingPricingFields: [...loser.missingPricingFields] }
+        : {}),
+      ...(loser.costBreakdown?.pricing?.tier
+        ? { pricingTier: loser.costBreakdown.pricing.tier }
+        : {}),
+      ...(loser.pricingContext ? { pricingContext: loser.pricingContext } : {}),
       inputTokens: toCount(loser.inputTokens),
       outputTokens: toCount(loser.outputTokens),
       cacheCreationInputTokens: toCount(loser.cacheCreationInputTokens),

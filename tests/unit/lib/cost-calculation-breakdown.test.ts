@@ -3,6 +3,8 @@ import {
   calculateRequestCost,
   calculateRequestCostBreakdown,
   matchLongContextPricing,
+  resolvePricingSnapshotForCostBreakdown,
+  toStoredPricingSnapshot,
   type CostBreakdown,
 } from "@/lib/utils/cost-calculation";
 import type { ModelPriceData } from "@/types/model-price";
@@ -53,6 +55,85 @@ describe("calculateRequestCostBreakdown", () => {
       result.input + result.output + result.cache_creation + result.cache_read,
       10
     );
+  });
+
+  test("keeps aggregate cache writes without TTL detail in the default bucket", () => {
+    const result = calculateRequestCostBreakdown(
+      {
+        cache_creation_input_tokens: 1000,
+      },
+      makePriceData()
+    );
+
+    expect(result.cache_creation_default).toBeCloseTo(0.00375, 8);
+    expect(result.cache_creation_5m).toBe(0);
+    expect(result.cache_creation_1h).toBe(0);
+    expect(result.cache_creation).toBeCloseTo(0.00375, 8);
+  });
+
+  test("resolves an atomic GPT-5.6 pricing snapshot with supplement provenance", () => {
+    const usage = {
+      input_tokens: 1000,
+      cache_creation_input_tokens: 100,
+      cache_read_input_tokens: 50,
+      output_tokens: 25,
+    };
+    const priceData = makePriceData({
+      slug: "openai/gpt-5.6-sol",
+      input_cost_per_token_priority: 10 / 1_000_000,
+      cache_read_input_token_cost_priority: 1 / 1_000_000,
+      cache_creation_input_token_cost_priority: 12.5 / 1_000_000,
+      output_cost_per_token_priority: 60 / 1_000_000,
+      openai_official_pricing_supplement: {
+        id: "openai-gpt-5.6-2026-07-10",
+        source: "https://developers.openai.com/api/docs/pricing",
+        applied_fields: [
+          "input_cost_per_token_priority",
+          "cache_read_input_token_cost_priority",
+          "cache_creation_input_token_cost_priority",
+          "output_cost_per_token_priority",
+        ],
+        conflicting_fields: [],
+      },
+    });
+    const pricing = resolvePricingSnapshotForCostBreakdown(usage, priceData, {
+      priorityServiceTierApplied: true,
+    });
+
+    expect(pricing).toEqual({
+      tier: "priority",
+      unitRates: {
+        input: 10 / 1_000_000,
+        cacheRead: 1 / 1_000_000,
+        cacheWrite: 12.5 / 1_000_000,
+        output: 60 / 1_000_000,
+      },
+      rateSource: "openai_official_supplement",
+      rateSourceId: "openai-gpt-5.6-2026-07-10",
+      rateSourceUrl: "https://developers.openai.com/api/docs/pricing",
+    });
+
+    expect(
+      toStoredPricingSnapshot(pricing, {
+        source: "cloud_official",
+        model: "gpt-5.6-sol",
+        provider: "openai",
+      })
+    ).toEqual({
+      tier: "priority",
+      unit_rates: {
+        input: "0.00001",
+        cache_read: "0.000001",
+        cache_write: "0.0000125",
+        output: "0.00006",
+      },
+      rate_source: "openai_official_supplement",
+      rate_source_id: "openai-gpt-5.6-2026-07-10",
+      rate_source_url: "https://developers.openai.com/api/docs/pricing",
+      price_book_source: "cloud_official",
+      price_book_model: "gpt-5.6-sol",
+      price_book_provider: "openai",
+    });
   });
 
   test("image tokens go to input/output buckets", () => {
@@ -186,11 +267,39 @@ describe("calculateRequestCostBreakdown", () => {
       input: 0,
       output: 0,
       cache_creation: 0,
+      cache_creation_default: 0,
       cache_creation_5m: 0,
       cache_creation_1h: 0,
       cache_read: 0,
       total: 0,
     });
+  });
+
+  test("keeps CostBreakdown numeric and leaves pricing provenance out of the calculation shape", () => {
+    const result: CostBreakdown = calculateRequestCostBreakdown(
+      {
+        input_tokens: 100,
+        output_tokens: 20,
+        cache_creation_input_tokens: 10,
+        cache_read_input_tokens: 5,
+      },
+      makePriceData()
+    );
+
+    expect(Object.keys(result).sort()).toEqual(
+      [
+        "cache_creation",
+        "cache_creation_1h",
+        "cache_creation_5m",
+        "cache_creation_default",
+        "cache_read",
+        "input",
+        "output",
+        "total",
+      ].sort()
+    );
+    expect(Object.values(result).every((value) => typeof value === "number")).toBe(true);
+    expect(result).not.toHaveProperty("pricing");
   });
 
   test("per-request cost goes to input bucket", () => {

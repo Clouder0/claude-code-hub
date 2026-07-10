@@ -18,7 +18,10 @@ function makeLog(overrides: Partial<UsageLogRow> = {}): UsageLogRow {
     endpoint: "/v1/messages",
     statusCode: 200,
     inputTokens: 10,
+    observedInputTokens: null,
     outputTokens: 20,
+    cacheWriteTokensReported: null,
+    cacheWriteAccounting: null,
     cacheCreationInputTokens: 0,
     cacheReadInputTokens: 5,
     cacheCreation5mInputTokens: 1,
@@ -77,7 +80,7 @@ describe("buildCsvRows", () => {
     expect(row.split(",")[COST_IDX]).toBe("1.23456789012346");
   });
 
-  test("blank status code / duration stay blank; null cost becomes 0", () => {
+  test("blank status code, duration, and unresolved cost stay blank", () => {
     const [row] = buildCsvRows(
       [makeLog({ statusCode: null, durationMs: null, costUsd: null })],
       "UTC"
@@ -85,7 +88,7 @@ describe("buildCsvRows", () => {
     const cells = row.split(",");
     expect(cells[STATUS_IDX]).toBe("");
     expect(cells[DURATION_IDX]).toBe("");
-    expect(cells[COST_IDX]).toBe("0");
+    expect(cells[COST_IDX]).toBe("");
   });
 
   test("null timestamp renders as an empty cell", () => {
@@ -113,6 +116,253 @@ describe("buildCsvRows", () => {
       "UTC"
     );
     expect(row.split(",")[retryIdx]).toBe("1");
+  });
+
+  test("exports observed, reported, effective, and accounting cache-write evidence", () => {
+    const observedInputIdx = HEADER.indexOf("Observed Input Tokens");
+    const reportedWriteIdx = HEADER.indexOf("Cache Write Reported");
+    const effectiveWriteIdx = HEADER.indexOf("Cache Write Effective");
+    const accountingIdx = HEADER.indexOf("Cache Write Accounting");
+    const [row] = buildCsvRows(
+      [
+        makeLog({
+          observedInputTokens: 9016,
+          cacheWriteTokensReported: 0,
+          cacheCreationInputTokens: 1080,
+          cacheWriteAccounting: "inferred_input_minus_cache_read_v1",
+        }),
+      ],
+      "UTC"
+    );
+    const cells = row.split(",");
+
+    expect(observedInputIdx).toBeGreaterThanOrEqual(0);
+    expect(reportedWriteIdx).toBeGreaterThanOrEqual(0);
+    expect(effectiveWriteIdx).toBeGreaterThanOrEqual(0);
+    expect(accountingIdx).toBeGreaterThanOrEqual(0);
+    expect(cells[observedInputIdx]).toBe("9016");
+    expect(cells[reportedWriteIdx]).toBe("0");
+    expect(cells[effectiveWriteIdx]).toBe("1080");
+    expect(cells[accountingIdx]).toBe("inferred_input_minus_cache_read_v1");
+  });
+
+  test("keeps historical null audit evidence blank instead of rewriting it as zero", () => {
+    const observedInputIdx = HEADER.indexOf("Observed Input Tokens");
+    const reportedWriteIdx = HEADER.indexOf("Cache Write Reported");
+    const effectiveWriteIdx = HEADER.indexOf("Cache Write Effective");
+    const accountingIdx = HEADER.indexOf("Cache Write Accounting");
+    const [row] = buildCsvRows(
+      [
+        makeLog({
+          observedInputTokens: null,
+          cacheWriteTokensReported: null,
+          cacheCreationInputTokens: null,
+          cacheWriteAccounting: null,
+        }),
+      ],
+      "UTC"
+    );
+    const cells = row.split(",");
+
+    expect(cells[observedInputIdx]).toBe("");
+    expect(cells[reportedWriteIdx]).toBe("");
+    expect(cells[effectiveWriteIdx]).toBe("");
+    expect(cells[accountingIdx]).toBe("");
+  });
+
+  test("exports effective tier, persisted long-context audit, and derivable unit rates", () => {
+    const [row] = buildCsvRows(
+      [
+        makeLog({
+          inputTokens: 100,
+          outputTokens: 20,
+          cacheCreationInputTokens: 1080,
+          cacheReadInputTokens: 7936,
+          costBreakdown: {
+            input: "0.0005",
+            output: "0.0003",
+            cache_creation: "0.00675",
+            cache_creation_default: "0.00675",
+            cache_read: "0.001984",
+            pricing: {
+              tier: "standard_long_context",
+              unit_rates: {
+                input: "0.00001",
+                cache_read: "0.000001",
+                cache_write: "0.0000125",
+                output: "0.000045",
+              },
+              rate_source: "model_price_data",
+              price_book_source: "cloud_official",
+              price_book_model: "gpt-5.6-sol",
+              price_book_provider: "openai",
+            },
+            base_total: "0.009534",
+            provider_multiplier: 1,
+            group_multiplier: 1,
+            total: "0.009534",
+          },
+          specialSettings: [
+            {
+              type: "codex_service_tier_result",
+              scope: "response",
+              hit: true,
+              requestedServiceTier: "priority",
+              actualServiceTier: "default",
+              billingSourcePreference: "actual",
+              resolvedFrom: "actual",
+              effectivePriority: false,
+            },
+            {
+              type: "long_context_pricing",
+              scope: "billing",
+              hit: true,
+              pricingScope: "request",
+              thresholdTokens: 272000,
+            },
+          ],
+        }),
+      ],
+      "UTC"
+    );
+    const cells = row.split(",");
+    const value = (header: string) => cells[HEADER.indexOf(header)];
+
+    expect(value("Effective Service Tier")).toBe("standard");
+    expect(value("Long Context Pricing")).toBe("request");
+    expect(value("Long Context Threshold")).toBe("272000");
+    expect(value("Input Unit Rate (USD / 1M)")).toBe("10");
+    expect(value("Cache Write Unit Rate (USD / 1M)")).toBe("12.5");
+    expect(value("Cache Read Unit Rate (USD / 1M)")).toBe("1");
+    expect(value("Output Unit Rate (USD / 1M)")).toBe("45");
+    expect(value("Pricing Tier")).toBe("standard_long_context");
+    expect(value("Pricing Rate Source")).toBe("model_price_data");
+    expect(value("Price Book Source")).toBe("cloud_official");
+    expect(value("Price Book Model")).toBe("gpt-5.6-sol");
+    expect(value("Price Book Provider")).toBe("openai");
+  });
+
+  test("leaves unit-rate columns blank when bucket costs lack a pricing snapshot", () => {
+    const [row] = buildCsvRows(
+      [
+        makeLog({
+          inputTokens: 100,
+          outputTokens: 20,
+          cacheCreationInputTokens: 1080,
+          cacheReadInputTokens: 7936,
+          costBreakdown: {
+            input: "0.0005",
+            output: "0.0003",
+            cache_creation: "0.00675",
+            cache_creation_default: "0.00675",
+            cache_read: "0.001984",
+            base_total: "0.009534",
+            provider_multiplier: 1,
+            group_multiplier: 1,
+            total: "0.009534",
+          },
+        }),
+      ],
+      "UTC"
+    );
+    const cells = row.split(",");
+
+    for (const header of [
+      "Input Unit Rate (USD / 1M)",
+      "Cache Write Unit Rate (USD / 1M)",
+      "Cache Read Unit Rate (USD / 1M)",
+      "Output Unit Rate (USD / 1M)",
+    ]) {
+      expect(cells[HEADER.indexOf(header)]).toBe("");
+    }
+  });
+
+  test("exports unsupported settlement status and reason without inventing a cost", () => {
+    const [row] = buildCsvRows(
+      [
+        makeLog({
+          observedInputTokens: 272001,
+          costUsd: "0.000000000000000",
+          specialSettings: [
+            {
+              type: "billing_settlement",
+              scope: "billing",
+              hit: true,
+              status: "unsupported",
+              reason: "gpt56_priority_rates_incomplete",
+              observedInputTokens: 272001,
+              missingFields: ["output_cost_per_token_priority"],
+              pricingContext: {
+                source: "cloud_official",
+                model: "gpt-5.6-sol",
+                provider: "openai",
+                supplement: {
+                  id: "openai-gpt56-2026-06-30",
+                  source: "https://developers.openai.com/api/docs/pricing",
+                  applied_fields: ["input_cost_per_token_priority"],
+                  conflicting_fields: ["cache_creation_input_token_cost"],
+                },
+              },
+            },
+          ],
+        }),
+      ],
+      "UTC"
+    );
+    const cells = row.split(",");
+    const value = (header: string) => cells[HEADER.indexOf(header)];
+
+    expect(value("Billing Settlement Status")).toBe("unsupported");
+    expect(value("Billing Settlement Reason")).toBe("gpt56_priority_rates_incomplete");
+    expect(value("Billing Settlement Missing Fields")).toBe("output_cost_per_token_priority");
+    expect(value("Billing Settlement Price Book")).toBe(
+      "cloud_official/openai/gpt-5.6-sol | supplement=openai-gpt56-2026-06-30 | supplement_source=https://developers.openai.com/api/docs/pricing | applied=input_cost_per_token_priority | conflicts=cache_creation_input_token_cost"
+    );
+    expect(value("Cost (USD)")).toBe("");
+  });
+
+  test("exports unsupported hedge-loser settlement and price-book provenance", () => {
+    const [row] = buildCsvRows(
+      [
+        makeLog({
+          hedgeLosers: [
+            {
+              providerId: 9,
+              providerName: "loser-nine",
+              attemptNumber: 2,
+              costUsd: "0",
+              billingStatus: "unsupported",
+              billingReason: "gpt56_priority_long_context_unsupported",
+              missingPricingFields: [],
+              pricingContext: {
+                source: "cloud_official",
+                model: "gpt-5.6-sol",
+                provider: "openai",
+                supplement: {
+                  id: "openai-gpt56-2026-06-30",
+                  source: "https://developers.openai.com/api/docs/pricing",
+                  applied_fields: ["input_cost_per_token_priority"],
+                  conflicting_fields: ["cache_creation_input_token_cost"],
+                },
+              },
+            },
+          ],
+        }),
+      ],
+      "UTC"
+    );
+    const cells = row.split(",");
+    const value = (header: string) => cells[HEADER.indexOf(header)];
+
+    expect(value("Hedge Loser Settlement")).toBe("#2 loser-nine: unsupported");
+    expect(value("Hedge Loser Settlement Reason")).toContain(
+      "gpt56_priority_long_context_unsupported"
+    );
+    expect(value("Hedge Loser Price Book")).toContain(
+      "#2 loser-nine: cloud_official/openai/gpt-5.6-sol"
+    );
+    expect(value("Hedge Loser Price Book")).toContain("supplement=openai-gpt56-2026-06-30");
+    expect(value("Hedge Loser Price Book")).toContain("conflicts=cache_creation_input_token_cost");
   });
 });
 

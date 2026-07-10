@@ -88,32 +88,85 @@ describe.skipIf(!process.env.DATABASE_URL)("Ledger data consistency", () => {
     expect(row.is_equal).toBe(true);
   });
 
-  it("provider attribution uses finalProviderId", async () => {
+  it("GPT-5.6 billing provenance matches between request rows and ledger rows", async () => {
+    const result = await db.execute(sql`
+      SELECT
+        COUNT(*)::integer AS checked_count,
+        COUNT(*) FILTER (
+          WHERE mr.observed_input_tokens IS DISTINCT FROM ul.observed_input_tokens
+            OR mr.cache_write_tokens_reported IS DISTINCT FROM ul.cache_write_tokens_reported
+            OR mr.cache_write_accounting IS DISTINCT FROM ul.cache_write_accounting
+            OR mr.cost_breakdown IS DISTINCT FROM ul.cost_breakdown
+            OR mr.special_settings IS DISTINCT FROM ul.special_settings
+            OR mr.hedge_losers IS DISTINCT FROM ul.hedge_losers
+        )::integer AS mismatch_count,
+        COUNT(*) FILTER (
+          WHERE mr.observed_input_tokens IS DISTINCT FROM ul.observed_input_tokens
+        )::integer AS observed_input_mismatch_count,
+        COUNT(*) FILTER (
+          WHERE mr.cache_write_tokens_reported IS DISTINCT FROM ul.cache_write_tokens_reported
+        )::integer AS reported_write_mismatch_count,
+        COUNT(*) FILTER (
+          WHERE mr.cache_write_accounting IS DISTINCT FROM ul.cache_write_accounting
+        )::integer AS write_accounting_mismatch_count,
+        COUNT(*) FILTER (
+          WHERE mr.cost_breakdown IS DISTINCT FROM ul.cost_breakdown
+        )::integer AS cost_breakdown_mismatch_count,
+        COUNT(*) FILTER (
+          WHERE mr.special_settings IS DISTINCT FROM ul.special_settings
+        )::integer AS special_settings_mismatch_count,
+        COUNT(*) FILTER (
+          WHERE mr.hedge_losers IS DISTINCT FROM ul.hedge_losers
+        )::integer AS hedge_losers_mismatch_count
+      FROM message_request mr
+      JOIN usage_ledger ul ON ul.request_id = mr.id
+      WHERE mr.blocked_by IS DISTINCT FROM 'warmup'
+    `);
+
+    const row = requireSingleRow<{
+      checked_count: number;
+      mismatch_count: number;
+      observed_input_mismatch_count: number;
+      reported_write_mismatch_count: number;
+      write_accounting_mismatch_count: number;
+      cost_breakdown_mismatch_count: number;
+      special_settings_mismatch_count: number;
+      hedge_losers_mismatch_count: number;
+    }>(result);
+
+    expect(row).toMatchObject({
+      mismatch_count: 0,
+      observed_input_mismatch_count: 0,
+      reported_write_mismatch_count: 0,
+      write_accounting_mismatch_count: 0,
+      cost_breakdown_mismatch_count: 0,
+      special_settings_mismatch_count: 0,
+      hedge_losers_mismatch_count: 0,
+    });
+  });
+
+  it("provider attribution uses the final successful routing-chain node", async () => {
     const result = await db.execute(sql`
       WITH candidates AS (
         SELECT
           mr.id,
           mr.provider_id,
-          jsonb_array_length(mr.provider_chain) AS chain_length,
-          (mr.provider_chain -> -1 ->> 'id')::integer AS expected_final_provider_id
+          fn_resolve_message_request_final_provider_id(
+            mr.provider_id,
+            mr.provider_chain
+          ) AS expected_final_provider_id
         FROM message_request mr
-        WHERE mr.provider_chain IS NOT NULL
-          AND jsonb_typeof(mr.provider_chain) = 'array'
-          AND jsonb_array_length(mr.provider_chain) > 0
-          AND jsonb_typeof(mr.provider_chain -> -1) = 'object'
-          AND (mr.provider_chain -> -1 ? 'id')
-          AND (mr.provider_chain -> -1 ->> 'id') ~ '^[0-9]+$'
+        WHERE mr.blocked_by IS DISTINCT FROM 'warmup'
       )
       SELECT
         COUNT(*)::integer AS candidate_count,
         COUNT(*) FILTER (
-          WHERE ul.final_provider_id <> c.expected_final_provider_id
+          WHERE ul.final_provider_id IS DISTINCT FROM c.expected_final_provider_id
         )::integer AS wrong_final_provider_count,
         COUNT(*) FILTER (
-          WHERE c.chain_length > 1
-            AND c.expected_final_provider_id <> c.provider_id
-            AND ul.final_provider_id = ul.provider_id
-        )::integer AS not_using_final_provider_count
+          WHERE c.expected_final_provider_id = c.provider_id
+            AND ul.final_provider_id IS DISTINCT FROM c.provider_id
+        )::integer AS wrong_fallback_provider_count
       FROM candidates c
       JOIN usage_ledger ul ON ul.request_id = c.id
     `);
@@ -121,19 +174,22 @@ describe.skipIf(!process.env.DATABASE_URL)("Ledger data consistency", () => {
     const row = requireSingleRow<{
       candidate_count: number;
       wrong_final_provider_count: number;
-      not_using_final_provider_count: number;
+      wrong_fallback_provider_count: number;
     }>(result);
 
     expect(row.wrong_final_provider_count).toBe(0);
-    expect(row.not_using_final_provider_count).toBe(0);
+    expect(row.wrong_fallback_provider_count).toBe(0);
   });
 
-  it("is_success matches error_message IS NULL", async () => {
+  it("is_success matches both error state and HTTP status", async () => {
     const result = await db.execute(sql`
       SELECT
         COUNT(*)::integer AS checked_count,
         COUNT(*) FILTER (
-          WHERE ul.is_success IS DISTINCT FROM (mr.error_message IS NULL OR mr.error_message = '')
+          WHERE ul.is_success IS DISTINCT FROM (
+            (mr.error_message IS NULL OR mr.error_message = '')
+            AND (mr.status_code IS NULL OR mr.status_code < 400)
+          )
         )::integer AS mismatch_count
       FROM message_request mr
       JOIN usage_ledger ul ON ul.request_id = mr.id

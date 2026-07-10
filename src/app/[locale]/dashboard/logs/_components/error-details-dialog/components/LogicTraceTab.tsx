@@ -23,6 +23,7 @@ import { useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { getSessionOriginChain } from "@/lib/api-client/v1/actions/session-origin-chain";
+import { resolveBillingSettlement } from "@/lib/usage-logs/billing-audit";
 import { cn, formatTokenAmount } from "@/lib/utils";
 import { formatCurrency } from "@/lib/utils/currency";
 import { findHedgeLoserCost, summarizeHedgeBilling } from "@/lib/utils/hedge-billing";
@@ -73,6 +74,7 @@ export function LogicTraceTab({
   outputTokens,
   cacheCreationInputTokens,
   cacheReadInputTokens,
+  specialSettings,
   initialExpandedChainIndex,
 }: LogicTraceTabProps) {
   const t = useTranslations("dashboard.logs.details");
@@ -80,12 +82,14 @@ export function LogicTraceTab({
   // Winner cost is the request total minus every billed loser; only present
   // when this request actually billed hedge losers.
   const hedgeSummary = summarizeHedgeBilling(costUsd, hedgeLosers);
+  const requestBillingSettlement = resolveBillingSettlement(specialSettings);
 
   // Render the reclaimed token usage + billed cost for one hedge attempt
   // (winner or loser) inside its decision-chain step.
   const renderHedgeAttemptUsage = (params: {
     accent: "winner" | "loser";
     costUsd: string;
+    billingStatus?: "settled" | "unsupported";
     inputTokens?: number | null;
     outputTokens?: number | null;
     cacheCreationInputTokens?: number | null;
@@ -125,16 +129,19 @@ export function LogicTraceTab({
             </span>
           )}
           <Badge
-            variant="outline"
+            variant={params.billingStatus === "unsupported" ? "destructive" : "outline"}
             className={cn(
               "text-[10px]",
-              isLoser
-                ? "bg-rose-50 dark:bg-rose-950/20 border-rose-200 dark:border-rose-800 text-rose-700 dark:text-rose-300"
-                : "bg-emerald-50 dark:bg-emerald-950/20 border-emerald-200 dark:border-emerald-800 text-emerald-700 dark:text-emerald-300"
+              params.billingStatus !== "unsupported" &&
+                (isLoser
+                  ? "bg-rose-50 dark:bg-rose-950/20 border-rose-200 dark:border-rose-800 text-rose-700 dark:text-rose-300"
+                  : "bg-emerald-50 dark:bg-emerald-950/20 border-emerald-200 dark:border-emerald-800 text-emerald-700 dark:text-emerald-300")
             )}
           >
             {isLoser ? t("billingDetails.hedgeLoser") : t("billingDetails.hedgeWinner")}:{" "}
-            {formatCurrency(params.costUsd, "USD", 6)}
+            {params.billingStatus === "unsupported"
+              ? t("billingDetails.settlementUnsupported")
+              : formatCurrency(params.costUsd, "USD", 6)}
           </Badge>
         </div>
       </div>
@@ -872,6 +879,7 @@ export function LogicTraceTab({
                       renderHedgeAttemptUsage({
                         accent: "winner",
                         costUsd: hedgeSummary.winnerCost,
+                        billingStatus: requestBillingSettlement ? "unsupported" : "settled",
                         inputTokens,
                         outputTokens,
                         cacheCreationInputTokens,
@@ -883,11 +891,40 @@ export function LogicTraceTab({
                       renderHedgeAttemptUsage({
                         accent: "loser",
                         costUsd: hedgeLoserBilling.costUsd,
+                        billingStatus: hedgeLoserBilling.billingStatus,
                         inputTokens: hedgeLoserBilling.inputTokens,
                         outputTokens: hedgeLoserBilling.outputTokens,
                         cacheCreationInputTokens: hedgeLoserBilling.cacheCreationInputTokens,
                         cacheReadInputTokens: hedgeLoserBilling.cacheReadInputTokens,
                       })}
+
+                    {hedgeLoserBilling?.billingStatus === "unsupported" ? (
+                      <div className="flex items-start gap-2 rounded-md border border-amber-300 bg-amber-50 p-2 text-amber-900 dark:border-amber-800 dark:bg-amber-950/30 dark:text-amber-200">
+                        <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                        <div className="space-y-1">
+                          <p className="font-medium">{t("billingDetails.settlementUnsupported")}</p>
+                          {hedgeLoserBilling.billingReason ? (
+                            <p>
+                              {t(
+                                `billingDetails.settlementReason.${hedgeLoserBilling.billingReason}`
+                              )}
+                            </p>
+                          ) : null}
+                          {hedgeLoserBilling.pricingContext ? (
+                            <div className="space-y-0.5 font-mono text-[10px] opacity-80">
+                              <p>
+                                {hedgeLoserBilling.pricingContext.source} /{" "}
+                                {hedgeLoserBilling.pricingContext.provider} /{" "}
+                                {hedgeLoserBilling.pricingContext.model}
+                              </p>
+                              {hedgeLoserBilling.pricingContext.supplement ? (
+                                <p>{hedgeLoserBilling.pricingContext.supplement.id}</p>
+                              ) : null}
+                            </div>
+                          ) : null}
+                        </div>
+                      </div>
+                    ) : null}
 
                     {/* Session Reuse Info */}
                     {isSessionReuse && item.decisionContext && (

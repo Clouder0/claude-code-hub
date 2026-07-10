@@ -19,6 +19,7 @@ import type {
 } from "@/types/statistics";
 import { LEDGER_BILLING_CONDITION } from "./_shared/ledger-conditions";
 import { EXCLUDE_WARMUP_CONDITION } from "./_shared/message-request-conditions";
+import { buildProviderBillingEventsQuery } from "./_shared/provider-billing-events";
 
 /**
  * Key ID -> key string cache
@@ -716,18 +717,15 @@ export async function sumProviderTotalCost(
   const effectiveStart =
     resetAt instanceof Date && !Number.isNaN(resetAt.getTime()) ? resetAt : null;
 
-  const result = await db
-    .select({ total: sql<number>`COALESCE(SUM(${usageLedger.costUsd}), 0)` })
-    .from(usageLedger)
-    .where(
-      and(
-        eq(usageLedger.finalProviderId, providerId),
-        LEDGER_BILLING_CONDITION,
-        ...(effectiveStart ? [gte(usageLedger.createdAt, effectiveStart)] : [])
-      )
-    );
-
-  return Number(result[0]?.total || 0);
+  const result = await db.execute(sql`
+    WITH provider_cost_events AS (
+      ${buildProviderBillingEventsQuery({ providerId, startTime: effectiveStart ?? undefined })}
+    )
+    SELECT COALESCE(SUM(cost_usd), 0) AS total
+    FROM provider_cost_events
+  `);
+  const row = Array.from(result)[0] as { total?: string | number } | undefined;
+  return Number(row?.total || 0);
 }
 
 /**
@@ -950,6 +948,7 @@ export async function sumKeyQuotaCostsById(
 
 export interface CostEntryInTimeRange {
   id: number;
+  billingEventId?: string;
   createdAt: Date;
   costUsd: number;
 }
@@ -997,31 +996,39 @@ export async function findProviderCostEntriesInTimeRange(
   startTime: Date,
   endTime: Date
 ): Promise<CostEntryInTimeRange[]> {
-  const rows = await db
-    .select({
-      id: messageRequest.id,
-      createdAt: messageRequest.createdAt,
-      costUsd: messageRequest.costUsd,
-    })
-    .from(messageRequest)
-    .where(
-      and(
-        eq(messageRequest.providerId, providerId),
-        gte(messageRequest.createdAt, startTime),
-        lt(messageRequest.createdAt, endTime),
-        isNull(messageRequest.deletedAt),
-        EXCLUDE_WARMUP_CONDITION
-      )
-    );
+  const result = await db.execute(sql`
+    WITH provider_cost_events AS (
+      ${buildProviderBillingEventsQuery({ providerId, startTime, endTime })}
+    )
+    SELECT
+      request_id AS id,
+      billing_event_id AS "billingEventId",
+      created_at AS "createdAt",
+      cost_usd AS "costUsd"
+    FROM provider_cost_events
+    WHERE cost_usd > 0
+    ORDER BY created_at ASC, billing_event_id ASC
+  `);
+  const rows = Array.from(result) as Array<{
+    id: number;
+    billingEventId: string;
+    createdAt: Date | string;
+    costUsd: string | number;
+  }>;
 
-  return rows
-    .map((row) => {
-      if (!row.createdAt) return null;
-      const costUsd = Number(row.costUsd || 0);
-      if (!Number.isFinite(costUsd) || costUsd <= 0) return null;
-      return { id: row.id, createdAt: row.createdAt, costUsd };
-    })
-    .filter((row): row is CostEntryInTimeRange => row !== null);
+  const entries: CostEntryInTimeRange[] = [];
+  for (const row of rows) {
+    const createdAt = row.createdAt instanceof Date ? row.createdAt : new Date(row.createdAt);
+    const costUsd = Number(row.costUsd || 0);
+    if (Number.isNaN(createdAt.getTime()) || !Number.isFinite(costUsd) || costUsd <= 0) continue;
+    entries.push({
+      id: row.id,
+      billingEventId: row.billingEventId,
+      createdAt,
+      costUsd,
+    });
+  }
+  return entries;
 }
 
 /**
@@ -1220,17 +1227,13 @@ export async function sumProviderCostInTimeRange(
   startTime: Date,
   endTime: Date
 ): Promise<number> {
-  const result = await db
-    .select({ total: sql<number>`COALESCE(SUM(${usageLedger.costUsd}), 0)` })
-    .from(usageLedger)
-    .where(
-      and(
-        eq(usageLedger.finalProviderId, providerId),
-        gte(usageLedger.createdAt, startTime),
-        lt(usageLedger.createdAt, endTime),
-        LEDGER_BILLING_CONDITION
-      )
-    );
-
-  return Number(result[0]?.total || 0);
+  const result = await db.execute(sql`
+    WITH provider_cost_events AS (
+      ${buildProviderBillingEventsQuery({ providerId, startTime, endTime })}
+    )
+    SELECT COALESCE(SUM(cost_usd), 0) AS total
+    FROM provider_cost_events
+  `);
+  const row = Array.from(result)[0] as { total?: string | number } | undefined;
+  return Number(row?.total || 0);
 }

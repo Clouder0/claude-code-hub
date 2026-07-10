@@ -164,6 +164,38 @@ describe("buildUnifiedSpecialSettings", () => {
 });
 
 describe("hasPriorityServiceTierSpecialSetting", () => {
+  test("uses the actual-first OpenAI-compatible service tier decision", () => {
+    expect(
+      hasPriorityServiceTierSpecialSetting([
+        {
+          type: "openai_service_tier_result",
+          scope: "response",
+          hit: true,
+          providerType: "openai-compatible",
+          requestedServiceTier: "priority",
+          actualServiceTier: "default",
+          resolvedFrom: "actual",
+          effectivePriority: false,
+        },
+      ])
+    ).toBe(false);
+
+    expect(
+      hasPriorityServiceTierSpecialSetting([
+        {
+          type: "openai_service_tier_result",
+          scope: "response",
+          hit: true,
+          providerType: "openai-compatible",
+          requestedServiceTier: "priority",
+          actualServiceTier: null,
+          resolvedFrom: "requested",
+          effectivePriority: true,
+        },
+      ])
+    ).toBe(true);
+  });
+
   test("returns true when codex actual service tier is priority", () => {
     expect(
       hasPriorityServiceTierSpecialSetting([

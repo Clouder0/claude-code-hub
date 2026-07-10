@@ -340,10 +340,66 @@ const messages = {
           rateLimited: "Rate limited",
           circuitOpen: "Circuit open",
         },
+        modelAudit: {
+          unifiedLabel: "Model",
+        },
         billingDetails: {
           title: "Billing details",
           input: "Input",
+          observedInput: "Observed input",
+          ordinaryInput: "Ordinary input",
           output: "Output",
+          cacheWriteReported: "Cache write reported",
+          cacheWriteEffective: "Cache write effective",
+          cacheWriteNotReported: "Not reported",
+          cacheWriteAccounting: "Cache write accounting",
+          cacheWriteAccountingSource: {
+            reported_positive: "Reported by upstream",
+            inferred_input_minus_cache_read_v1: "Estimated from observed input minus cache read",
+            none: "No cache-write allocation",
+          },
+          effectiveServiceTier: "Effective service tier",
+          serviceTier: {
+            standard: "Standard",
+            priority: "Priority",
+          },
+          longContextPricing: "Long-context pricing",
+          longContextApplied: "Applied above {threshold} tokens",
+          longContextAppliedUnknown: "Applied",
+          unitPricePer1M: "@ {price} / 1M",
+          pricingTier: "Pricing tier",
+          pricingTierValue: {
+            standard: "Standard",
+            standard_long_context: "Standard long context",
+            priority: "Priority",
+          },
+          pricingRateSource: "Rate source",
+          priceBook: "Price book",
+          settlementStatus: "Settlement status",
+          settlementUnsupported: "Unsupported",
+          settlementReason: {
+            gpt56_standard_rates_incomplete:
+              "Standard unit rates are incomplete; this request was not cost-settled.",
+            gpt56_long_context_rates_incomplete:
+              "Standard long-context unit rates are incomplete; this request was not cost-settled.",
+            gpt56_priority_rates_incomplete:
+              "Priority unit rates are incomplete; this request was not cost-settled.",
+            gpt56_priority_long_context_unsupported:
+              "Priority processing does not support long-context pricing; this request was not cost-settled.",
+          },
+          settlementMissingFields: "Missing price fields: {fields}",
+          hedgeRacing: "Provider Racing",
+          hedgeMergedCount: "Merged {count} attempts",
+          hedgeWinner: "Winner",
+          hedgeLoser: "Loser",
+          hedgeWinnerShort: "Winner",
+          hedgeLoserShort: "Loser",
+          hedgeColAttempt: "Attempt",
+          hedgeColCacheRead: "Cache R",
+          hedgeColCacheWrite: "Cache W",
+          hedgeColCost: "Cost",
+          hedgeReclaimedNotDelivered: "Reclaimed upstream response, not delivered to the client",
+          baseTotal: "Base total",
           cacheWrite5m: "Cache write 5m",
           cacheWrite1h: "Cache write 1h",
           cacheRead: "Cache read",
@@ -499,6 +555,307 @@ describe("error-details-dialog layout", () => {
 
     expect(html).toContain("Billing Info");
     expect(html).toContain("$0.000001");
+  });
+
+  test("renders cache-write accounting evidence even when settlement has no cost", () => {
+    const html = renderWithIntl(
+      <ErrorDetailsDialog
+        externalOpen
+        statusCode={200}
+        errorMessage={null}
+        providerChain={null}
+        sessionId={null}
+        costUsd={null}
+        inputTokens={0}
+        observedInputTokens={9016}
+        outputTokens={5}
+        cacheCreationInputTokens={1080}
+        cacheReadInputTokens={7936}
+        cacheWriteTokensReported={0}
+        cacheWriteAccounting="inferred_input_minus_cache_read_v1"
+      />
+    );
+
+    expect(html).toContain("Observed input");
+    expect(html).toContain("9.02K");
+    expect(html).toContain("Cache write reported");
+    expect(html).toContain("0 tokens");
+    expect(html).toContain("Cache write effective");
+    expect(html).toContain("1.08K");
+    expect(html).toContain("Estimated from observed input minus cache read");
+  });
+
+  test("renders effective tier, long-context audit, and persisted-cost unit rates", () => {
+    const html = renderWithIntl(
+      <ErrorDetailsDialog
+        externalOpen
+        statusCode={200}
+        errorMessage={null}
+        providerChain={null}
+        sessionId={null}
+        costUsd="0.009534"
+        inputTokens={100}
+        observedInputTokens={9116}
+        outputTokens={20}
+        cacheCreationInputTokens={1080}
+        cacheReadInputTokens={7936}
+        cacheWriteTokensReported={0}
+        cacheWriteAccounting="inferred_input_minus_cache_read_v1"
+        costBreakdown={{
+          input: "0.0005",
+          output: "0.0003",
+          cache_creation: "0.00675",
+          cache_creation_default: "0.00675",
+          cache_read: "0.001984",
+          pricing: {
+            tier: "standard_long_context",
+            unit_rates: {
+              input: "0.00001",
+              cache_read: "0.000001",
+              cache_write: "0.0000125",
+              output: "0.000045",
+            },
+            rate_source: "model_price_data",
+            price_book_source: "cloud_official",
+            price_book_model: "gpt-5.6-sol",
+            price_book_provider: "openai",
+          },
+          base_total: "0.009534",
+          provider_multiplier: 1,
+          group_multiplier: 1,
+          total: "0.009534",
+        }}
+        specialSettings={[
+          {
+            type: "codex_service_tier_result",
+            scope: "response",
+            hit: true,
+            requestedServiceTier: "priority",
+            actualServiceTier: "default",
+            billingSourcePreference: "actual",
+            resolvedFrom: "actual",
+            effectivePriority: false,
+          },
+          {
+            type: "long_context_pricing",
+            scope: "billing",
+            hit: true,
+            pricingScope: "request",
+            thresholdTokens: 272000,
+          },
+        ]}
+      />
+    );
+
+    expect(html).toContain("Effective service tier");
+    expect(html).toContain("Standard");
+    expect(html).toContain("Long-context pricing");
+    expect(html).toContain("Applied above 272K tokens");
+    expect(html).toContain("@ $10.00 / 1M");
+    expect(html).toContain("@ $12.50 / 1M");
+    expect(html).toContain("@ $1.00 / 1M");
+    expect(html).toContain("@ $45.00 / 1M");
+    expect(html).toContain("Pricing tier");
+    expect(html).toContain("Standard long context");
+    expect(html).toContain("Rate source");
+    expect(html).toContain("model_price_data");
+    expect(html).toContain("Price book");
+    expect(html).toContain("openai / gpt-5.6-sol");
+  });
+
+  test("does not infer unit rates from bucket costs when the pricing snapshot is absent", () => {
+    const html = renderWithIntl(
+      <ErrorDetailsDialog
+        externalOpen
+        statusCode={200}
+        errorMessage={null}
+        providerChain={null}
+        sessionId={null}
+        costUsd="0.009534"
+        inputTokens={100}
+        observedInputTokens={9116}
+        outputTokens={20}
+        cacheCreationInputTokens={1080}
+        cacheReadInputTokens={7936}
+        cacheWriteTokensReported={0}
+        cacheWriteAccounting="inferred_input_minus_cache_read_v1"
+        costBreakdown={{
+          input: "0.0005",
+          output: "0.0003",
+          cache_creation: "0.00675",
+          cache_creation_default: "0.00675",
+          cache_read: "0.001984",
+          base_total: "0.009534",
+          provider_multiplier: 1,
+          group_multiplier: 1,
+          total: "0.009534",
+        }}
+      />
+    );
+
+    expect(html).toContain("$0.006750");
+    expect(html).not.toContain("/ 1M");
+  });
+
+  test("renders unsupported settlement status and localized reason without a fake total", () => {
+    const html = renderWithIntl(
+      <ErrorDetailsDialog
+        externalOpen
+        statusCode={200}
+        errorMessage={null}
+        providerChain={null}
+        sessionId={null}
+        costUsd="0.000000000000000"
+        inputTokens={0}
+        observedInputTokens={272001}
+        outputTokens={20}
+        cacheCreationInputTokens={272001}
+        cacheReadInputTokens={0}
+        cacheWriteTokensReported={0}
+        cacheWriteAccounting="inferred_input_minus_cache_read_v1"
+        specialSettings={[
+          {
+            type: "openai_service_tier_result",
+            scope: "response",
+            hit: true,
+            providerType: "openai-compatible",
+            requestedServiceTier: "priority",
+            actualServiceTier: "priority",
+            resolvedFrom: "actual",
+            effectivePriority: true,
+          },
+          {
+            type: "billing_settlement",
+            scope: "billing",
+            hit: true,
+            status: "unsupported",
+            reason: "gpt56_priority_long_context_unsupported",
+            observedInputTokens: 272001,
+            missingFields: [],
+          },
+        ]}
+      />
+    );
+
+    expect(html).toContain("Settlement status");
+    expect(html).toContain("Unsupported");
+    expect(html).toContain(
+      "Priority processing does not support long-context pricing; this request was not cost-settled."
+    );
+    expect(html).not.toContain("$0.000000");
+    expect(html).not.toContain("Total cost:");
+  });
+
+  test("renders an unsupported hedge loser as unsettled instead of a billed zero", () => {
+    const html = renderWithIntl(
+      <ErrorDetailsDialog
+        externalOpen
+        statusCode={200}
+        errorMessage={null}
+        providerChain={[
+          {
+            id: 1,
+            name: "winner",
+            reason: "hedge_winner",
+            attemptNumber: 1,
+          },
+          {
+            id: 2,
+            name: "unsupported-loser",
+            reason: "hedge_loser_billed",
+            attemptNumber: 2,
+          },
+        ]}
+        sessionId={null}
+        costUsd="0.01"
+        inputTokens={100}
+        outputTokens={10}
+        hedgeLosers={[
+          {
+            providerId: 2,
+            providerName: "unsupported-loser",
+            attemptNumber: 2,
+            costUsd: "0",
+            billingStatus: "unsupported",
+            billingReason: "gpt56_priority_long_context_unsupported",
+            missingPricingFields: [],
+            pricingContext: {
+              source: "cloud_official",
+              model: "gpt-5.6-sol",
+              provider: "openai",
+              supplement: {
+                id: "openai-gpt56-2026-06-30",
+                source: "https://developers.openai.com/api/docs/pricing",
+                applied_fields: ["input_cost_per_token_priority"],
+                conflicting_fields: [],
+              },
+            },
+          },
+        ]}
+      />
+    );
+
+    expect(html).toContain("Provider Racing");
+    expect(html).toContain("unsupported-loser");
+    expect(html).toContain("Unsupported");
+    expect(html).toContain(
+      "Priority processing does not support long-context pricing; this request was not cost-settled."
+    );
+    expect(html.match(/cloud_official \/ openai \/ gpt-5\.6-sol/g)).toHaveLength(2);
+    expect(html.match(/openai-gpt56-2026-06-30/g)).toHaveLength(2);
+    expect(html).not.toContain("$0.000000");
+  });
+
+  test("marks a request-level unsupported hedge winner and merged total as unsettled", () => {
+    const html = renderWithIntl(
+      <ErrorDetailsDialog
+        externalOpen
+        statusCode={200}
+        errorMessage={null}
+        providerChain={[
+          {
+            id: 1,
+            name: "unsupported-winner",
+            reason: "hedge_winner",
+            attemptNumber: 1,
+          },
+          {
+            id: 2,
+            name: "unsupported-loser",
+            reason: "hedge_loser_billed",
+            attemptNumber: 2,
+          },
+        ]}
+        sessionId={null}
+        costUsd="0.000000000000000"
+        inputTokens={272001}
+        outputTokens={10}
+        hedgeLosers={[
+          {
+            providerId: 2,
+            providerName: "unsupported-loser",
+            attemptNumber: 2,
+            costUsd: "0",
+            billingStatus: "unsupported",
+            billingReason: "gpt56_priority_long_context_unsupported",
+          },
+        ]}
+        specialSettings={[
+          {
+            type: "billing_settlement",
+            scope: "billing",
+            hit: true,
+            status: "unsupported",
+            reason: "gpt56_priority_long_context_unsupported",
+            observedInputTokens: 272001,
+            missingFields: [],
+          },
+        ]}
+      />
+    );
+
+    expect(html).toContain("Winner: Unsupported");
+    expect(html).not.toContain("$0.000000");
   });
 
   test("renders performance metrics when duration is present", () => {

@@ -206,7 +206,12 @@ export class RateLimitService {
 
   private static async warmRollingCostZset(
     key: string,
-    entries: Array<{ id: number; createdAt: Date; costUsd: number }>,
+    entries: Array<{
+      id: number;
+      billingEventId?: string;
+      createdAt: Date;
+      costUsd: number;
+    }>,
     ttlSeconds: number
   ): Promise<void> {
     if (!RateLimitService.redis || RateLimitService.redis.status !== "ready") return;
@@ -219,7 +224,8 @@ export class RateLimitService {
       if (!Number.isFinite(createdAtMs)) continue;
       if (!Number.isFinite(entry.costUsd) || entry.costUsd <= 0) continue;
 
-      pipeline.zadd(key, createdAtMs, `${createdAtMs}:${entry.id}:${entry.costUsd}`);
+      const memberId = entry.billingEventId ?? entry.id;
+      pipeline.zadd(key, createdAtMs, `${createdAtMs}:${memberId}:${entry.costUsd}`);
     }
 
     pipeline.expire(key, ttlSeconds);
@@ -579,6 +585,7 @@ export class RateLimitService {
       let current = 0;
       let costEntries: Array<{
         id: number;
+        billingEventId?: string;
         createdAt: Date;
         costUsd: number;
       }> | null = null;
@@ -929,6 +936,8 @@ export class RateLimitService {
       user5hResetMode?: DailyResetMode;
       requestId?: number;
       createdAtMs?: number;
+      /** Stable id for one independently billable event within a request (winner or hedge loser). */
+      billingEventId?: string;
     }
   ): Promise<void> {
     if (!RateLimitService.redis || cost <= 0) return;
@@ -943,6 +952,7 @@ export class RateLimitService {
       const user5hMode = options?.user5hResetMode ?? "rolling";
       const now = options?.createdAtMs ?? Date.now();
       const requestId = options?.requestId != null ? String(options.requestId) : "";
+      const billingEventId = options?.billingEventId ?? "";
       const window5h = 5 * 60 * 60 * 1000; // 5 hours in ms
       const window24h = 24 * 60 * 60 * 1000; // 24 hours in ms
 
@@ -973,7 +983,8 @@ export class RateLimitService {
           cost.toString(), // ARGV[1]: cost
           now.toString(), // ARGV[2]: now
           window5h.toString(), // ARGV[3]: window
-          requestId // ARGV[4]: request_id (optional)
+          requestId, // ARGV[4]: request_id (optional fallback)
+          billingEventId // ARGV[5]: billing_event_id (optional, preferred)
         );
       } else {
         await RateLimitService.trackFixedCostWindow(
@@ -991,7 +1002,8 @@ export class RateLimitService {
           cost.toString(),
           now.toString(),
           window5h.toString(),
-          requestId
+          requestId,
+          billingEventId
         );
       } else {
         await RateLimitService.trackFixedCostWindow(
@@ -1010,7 +1022,8 @@ export class RateLimitService {
             cost.toString(),
             now.toString(),
             window5h.toString(),
-            requestId
+            requestId,
+            billingEventId
           );
         } else {
           await RateLimitService.trackFixedCostWindow(
@@ -1030,7 +1043,8 @@ export class RateLimitService {
           cost.toString(),
           now.toString(),
           window24h.toString(),
-          requestId
+          requestId,
+          billingEventId
         );
       }
 
@@ -1042,7 +1056,8 @@ export class RateLimitService {
           cost.toString(),
           now.toString(),
           window24h.toString(),
-          requestId
+          requestId,
+          billingEventId
         );
       }
 
@@ -1215,6 +1230,7 @@ export class RateLimitService {
       let current = 0;
       let costEntries: Array<{
         id: number;
+        billingEventId?: string;
         createdAt: Date;
         costUsd: number;
       }> | null = null;
@@ -1494,14 +1510,14 @@ export class RateLimitService {
    * 累加用户今日消费（在 trackCost 后调用）
    * @param resetTime - 重置时间 (HH:mm)，仅 fixed 模式使用
    * @param resetMode - 重置模式：fixed 或 rolling
-   * @param options - 可选参数：requestId 和 createdAtMs 用于与 DB 时间轴保持一致
+   * @param options - 可选参数：requestId、createdAtMs 与 billingEventId 用于时间轴和幂等计费
    */
   static async trackUserDailyCost(
     userId: number,
     cost: number,
     resetTime?: string,
     resetMode?: DailyResetMode,
-    options?: { requestId?: number; createdAtMs?: number }
+    options?: { requestId?: number; createdAtMs?: number; billingEventId?: string }
   ): Promise<void> {
     if (!RateLimitService.redis || cost <= 0) return;
 
@@ -1515,6 +1531,7 @@ export class RateLimitService {
         const now = options?.createdAtMs ?? Date.now();
         const window24h = 24 * 60 * 60 * 1000;
         const requestId = options?.requestId != null ? String(options.requestId) : "";
+        const billingEventId = options?.billingEventId ?? "";
 
         await RateLimitService.redis.eval(
           TRACK_COST_DAILY_ROLLING_WINDOW,
@@ -1523,7 +1540,8 @@ export class RateLimitService {
           cost.toString(),
           now.toString(),
           window24h.toString(),
-          requestId
+          requestId,
+          billingEventId
         );
 
         logger.debug(`[RateLimit] Tracked user daily cost (rolling): user=${userId}, cost=${cost}`);

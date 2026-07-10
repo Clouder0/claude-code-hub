@@ -120,6 +120,31 @@ describe("message_request 异步批量写入", () => {
     expect(built.sql).toContain("deleted_at IS NULL");
   });
 
+  it("应在异步写入中保留观测 input、reported write=0 与核算来源", async () => {
+    process.env.MESSAGE_REQUEST_WRITE_MODE = "async";
+
+    const { enqueueMessageRequestUpdate, stopMessageRequestWriteBuffer } = await import(
+      "@/repository/message-write-buffer"
+    );
+
+    enqueueMessageRequestUpdate(43, {
+      statusCode: 200,
+      observedInputTokens: 9016,
+      cacheWriteTokensReported: 0,
+      cacheWriteAccounting: "inferred_input_minus_cache_read_v1",
+    });
+
+    await stopMessageRequestWriteBuffer();
+
+    const built = toSqlText(executeMock.mock.calls[0]?.[0]);
+    expect(built.sql).toContain("observed_input_tokens");
+    expect(built.sql).toContain("cache_write_tokens_reported");
+    expect(built.sql).toContain("cache_write_accounting");
+    expect(built.params).toContain(9016);
+    expect(built.params).toContain(0);
+    expect(built.params).toContain("inferred_input_minus_cache_read_v1");
+  });
+
   it("应对 costUsd/providerChain 做显式类型转换（numeric/jsonb）", async () => {
     process.env.MESSAGE_REQUEST_WRITE_MODE = "async";
 
@@ -180,6 +205,23 @@ describe("message_request 异步批量写入", () => {
     expect(serializedParams).not.toContain("\\u0000");
     expect(serializedParams).toContain("badbody\uFFFD valid \u{1f600}");
     expect(serializedParams).toContain("badkey\uFFFD");
+  });
+
+  it("异步 specialSettings 更新应单调保留已落库的 billing audit", async () => {
+    process.env.MESSAGE_REQUEST_WRITE_MODE = "async";
+
+    const { enqueueMessageRequestUpdate, stopMessageRequestWriteBuffer } = await import(
+      "@/repository/message-write-buffer"
+    );
+
+    enqueueMessageRequestUpdate(9, { statusCode: 200, specialSettings: [] });
+    await stopMessageRequestWriteBuffer();
+
+    const built = toSqlText(executeMock.mock.calls[0]?.[0]);
+    expect(built.sql).toContain("jsonb_array_elements");
+    expect(built.sql).toContain("jsonb_build_array");
+    expect(built.sql).toContain("special_settings");
+    expect(built.sql).toContain("billing");
   });
 
   it("stop 应等待 in-flight flush 完成", async () => {

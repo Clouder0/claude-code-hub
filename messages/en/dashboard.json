@@ -298,7 +298,43 @@
       "billingDetails": {
         "title": "Billing Details",
         "input": "Input",
+        "observedInput": "Observed input",
+        "ordinaryInput": "Ordinary input",
         "output": "Output",
+        "cacheWriteReported": "Cache write reported",
+        "cacheWriteEffective": "Effective cache write",
+        "cacheWriteNotReported": "Not reported",
+        "cacheWriteAccounting": "Cache-write accounting",
+        "cacheWriteAccountingSource": {
+          "reported_positive": "Reported by upstream",
+          "inferred_input_minus_cache_read_v1": "Estimated from observed input minus cache read",
+          "none": "No cache-write allocation"
+        },
+        "effectiveServiceTier": "Effective service tier",
+        "serviceTier": {
+          "standard": "Standard",
+          "priority": "Priority"
+        },
+        "longContextPricing": "Long-context pricing",
+        "longContextApplied": "Applied above {threshold} tokens",
+        "longContextAppliedUnknown": "Applied",
+        "pricingTier": "Pricing tier",
+        "pricingTierValue": {
+          "standard": "Standard",
+          "standard_long_context": "Standard long context",
+          "priority": "Priority"
+        },
+        "pricingRateSource": "Rate source",
+        "priceBook": "Price book",
+        "settlementStatus": "Settlement status",
+        "settlementUnsupported": "Unsupported",
+        "settlementReason": {
+          "gpt56_standard_rates_incomplete": "Standard unit rates are incomplete; this request was not cost-settled.",
+          "gpt56_long_context_rates_incomplete": "Standard long-context unit rates are incomplete; this request was not cost-settled.",
+          "gpt56_priority_rates_incomplete": "Priority unit rates are incomplete; this request was not cost-settled.",
+          "gpt56_priority_long_context_unsupported": "Priority processing does not support long-context pricing; this request was not cost-settled."
+        },
+        "settlementMissingFields": "Missing price fields: {fields}",
         "cacheWrite5m": "Cache Write (5m)",
         "cacheWrite1h": "Cache Write (1h)",
         "cacheRead": "Cache Read",

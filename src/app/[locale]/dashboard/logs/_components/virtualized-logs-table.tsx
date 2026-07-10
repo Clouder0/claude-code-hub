@@ -25,6 +25,7 @@ import { useVirtualizedInfiniteList } from "@/hooks/use-virtualized-infinite-lis
 import type { ActionResult } from "@/lib/api-client/v1/actions/types";
 import { getUsageLogsBatch } from "@/lib/api-client/v1/actions/usage-logs";
 import type { LogsTableColumn } from "@/lib/column-visibility";
+import { resolveBillingSettlement } from "@/lib/usage-logs/billing-audit";
 import { cn, formatTokenAmount } from "@/lib/utils";
 import { copyTextToClipboard } from "@/lib/utils/clipboard";
 import type { CurrencyCode } from "@/lib/utils/currency";
@@ -467,7 +468,9 @@ export function VirtualizedLogsTable({
                   {loser.providerName ?? t("logs.billingDetails.hedgeLoserShort")}
                 </span>
                 <span className={cn(amountClassName, "text-rose-300/80")}>
-                  {formatCurrency(loser.costUsd, currencyCode, 6)}
+                  {loser.billingStatus === "unsupported"
+                    ? t("logs.billingDetails.settlementUnsupported")
+                    : formatCurrency(loser.costUsd, currencyCode, 6)}
                 </span>
               </div>
             ))}
@@ -771,6 +774,7 @@ export function VirtualizedLogsTable({
 
                 const isNonBilling = isNonBillingEndpoint(log.endpoint);
                 const _isWarmupSkipped = log.blockedBy === "warmup";
+                const billingSettlement = resolveBillingSettlement(log.specialSettings);
                 return (
                   <div
                     key={log.id}
@@ -1097,6 +1101,10 @@ export function VirtualizedLogsTable({
                       <div className="flex-[0.6] min-w-[50px] text-right font-mono text-xs px-1.5">
                         {isNonBilling ? (
                           "-"
+                        ) : billingSettlement ? (
+                          <Badge variant="destructive" className="text-[10px] leading-tight px-1">
+                            {t("logs.billingDetails.settlementUnsupported")}
+                          </Badge>
                         ) : log.costUsd != null ? (
                           <TooltipProvider>
                             <Tooltip delayDuration={250}>
@@ -1214,8 +1222,11 @@ export function VirtualizedLogsTable({
                           billingModelSource={billingModelSource}
                           specialSettings={log.specialSettings}
                           inputTokens={log.inputTokens}
+                          observedInputTokens={log.observedInputTokens}
                           outputTokens={log.outputTokens}
                           cacheCreationInputTokens={log.cacheCreationInputTokens}
+                          cacheWriteTokensReported={log.cacheWriteTokensReported}
+                          cacheWriteAccounting={log.cacheWriteAccounting}
                           cacheCreation5mInputTokens={log.cacheCreation5mInputTokens}
                           cacheCreation1hInputTokens={log.cacheCreation1hInputTokens}
                           cacheReadInputTokens={log.cacheReadInputTokens}

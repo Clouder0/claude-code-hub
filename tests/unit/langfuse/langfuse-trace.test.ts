@@ -107,6 +107,7 @@ function createMockSession(overrides: Record<string, unknown> = {}) {
     getRequestSequence: () => 3,
     getMessagesLength: () => 1,
     getCurrentModel: () => "claude-sonnet-4-20250514",
+    getBillingModel: () => "claude-sonnet-4-20250514",
     getOriginalModel: () => "claude-sonnet-4-20250514",
     isModelRedirected: () => false,
     getProviderChain: () => [
@@ -301,11 +302,60 @@ describe("traceProxyRequest", () => {
     );
     expect(llmCall[1].usageDetails).toEqual({
       input: 100,
+      ordinary_input_tokens: 100,
       output: 50,
       cache_read_input_tokens: 20,
     });
     expect(llmCall[1].costDetails).toEqual({
       total: 0.0015,
+    });
+  });
+
+  test("should expose settled OpenAI cache-write accounting in usage and metadata", async () => {
+    const { traceProxyRequest } = await import("@/lib/langfuse/trace-proxy-request");
+
+    await traceProxyRequest({
+      session: createMockSession(),
+      responseHeaders: new Headers(),
+      durationMs: 500,
+      statusCode: 200,
+      isStreaming: false,
+      usageMetrics: {
+        observed_input_tokens: 9_016,
+        input_tokens: 0,
+        output_tokens: 5,
+        cache_read_input_tokens: 7_936,
+        cache_read_tokens_observed: true,
+        cache_creation_input_tokens: 1_080,
+        cache_write_tokens_reported: 0,
+        cache_write_accounting: "inferred_input_minus_cache_read_v1",
+      },
+      costBreakdown: {
+        input: 0,
+        output: 0.00015,
+        cache_creation: 0.00675,
+        cache_creation_default: 0.00675,
+        cache_creation_5m: 0,
+        cache_creation_1h: 0,
+        cache_read: 0.003968,
+        total: 0.010868,
+      },
+    });
+
+    const llmCall = mockRootSpan.startObservation.mock.calls.find(
+      (c: unknown[]) => c[0] === "llm-call"
+    );
+    expect(llmCall[1].usageDetails).toMatchObject({
+      observed_input_tokens: 9_016,
+      ordinary_input_tokens: 0,
+      cache_read_input_tokens: 7_936,
+      cache_write_input_tokens: 1_080,
+    });
+    expect(llmCall[1].costDetails.cache_creation_default).toBe(0.00675);
+    expect(llmCall[1].metadata).toMatchObject({
+      cacheReadTokensObserved: true,
+      cacheWriteTokensReported: 0,
+      cacheWriteAccounting: "inferred_input_minus_cache_read_v1",
     });
   });
 
@@ -928,6 +978,50 @@ describe("traceProxyRequest", () => {
     expect(mockSetTraceIO).toHaveBeenCalledWith({
       input: JSON.parse(forwardedBody),
       output: { ok: true },
+    });
+  });
+
+  test("should use the final forwarded model across Langfuse billing metadata", async () => {
+    const { traceProxyRequest } = await import("@/lib/langfuse/trace-proxy-request");
+    const forwardedBody = JSON.stringify({
+      model: "gpt-5.6-terra",
+      input: [{ role: "user", content: "hello" }],
+      stream: true,
+    });
+
+    await traceProxyRequest({
+      session: createMockSession({
+        forwardedRequestBody: forwardedBody,
+        getCurrentModel: () => "gpt-5.6-sol",
+        getBillingModel: () => "gpt-5.6-terra",
+        getOriginalModel: () => "gpt-5.6-sol",
+        isModelRedirected: () => false,
+      }),
+      responseHeaders: new Headers(),
+      durationMs: 500,
+      statusCode: 200,
+      isStreaming: true,
+      sseEventCount: 1,
+    });
+
+    const rootCall = mockStartObservation.mock.calls[0];
+    expect(rootCall[1].metadata.model).toBe("gpt-5.6-terra");
+    expect(mockPropagateAttributes).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tags: expect.arrayContaining(["gpt-5.6-terra"]),
+      })
+    );
+    const llmCall = mockRootSpan.startObservation.mock.calls.find(
+      (call: unknown[]) => call[0] === "llm-call"
+    );
+    expect(llmCall[1]).toMatchObject({
+      model: "gpt-5.6-terra",
+      metadata: {
+        model: "gpt-5.6-terra",
+        originalModel: "gpt-5.6-sol",
+        modelRedirected: true,
+        requestSummary: expect.objectContaining({ model: "gpt-5.6-terra" }),
+      },
     });
   });
 

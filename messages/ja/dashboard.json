@@ -298,7 +298,43 @@
       "billingDetails": {
         "title": "課金詳細",
         "input": "入力",
+        "observedInput": "観測入力合計",
+        "ordinaryInput": "通常入力",
         "output": "出力",
+        "cacheWriteReported": "上流報告のキャッシュ書き込み",
+        "cacheWriteEffective": "有効なキャッシュ書き込み",
+        "cacheWriteNotReported": "未報告",
+        "cacheWriteAccounting": "キャッシュ書き込みの計上方法",
+        "cacheWriteAccountingSource": {
+          "reported_positive": "上流からの報告",
+          "inferred_input_minus_cache_read_v1": "観測入力からキャッシュ読み取りを差し引いて推定",
+          "none": "キャッシュ書き込みの割り当てなし"
+        },
+        "effectiveServiceTier": "有効なサービス階層",
+        "serviceTier": {
+          "standard": "標準",
+          "priority": "優先"
+        },
+        "longContextPricing": "長文コンテキスト課金",
+        "longContextApplied": "{threshold} tokens 超で適用",
+        "longContextAppliedUnknown": "適用済み",
+        "pricingTier": "課金階層",
+        "pricingTierValue": {
+          "standard": "標準",
+          "standard_long_context": "標準長文コンテキスト",
+          "priority": "優先"
+        },
+        "pricingRateSource": "単価ソース",
+        "priceBook": "価格表",
+        "settlementStatus": "精算状態",
+        "settlementUnsupported": "未対応",
+        "settlementReason": {
+          "gpt56_standard_rates_incomplete": "標準サービスの単価項目が不足しているため、このリクエストの費用は精算されていません。",
+          "gpt56_long_context_rates_incomplete": "標準長文コンテキストの単価項目が不足しているため、このリクエストの費用は精算されていません。",
+          "gpt56_priority_rates_incomplete": "優先サービスの単価項目が不足しているため、このリクエストの費用は精算されていません。",
+          "gpt56_priority_long_context_unsupported": "優先処理は長文コンテキスト課金に対応していないため、このリクエストの費用は精算されていません。"
+        },
+        "settlementMissingFields": "不足している価格項目: {fields}",
         "cacheWrite5m": "キャッシュ書き込み (5m)",
         "cacheWrite1h": "キャッシュ書き込み (1h)",
         "cacheRead": "キャッシュ読み取り",

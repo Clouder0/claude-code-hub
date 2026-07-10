@@ -196,7 +196,16 @@ describe("Warmup 请求：不计入任何聚合统计", () => {
 
     const queryArg = executeMock.mock.calls[0]?.[0];
     const querySql = sqlToString(queryArg);
-    expect(querySql.toLowerCase()).toContain("blocked_by");
-    expect(querySql.toLowerCase()).toContain("is null");
+    const normalizedQuerySql = querySql.toLowerCase();
+    expect(normalizedQuerySql).toContain("blocked_by");
+    expect(normalizedQuerySql).toContain("is null");
+
+    const ledgerLowerBoundIndex = normalizedQuerySql.indexOf("ledger.created_at >=");
+    const loserExpansionIndex = normalizedQuerySql.indexOf("raw_loser_candidates");
+    expect(ledgerLowerBoundIndex).toBeGreaterThan(-1);
+    expect(normalizedQuerySql.slice(ledgerLowerBoundIndex, loserExpansionIndex)).toContain(
+      "last7_start"
+    );
+    expect(ledgerLowerBoundIndex).toBeLessThan(loserExpansionIndex);
   });
 });

@@ -117,6 +117,11 @@ export class ProxySession {
   // Actual serialized request body sent to upstream (after all preprocessing).
   forwardedRequestBody: string | null = null;
 
+  // Lazily decoded view of forwardedRequestBody. The source string guards against direct
+  // assignments made by retries/tests so billing never reuses a snapshot from another attempt.
+  private forwardedRequestMessageSource: string | null = null;
+  private forwardedRequestMessage: Record<string, unknown> | null = null;
+
   // Session ID（用于会话粘性和并发限流）
   sessionId: string | null;
 
@@ -745,6 +750,46 @@ export class ProxySession {
     return this.request.model;
   }
 
+  /**
+   * Return the final JSON object sent to upstream for this attempt.
+   *
+   * Request filters intentionally operate on a detached body, so session.request.message may
+   * describe the pre-filter request. Billing must use the serialized upstream body instead.
+   */
+  getForwardedRequestMessage(): Record<string, unknown> | null {
+    const source = this.forwardedRequestBody;
+    if (!source) {
+      return null;
+    }
+
+    if (this.forwardedRequestMessageSource === source) {
+      return this.forwardedRequestMessage;
+    }
+
+    this.forwardedRequestMessageSource = source;
+    try {
+      const parsed = JSON.parse(source);
+      this.forwardedRequestMessage =
+        parsed && typeof parsed === "object" && !Array.isArray(parsed)
+          ? (parsed as Record<string, unknown>)
+          : null;
+    } catch {
+      this.forwardedRequestMessage = null;
+    }
+    return this.forwardedRequestMessage;
+  }
+
+  /** Final request facts for billing, with a pre-forward fallback for isolated callers/tests. */
+  getBillingRequestMessage(): Record<string, unknown> {
+    return this.getForwardedRequestMessage() ?? (this.request.message as Record<string, unknown>);
+  }
+
+  /** Model actually sent upstream, falling back to the routed request model. */
+  getBillingModel(): string | null {
+    const model = this.getForwardedRequestMessage()?.model;
+    return typeof model === "string" && model.trim() ? model : this.request.model;
+  }
+
   getOpenAIImageRequestMetadata(): OpenAIImageRequestMetadata | null {
     return this.request.imageRequestMetadata ?? null;
   }
@@ -929,7 +974,7 @@ export class ProxySession {
     modelOverride?: { originalModel?: string | null; redirectedModel?: string | null }
   ): Promise<ResolvedPricing | null> {
     const originalModel = modelOverride?.originalModel ?? this.getOriginalModel();
-    const redirectedModel = modelOverride?.redirectedModel ?? this.request.model;
+    const redirectedModel = modelOverride?.redirectedModel ?? this.getBillingModel();
     if (!originalModel && !redirectedModel) {
       return null;
     }

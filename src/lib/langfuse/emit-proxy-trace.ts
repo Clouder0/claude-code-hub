@@ -51,9 +51,10 @@ function buildLangfuseSessionSnapshot(session: ProxySession): ProxySession {
   const specialSettings = session.getSpecialSettings();
   const cacheTtlResolved = session.getCacheTtlResolved();
   const context1mApplied = session.getContext1mApplied();
-  const currentModel = session.getCurrentModel();
+  const currentModel = session.getBillingModel() ?? session.getCurrentModel();
   const originalModel = session.getOriginalModel();
-  const modelRedirected = session.isModelRedirected();
+  const modelRedirected =
+    session.isModelRedirected() || (currentModel != null && currentModel !== originalModel);
   const endpoint = session.getEndpoint();
   const requestSequence = session.getRequestSequence();
   const messagesLength = session.getMessagesLength();
@@ -61,7 +62,7 @@ function buildLangfuseSessionSnapshot(session: ProxySession): ProxySession {
     typeof session.forwardedRequestBody === "string"
       ? truncateResponseTextForLangfuse(session.forwardedRequestBody)
       : null;
-  const requestMessage = buildRequestMessagePreview(session.request.message);
+  const requestMessage = buildRequestMessagePreview(session.getBillingRequestMessage());
 
   return {
     startTime: session.startTime,
@@ -71,7 +72,7 @@ function buildLangfuseSessionSnapshot(session: ProxySession): ProxySession {
       message: requestMessage,
       log: truncateResponseTextForLangfuse(session.request.log ?? ""),
       note: session.request.note,
-      model: session.request.model,
+      model: currentModel,
       imageRequestMetadata: null,
     },
     userAgent: session.userAgent,
@@ -85,6 +86,7 @@ function buildLangfuseSessionSnapshot(session: ProxySession): ProxySession {
     getMessagesLength: () => messagesLength,
     getEndpoint: () => endpoint,
     getCurrentModel: () => currentModel,
+    getBillingModel: () => currentModel,
     getProviderChain: () => providerChain,
     getRequestSequence: () => requestSequence,
     getOriginalModel: () => originalModel,

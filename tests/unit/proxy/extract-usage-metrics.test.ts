@@ -824,6 +824,73 @@ describe("extractUsageMetrics", () => {
   });
 
   describe("openai-compatible cached_tokens subset normalization", () => {
+    it("should extract Responses cache_write_tokens and exclude them from ordinary input", () => {
+      const response = JSON.stringify({
+        usage: {
+          input_tokens: 2000,
+          output_tokens: 100,
+          input_tokens_details: {
+            cache_write_tokens: 800,
+            cached_tokens: 0,
+          },
+        },
+      });
+
+      const result = parseUsageFromResponseText(response, "openai-compatible");
+
+      expect(result.usageMetrics).not.toBeNull();
+      expect(result.usageMetrics?.input_tokens).toBe(1200);
+      expect(result.usageMetrics?.cache_creation_input_tokens).toBe(800);
+      expect(result.usageMetrics?.cache_read_input_tokens).toBe(0);
+      expect(result.usageMetrics?.output_tokens).toBe(100);
+    });
+
+    it("should extract Chat cache_write_tokens and preserve an explicit zero", () => {
+      const response = JSON.stringify({
+        usage: {
+          prompt_tokens: 9016,
+          completion_tokens: 5,
+          prompt_tokens_details: {
+            cache_write_tokens: 0,
+            cached_tokens: 7936,
+          },
+        },
+      });
+
+      const result = parseUsageFromResponseText(response, "openai-compatible");
+
+      expect(result.usageMetrics).toMatchObject({
+        observed_input_tokens: 9016,
+        input_tokens: 1080,
+        cache_read_input_tokens: 7936,
+        cache_write_tokens_reported: 0,
+        cache_write_accounting: "none",
+        output_tokens: 5,
+      });
+      expect(result.usageMetrics?.cache_creation_input_tokens).toBeUndefined();
+    });
+
+    it("should parse nested write even when a top-level cache-read field wins", () => {
+      const response = JSON.stringify({
+        usage: {
+          input_tokens: 2000,
+          output_tokens: 10,
+          cache_read_input_tokens: 300,
+          input_tokens_details: { cached_tokens: 200, cache_write_tokens: 800 },
+        },
+      });
+
+      const result = parseUsageFromResponseText(response, "openai-compatible");
+
+      expect(result.usageMetrics).toMatchObject({
+        observed_input_tokens: 2000,
+        input_tokens: 900,
+        cache_read_input_tokens: 300,
+        cache_creation_input_tokens: 800,
+        cache_write_tokens_reported: 800,
+      });
+    });
+
     it("should subtract Chat Completions cached_tokens from input_tokens (non-stream)", () => {
       const response = JSON.stringify({
         usage: {
@@ -880,6 +947,50 @@ describe("extractUsageMetrics", () => {
       expect(result.usageMetrics?.output_tokens).toBe(300);
     });
 
+    it("should prefer response.completed usage over an earlier zero Responses event", () => {
+      const sse = [
+        "event: response.created",
+        'data: {"type":"response.created","response":{"usage":{"input_tokens":0,"output_tokens":0,"input_tokens_details":{"cached_tokens":0,"cache_write_tokens":0}}}}',
+        "",
+        "event: response.completed",
+        'data: {"type":"response.completed","response":{"usage":{"input_tokens":9016,"output_tokens":5,"input_tokens_details":{"cached_tokens":7936,"cache_write_tokens":0}}}}',
+        "",
+      ].join("\n");
+
+      const result = parseUsageFromResponseText(sse, "codex");
+
+      expect(result.usageMetrics).toMatchObject({
+        observed_input_tokens: 9016,
+        input_tokens: 1080,
+        output_tokens: 5,
+        cache_read_input_tokens: 7936,
+        cache_write_tokens_reported: 0,
+      });
+    });
+
+    it("should prefer nested completed response usage over a wrapper usage field", () => {
+      const response = JSON.stringify({
+        type: "response.completed",
+        usage: { input_tokens: 0, output_tokens: 0 },
+        response: {
+          usage: {
+            input_tokens: 2000,
+            output_tokens: 100,
+            input_tokens_details: { cached_tokens: 0, cache_write_tokens: 800 },
+          },
+        },
+      });
+
+      const result = parseUsageFromResponseText(response, "openai-compatible");
+
+      expect(result.usageMetrics).toMatchObject({
+        observed_input_tokens: 2000,
+        input_tokens: 1200,
+        cache_creation_input_tokens: 800,
+        output_tokens: 100,
+      });
+    });
+
     it("should clamp input_tokens at zero when cached_tokens exceed prompt_tokens", () => {
       const response = JSON.stringify({
         usage: {
@@ -893,8 +1004,9 @@ describe("extractUsageMetrics", () => {
 
       const result = parseUsageFromResponseText(response, "openai-compatible");
 
+      expect(result.usageMetrics?.observed_input_tokens).toBe(1500);
       expect(result.usageMetrics?.input_tokens).toBe(0);
-      expect(result.usageMetrics?.cache_read_input_tokens).toBe(2000);
+      expect(result.usageMetrics?.cache_read_input_tokens).toBe(1500);
       expect(result.usageMetrics?.output_tokens).toBe(100);
     });
 

@@ -227,7 +227,7 @@ describe("syncCloudPriceTableToDatabase", () => {
     expect(vi.mocked(deleteCloudPricesNotIn)).toHaveBeenCalledWith(["m1"]);
     const { upsertCloudPricingCatalog } = await import("@/repository/cloud-pricing-catalog");
     expect(vi.mocked(upsertCloudPricingCatalog)).toHaveBeenCalledWith(
-      expect.objectContaining({ version: "test-version+cvt1", modelCount: 1 })
+      expect.objectContaining({ version: "test-version+cvt2", modelCount: 1 })
     );
   });
 
@@ -325,7 +325,7 @@ describe("syncCloudPriceTableToDatabase", () => {
 
     const { getCloudPricingCatalog } = await import("@/repository/cloud-pricing-catalog");
     vi.mocked(getCloudPricingCatalog).mockResolvedValue({
-      version: "same-version+cvt1",
+      version: "same-version+cvt2",
       currency: "USD",
       refreshedAt: null,
       providers: {},
@@ -348,7 +348,7 @@ describe("syncCloudPriceTableToDatabase", () => {
     expect(processPriceTableInternal).not.toHaveBeenCalled();
   });
 
-  it("does not skip when overwriteManual is provided even if version matches", async () => {
+  it("replays the table when the stored catalog uses the previous converter revision", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async () => ({
@@ -361,6 +361,35 @@ describe("syncCloudPriceTableToDatabase", () => {
     const { getCloudPricingCatalog } = await import("@/repository/cloud-pricing-catalog");
     vi.mocked(getCloudPricingCatalog).mockResolvedValue({
       version: "same-version+cvt1",
+      currency: "USD",
+      refreshedAt: null,
+      providers: {},
+      vendors: [],
+      modelCount: 1,
+      syncedAt: null,
+    });
+    const { processPriceTableInternal } = await import("@/actions/model-prices");
+
+    const { syncCloudPriceTableToDatabase } = await import("@/lib/price-sync/cloud-price-updater");
+    const result = await syncCloudPriceTableToDatabase();
+
+    expect(result.ok).toBe(true);
+    expect(processPriceTableInternal).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not skip when overwriteManual is provided even if version matches", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({
+        ok: true,
+        status: 200,
+        text: async () => buildCptJson({ version: "same-version" }),
+      }))
+    );
+
+    const { getCloudPricingCatalog } = await import("@/repository/cloud-pricing-catalog");
+    vi.mocked(getCloudPricingCatalog).mockResolvedValue({
+      version: "same-version+cvt2",
       currency: "USD",
       refreshedAt: null,
       providers: {},

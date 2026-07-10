@@ -560,6 +560,50 @@ function createCompletedThenErroredResponsesSse(): Response {
   });
 }
 
+function createCompletedThenErroredGpt56ResponsesSse(): Response {
+  const encoder = new TextEncoder();
+  const chunks = [
+    `event: response.output_text.done\ndata: ${JSON.stringify({
+      type: "response.output_text.done",
+      text: "OK",
+    })}\n\n`,
+    `event: response.completed\ndata: ${JSON.stringify({
+      type: "response.completed",
+      response: {
+        id: "resp_gpt56_client_abort",
+        model: "gpt-5.6-sol",
+        usage: {
+          input_tokens: 9_016,
+          input_tokens_details: {
+            cached_tokens: 7_936,
+            cache_write_tokens: 0,
+          },
+          output_tokens: 5,
+        },
+      },
+    })}\n\n`,
+  ];
+  let index = 0;
+
+  const stream = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      if (index < chunks.length) {
+        controller.enqueue(encoder.encode(chunks[index++]));
+        return;
+      }
+
+      const error = new Error("Response transmission interrupted after final GPT-5.6 usage");
+      error.name = "ResponseAborted";
+      controller.error(error);
+    },
+  });
+
+  return new Response(stream, {
+    status: 200,
+    headers: { "content-type": "text/event-stream" },
+  });
+}
+
 // U01: Anthropic streams carry usage in the FIRST `message_start` event, so a
 // truncated mid-stream abort already has positive billable tokens. Without a
 // completion marker it must NOT be reclassified as a 200 success.
@@ -915,6 +959,106 @@ describe("ProxyResponseHandler stream client abort finalization", () => {
             statusCode: 200,
           }),
         ],
+      })
+    );
+  });
+
+  it("persists settled GPT-5.6 usage provenance after client-abort drain reaches terminal usage", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const session = createSession(controller.signal, { model: "gpt-5.6-sol" });
+    Object.assign(session, {
+      getResolvedPricingByBillingSource: vi.fn(async () => ({
+        resolvedModelName: "gpt-5.6-sol",
+        resolvedPricingProviderKey: "openai",
+        source: "cloud_official",
+        priceData: {
+          input_cost_per_token: 5 / 1_000_000,
+          cache_read_input_token_cost: 0.5 / 1_000_000,
+          cache_creation_input_token_cost: 6.25 / 1_000_000,
+          output_cost_per_token: 30 / 1_000_000,
+        },
+      })),
+    });
+    setDeferredStreamingFinalization(session, {
+      providerId: 1,
+      providerName: "avemujica-responses",
+      providerPriority: 1,
+      attemptNumber: 1,
+      totalProvidersAttempted: 1,
+      isFirstAttempt: true,
+      isFailoverSuccess: false,
+      endpointId: 42,
+      endpointUrl: "https://api.test.invalid/v1",
+      upstreamStatusCode: 200,
+    });
+
+    await ProxyResponseHandler.dispatch(session, createCompletedThenErroredGpt56ResponsesSse());
+    await drainAsyncTasks();
+
+    expect(updateMessageRequestDetails).toHaveBeenCalledTimes(1);
+    expect(updateMessageRequestDetails).toHaveBeenCalledWith(
+      123,
+      expect.objectContaining({
+        statusCode: 200,
+        observedInputTokens: 9_016,
+        inputTokens: 0,
+        cacheReadInputTokens: 7_936,
+        cacheCreationInputTokens: 1_080,
+        outputTokens: 5,
+        cacheWriteTokensReported: 0,
+        cacheWriteAccounting: "inferred_input_minus_cache_read_v1",
+      })
+    );
+  });
+
+  it("uses the final forwarded cache mode when settling a drained GPT-5.6 response", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const session = createSession(controller.signal, { model: "gpt-5.6-sol" });
+    session.forwardedRequestBody = JSON.stringify({
+      model: "gpt-5.6-sol",
+      stream: true,
+      prompt_cache_options: { mode: "explicit" },
+    });
+    Object.assign(session, {
+      getResolvedPricingByBillingSource: vi.fn(async () => ({
+        resolvedModelName: "gpt-5.6-sol",
+        resolvedPricingProviderKey: "openai",
+        source: "cloud_official",
+        priceData: {
+          input_cost_per_token: 5 / 1_000_000,
+          cache_read_input_token_cost: 0.5 / 1_000_000,
+          cache_creation_input_token_cost: 6.25 / 1_000_000,
+          output_cost_per_token: 30 / 1_000_000,
+        },
+      })),
+    });
+    setDeferredStreamingFinalization(session, {
+      providerId: 1,
+      providerName: "avemujica-responses",
+      providerPriority: 1,
+      attemptNumber: 1,
+      totalProvidersAttempted: 1,
+      isFirstAttempt: true,
+      isFailoverSuccess: false,
+      endpointId: 42,
+      endpointUrl: "https://api.test.invalid/v1",
+      upstreamStatusCode: 200,
+    });
+
+    await ProxyResponseHandler.dispatch(session, createCompletedThenErroredGpt56ResponsesSse());
+    await drainAsyncTasks();
+
+    expect(updateMessageRequestDetails).toHaveBeenCalledWith(
+      123,
+      expect.objectContaining({
+        observedInputTokens: 9_016,
+        inputTokens: 1_080,
+        cacheReadInputTokens: 7_936,
+        cacheCreationInputTokens: 0,
+        cacheWriteTokensReported: 0,
+        cacheWriteAccounting: "none",
       })
     );
   });

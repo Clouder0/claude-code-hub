@@ -18,6 +18,13 @@ export interface LongContextPricing {
   cache_read_input_token_cost?: number;
 }
 
+export interface PricingSupplementMetadata {
+  id: string;
+  source: string;
+  applied_fields: string[];
+  conflicting_fields: string[];
+}
+
 export interface ModelPriceData {
   // 基础价格信息
   input_cost_per_token?: number;
@@ -52,6 +59,7 @@ export interface ModelPriceData {
   // 优先服务等级价格（例如 OpenAI priority tier）
   input_cost_per_token_priority?: number;
   output_cost_per_token_priority?: number;
+  cache_creation_input_token_cost_priority?: number;
   cache_read_input_token_cost_priority?: number;
 
   // 图片生成价格
@@ -81,6 +89,7 @@ export interface ModelPriceData {
   selected_pricing_provider?: string;
   selected_pricing_source_model?: string;
   selected_pricing_resolution?: "manual_pin";
+  openai_official_pricing_supplement?: PricingSupplementMetadata;
   // 云端价格表(cchp.pricing-table/v1)元数据
   vendor?: string;
   slug?: string;

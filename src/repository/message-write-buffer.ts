@@ -3,6 +3,7 @@ import "server-only";
 import type { SQL } from "drizzle-orm";
 import { sql } from "drizzle-orm";
 import { db } from "@/drizzle/db";
+import type { CacheWriteAccounting } from "@/lib/billing/openai-usage-accounting";
 import { getEnvConfig } from "@/lib/config/env.schema";
 import { logger } from "@/lib/logger";
 import type { StoredCostBreakdown } from "@/types/cost-breakdown";
@@ -17,7 +18,10 @@ export type MessageRequestUpdatePatch = {
   costUsd?: string;
   statusCode?: number;
   inputTokens?: number;
+  observedInputTokens?: number | null;
   outputTokens?: number;
+  cacheWriteTokensReported?: number | null;
+  cacheWriteAccounting?: CacheWriteAccounting | null;
   ttfbMs?: number | null;
   cacheCreationInputTokens?: number;
   cacheReadInputTokens?: number;
@@ -58,7 +62,10 @@ const COLUMN_MAP: Record<keyof MessageRequestUpdatePatch, string> = {
   costUsd: "cost_usd",
   statusCode: "status_code",
   inputTokens: "input_tokens",
+  observedInputTokens: "observed_input_tokens",
   outputTokens: "output_tokens",
+  cacheWriteTokensReported: "cache_write_tokens_reported",
+  cacheWriteAccounting: "cache_write_accounting",
   ttfbMs: "ttfb_ms",
   cacheCreationInputTokens: "cache_creation_input_tokens",
   cacheReadInputTokens: "cache_read_input_tokens",
@@ -102,6 +109,22 @@ function stripJsonbFields(patch: MessageRequestUpdatePatch): MessageRequestUpdat
 
 function hasUpdateFields(patch: MessageRequestUpdatePatch): boolean {
   return Object.values(patch).some((value) => value !== undefined);
+}
+
+function buildMonotonicSpecialSettingsValue(incomingJson: string): SQL {
+  const specialSettingsColumn = sql.identifier(COLUMN_MAP.specialSettings);
+  return sql`${incomingJson}::jsonb || COALESCE((
+    SELECT jsonb_agg(existing_setting.value)
+    FROM jsonb_array_elements(
+      CASE
+        WHEN jsonb_typeof(COALESCE(${specialSettingsColumn}, '[]'::jsonb)) = 'array'
+          THEN COALESCE(${specialSettingsColumn}, '[]'::jsonb)
+        ELSE '[]'::jsonb
+      END
+    ) AS existing_setting(value)
+    WHERE existing_setting.value->>'scope' = 'billing'
+      AND NOT (${incomingJson}::jsonb @> jsonb_build_array(existing_setting.value))
+  ), '[]'::jsonb)`;
 }
 
 function isJsonbInputError(error: unknown): boolean {
@@ -169,6 +192,12 @@ export function buildBatchUpdateSql(updates: MessageRequestUpdateRecord[]): SQL 
           continue;
         }
         const json = JSON.stringify(sanitizeMessageRequestJsonbValue(value));
+        if (key === "specialSettings") {
+          // Billing audit entries are append-only authoritative facts. A stale async snapshot must
+          // not erase a settlement that was already written directly to the request row.
+          cases.push(sql`WHEN ${update.id} THEN ${buildMonotonicSpecialSettingsValue(json)}`);
+          continue;
+        }
         cases.push(sql`WHEN ${update.id} THEN ${json}::jsonb`);
         continue;
       }

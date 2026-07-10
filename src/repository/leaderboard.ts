@@ -11,6 +11,7 @@ import {
   LEDGER_SUCCESS_RATE_COUNTABLE_CONDITION,
   LEDGER_SUCCESS_RATE_SUCCESS_CONDITION,
 } from "./_shared/ledger-conditions";
+import { buildProviderBillingEventsQuery } from "./_shared/provider-billing-events";
 import { getSystemSettings } from "./system-config";
 
 const clampRatio01 = (value: number | null | undefined) => Math.min(Math.max(value ?? 0, 0), 1);
@@ -255,7 +256,8 @@ export interface DateRangeParams {
 function buildDateCondition(
   period: LeaderboardPeriod,
   timezone: string,
-  dateRange?: DateRangeParams
+  dateRange?: DateRangeParams,
+  createdAtColumn = sql`${usageLedger.createdAt}`
 ) {
   const nowLocal = sql`CURRENT_TIMESTAMP AT TIME ZONE ${timezone}`;
 
@@ -265,7 +267,7 @@ function buildDateCondition(
     const endExclusiveLocal = sql`(${dateRange.endDate}::date + INTERVAL '1 day')`;
     const start = sql`(${startLocal} AT TIME ZONE ${timezone})`;
     const endExclusive = sql`(${endExclusiveLocal} AT TIME ZONE ${timezone})`;
-    return sql`${usageLedger.createdAt} >= ${start} AND ${usageLedger.createdAt} < ${endExclusive}`;
+    return sql`${createdAtColumn} >= ${start} AND ${createdAtColumn} < ${endExclusive}`;
   }
 
   switch (period) {
@@ -276,23 +278,23 @@ function buildDateCondition(
       const endExclusiveLocal = sql`(${startLocal} + INTERVAL '1 day')`;
       const start = sql`(${startLocal} AT TIME ZONE ${timezone})`;
       const endExclusive = sql`(${endExclusiveLocal} AT TIME ZONE ${timezone})`;
-      return sql`${usageLedger.createdAt} >= ${start} AND ${usageLedger.createdAt} < ${endExclusive}`;
+      return sql`${createdAtColumn} >= ${start} AND ${createdAtColumn} < ${endExclusive}`;
     }
     case "last24h":
-      return sql`${usageLedger.createdAt} >= (CURRENT_TIMESTAMP - INTERVAL '24 hours')`;
+      return sql`${createdAtColumn} >= (CURRENT_TIMESTAMP - INTERVAL '24 hours')`;
     case "weekly": {
       const startLocal = sql`DATE_TRUNC('week', ${nowLocal})`;
       const endExclusiveLocal = sql`(${startLocal} + INTERVAL '1 week')`;
       const start = sql`(${startLocal} AT TIME ZONE ${timezone})`;
       const endExclusive = sql`(${endExclusiveLocal} AT TIME ZONE ${timezone})`;
-      return sql`${usageLedger.createdAt} >= ${start} AND ${usageLedger.createdAt} < ${endExclusive}`;
+      return sql`${createdAtColumn} >= ${start} AND ${createdAtColumn} < ${endExclusive}`;
     }
     case "monthly": {
       const startLocal = sql`DATE_TRUNC('month', ${nowLocal})`;
       const endExclusiveLocal = sql`(${startLocal} + INTERVAL '1 month')`;
       const start = sql`(${startLocal} AT TIME ZONE ${timezone})`;
       const endExclusive = sql`(${endExclusiveLocal} AT TIME ZONE ${timezone})`;
-      return sql`${usageLedger.createdAt} >= ${start} AND ${usageLedger.createdAt} < ${endExclusive}`;
+      return sql`${createdAtColumn} >= ${start} AND ${createdAtColumn} < ${endExclusive}`;
     }
     default:
       return sql`1=1`;
@@ -637,36 +639,60 @@ async function findProviderLeaderboardWithTimezone(
   providerType?: ProviderType,
   includeModelStats?: boolean
 ): Promise<ProviderLeaderboardEntry[]> {
+  const ledgerDateCondition = buildDateCondition(
+    period,
+    timezone,
+    dateRange,
+    sql`ledger.created_at`
+  );
+  const providerBillingEvents = sql`(
+    ${buildProviderBillingEventsQuery({ ledgerCreatedAtCondition: ledgerDateCondition })}
+  ) AS provider_billing_event`;
+  const eventProviderId = sql<number>`provider_billing_event.provider_id`;
+  const eventCost = sql<string>`provider_billing_event.cost_usd`;
+  const eventInputTokens = sql<number>`provider_billing_event.input_tokens`;
+  const eventOutputTokens = sql<number>`provider_billing_event.output_tokens`;
+  const eventCacheCreationTokens = sql<number>`provider_billing_event.cache_creation_input_tokens`;
+  const eventCacheReadTokens = sql<number>`provider_billing_event.cache_read_input_tokens`;
+  const eventCreatedAt = sql`provider_billing_event.created_at`;
+  const eventSuccessRate = sql<number | null>`
+    count(CASE WHEN provider_billing_event.success_rate_outcome = 'success' THEN 1 END)::double precision
+    / NULLIF(
+        count(CASE WHEN provider_billing_event.success_rate_outcome IN ('success', 'failure') THEN 1 END)::double precision,
+        0
+      )
+  `;
+  const eventAvgTtfbMs = sql<number>`COALESCE(
+    avg(provider_billing_event.ttfb_ms)::double precision,
+    0::double precision
+  )`;
+  const eventAvgTokensPerSecond = sql<number>`COALESCE(
+    avg(
+      CASE
+        WHEN provider_billing_event.output_tokens > 0
+          AND provider_billing_event.duration_ms IS NOT NULL
+          AND provider_billing_event.ttfb_ms IS NOT NULL
+          AND provider_billing_event.ttfb_ms < provider_billing_event.duration_ms
+          AND (provider_billing_event.duration_ms - provider_billing_event.ttfb_ms) >= 100
+        THEN provider_billing_event.output_tokens::double precision
+          / ((provider_billing_event.duration_ms - provider_billing_event.ttfb_ms) / 1000.0)
+      END
+    )::double precision,
+    0::double precision
+  )`;
   const whereConditions = [
-    LEDGER_BILLING_CONDITION,
-    buildDateCondition(period, timezone, dateRange),
+    buildDateCondition(period, timezone, dateRange, eventCreatedAt),
     providerType ? eq(providers.providerType, providerType) : undefined,
   ];
 
   const totalRequestsExpr = sql<number>`count(*)::double precision`;
-  const totalCostExpr = sql<string>`COALESCE(sum(${usageLedger.costUsd}), 0)`;
+  const totalCostExpr = sql<string>`COALESCE(sum(${eventCost}), 0)`;
   const totalTokensExpr = sql<number>`COALESCE(
     sum(
-      ${usageLedger.inputTokens} +
-      ${usageLedger.outputTokens} +
-      COALESCE(${usageLedger.cacheCreationInputTokens}, 0) +
-      COALESCE(${usageLedger.cacheReadInputTokens}, 0)
-    )::double precision,
-    0::double precision
-  )`;
-  const successRateExpr = LEDGER_SUCCESS_RATE_EXPR;
-  const avgTtfbMsExpr = sql<number>`COALESCE(avg(${usageLedger.ttfbMs})::double precision, 0::double precision)`;
-  const avgTokensPerSecondExpr = sql<number>`COALESCE(
-    avg(
-      CASE
-        WHEN ${usageLedger.outputTokens} > 0
-          AND ${usageLedger.durationMs} IS NOT NULL
-          AND ${usageLedger.ttfbMs} IS NOT NULL
-          AND ${usageLedger.ttfbMs} < ${usageLedger.durationMs}
-          AND (${usageLedger.durationMs} - ${usageLedger.ttfbMs}) >= 100
-        THEN (${usageLedger.outputTokens}::double precision)
-          / ((${usageLedger.durationMs} - ${usageLedger.ttfbMs}) / 1000.0)
-      END
+      ${eventInputTokens} +
+      ${eventOutputTokens} +
+      COALESCE(${eventCacheCreationTokens}, 0) +
+      COALESCE(${eventCacheReadTokens}, 0)
     )::double precision,
     0::double precision
   )`;
@@ -678,25 +704,25 @@ async function findProviderLeaderboardWithTimezone(
 
   const rankings = await db
     .select({
-      providerId: usageLedger.finalProviderId,
+      providerId: eventProviderId,
       providerName: providers.name,
       totalRequests: totalRequestsExpr,
       totalCost: totalCostExpr,
       totalTokens: totalTokensExpr,
-      successRate: successRateExpr,
-      avgTtfbMs: avgTtfbMsExpr,
-      avgTokensPerSecond: avgTokensPerSecondExpr,
+      successRate: eventSuccessRate,
+      avgTtfbMs: eventAvgTtfbMs,
+      avgTokensPerSecond: eventAvgTokensPerSecond,
     })
-    .from(usageLedger)
+    .from(providerBillingEvents)
     .innerJoin(
       providers,
-      and(sql`${usageLedger.finalProviderId} = ${providers.id}`, isNull(providers.deletedAt))
+      and(sql`${eventProviderId} = ${providers.id}`, isNull(providers.deletedAt))
     )
     .where(
       and(...whereConditions.filter((c): c is NonNullable<(typeof whereConditions)[number]> => !!c))
     )
-    .groupBy(usageLedger.finalProviderId, providers.name)
-    .orderBy(desc(sql`COALESCE(sum(${usageLedger.costUsd}), 0)`));
+    .groupBy(eventProviderId, providers.name)
+    .orderBy(desc(totalCostExpr));
 
   const baseEntries: ProviderLeaderboardEntry[] = rankings.map((entry) => {
     const totalCost = parseFloat(entry.totalCost);
@@ -723,31 +749,31 @@ async function findProviderLeaderboardWithTimezone(
   const billingModelSource = systemSettings.billingModelSource;
   const rawModelField =
     billingModelSource === "original"
-      ? sql<string>`COALESCE(${usageLedger.originalModel}, ${usageLedger.model})`
-      : sql<string>`COALESCE(${usageLedger.model}, ${usageLedger.originalModel})`;
+      ? sql<string>`COALESCE(provider_billing_event.original_model, provider_billing_event.model)`
+      : sql<string>`COALESCE(provider_billing_event.model, provider_billing_event.original_model)`;
   const modelField = sql<string>`NULLIF(TRIM(${rawModelField}), '')`;
 
   const modelRows = await db
     .select({
-      providerId: usageLedger.finalProviderId,
+      providerId: eventProviderId,
       model: modelField,
       totalRequests: totalRequestsExpr,
       totalCost: totalCostExpr,
       totalTokens: totalTokensExpr,
-      successRate: successRateExpr,
-      avgTtfbMs: avgTtfbMsExpr,
-      avgTokensPerSecond: avgTokensPerSecondExpr,
+      successRate: eventSuccessRate,
+      avgTtfbMs: eventAvgTtfbMs,
+      avgTokensPerSecond: eventAvgTokensPerSecond,
     })
-    .from(usageLedger)
+    .from(providerBillingEvents)
     .innerJoin(
       providers,
-      and(sql`${usageLedger.finalProviderId} = ${providers.id}`, isNull(providers.deletedAt))
+      and(sql`${eventProviderId} = ${providers.id}`, isNull(providers.deletedAt))
     )
     .where(
       and(...whereConditions.filter((c): c is NonNullable<(typeof whereConditions)[number]> => !!c))
     )
-    .groupBy(usageLedger.finalProviderId, modelField)
-    .orderBy(desc(sql`COALESCE(sum(${usageLedger.costUsd}), 0)`), desc(sql`count(*)`));
+    .groupBy(eventProviderId, modelField)
+    .orderBy(desc(totalCostExpr), desc(sql`count(*)`));
 
   const modelStatsByProvider = new Map<number, ModelProviderStat[]>();
   for (const row of modelRows) {

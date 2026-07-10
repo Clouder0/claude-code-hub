@@ -21,6 +21,7 @@ import type { AllowedModelRuleInput, ProviderModelRedirectRule, ProviderType } f
 import type { FilterOperation } from "@/lib/request-filter-types";
 import type { IpExtractionConfig } from "@/types/ip-extraction";
 import type { AuditCategory } from "@/types/audit-log";
+import type { CacheWriteAccounting } from "@/lib/billing/openai-usage-accounting";
 
 // Enums
 export const dailyResetModeEnum = pgEnum('daily_reset_mode', ['fixed', 'rolling']);
@@ -504,7 +505,13 @@ export const messageRequest = pgTable('message_request', {
 
   // Token 使用信息
   inputTokens: bigint('input_tokens', { mode: 'number' }),
+  // 上游 usage 观测到的总 input，拆桶前保留用于计费审计
+  observedInputTokens: bigint('observed_input_tokens', { mode: 'number' }),
   outputTokens: bigint('output_tokens', { mode: 'number' }),
+  // 上游原始 cache-write 观测；NULL 与显式 0 必须可区分
+  cacheWriteTokensReported: bigint('cache_write_tokens_reported', { mode: 'number' }),
+  cacheWriteAccounting: varchar('cache_write_accounting', { length: 64 })
+    .$type<CacheWriteAccounting>(),
   ttfbMs: integer('ttfb_ms'),
   cacheCreationInputTokens: bigint('cache_creation_input_tokens', { mode: 'number' }),
   cacheReadInputTokens: bigint('cache_read_input_tokens', { mode: 'number' }),
@@ -1052,8 +1059,13 @@ export const usageLedger = pgTable('usage_ledger', {
   costUsd: numeric('cost_usd', { precision: 21, scale: 15 }).default('0'),
   costMultiplier: numeric('cost_multiplier', { precision: 10, scale: 4 }),
   groupCostMultiplier: numeric('group_cost_multiplier', { precision: 10, scale: 4 }),
+  costBreakdown: jsonb('cost_breakdown').$type<StoredCostBreakdown>(),
   inputTokens: bigint('input_tokens', { mode: 'number' }),
+  observedInputTokens: bigint('observed_input_tokens', { mode: 'number' }),
   outputTokens: bigint('output_tokens', { mode: 'number' }),
+  cacheWriteTokensReported: bigint('cache_write_tokens_reported', { mode: 'number' }),
+  cacheWriteAccounting: varchar('cache_write_accounting', { length: 64 })
+    .$type<CacheWriteAccounting>(),
   cacheCreationInputTokens: bigint('cache_creation_input_tokens', { mode: 'number' }),
   cacheReadInputTokens: bigint('cache_read_input_tokens', { mode: 'number' }),
   cacheCreation5mInputTokens: bigint('cache_creation_5m_input_tokens', { mode: 'number' }),
@@ -1061,6 +1073,8 @@ export const usageLedger = pgTable('usage_ledger', {
   cacheTtlApplied: varchar('cache_ttl_applied', { length: 10 }),
   context1mApplied: boolean('context_1m_applied').default(false),
   swapCacheTtlApplied: boolean('swap_cache_ttl_applied').default(false),
+  specialSettings: jsonb('special_settings').$type<SpecialSetting[]>(),
+  hedgeLosers: jsonb('hedge_losers').$type<HedgeLoserBilling[]>(),
   durationMs: integer('duration_ms'),
   ttfbMs: integer('ttfb_ms'),
   // 客户端 IP（从 message_request 拷贝；永久保留，避免被清理任务删除）
