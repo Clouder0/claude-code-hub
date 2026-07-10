@@ -40,12 +40,6 @@ export async function DashboardLeaderboardSection({
   locale: string;
 }) {
   const systemSettings = await getCachedSystemSettings();
-  const canViewLeaderboard = isAdmin || systemSettings.allowGlobalUsageView;
-
-  if (!canViewLeaderboard) {
-    return null;
-  }
-
   const t = await getTranslations({ locale, namespace: "dashboard" });
 
   return (
@@ -59,11 +53,7 @@ export async function DashboardLeaderboardSection({
           </Button>
         </Link>
       </div>
-      <TodayLeaderboard
-        currencyCode={systemSettings.currencyDisplay}
-        isAdmin={isAdmin}
-        allowGlobalUsageView={systemSettings.allowGlobalUsageView}
-      />
+      <TodayLeaderboard currencyCode={systemSettings.currencyDisplay} isAdmin={isAdmin} />
     </div>
   );
 }

@@ -35,7 +35,6 @@ const REFRESH_INTERVAL = 5000;
 interface DashboardBentoProps {
   isAdmin: boolean;
   currencyCode: CurrencyCode;
-  allowGlobalUsageView: boolean;
   enableHighConcurrencyMode: boolean;
   initialStatistics?: UserStatisticsData;
   initialOverview?: OverviewData;
@@ -119,7 +118,6 @@ function calcPercentageChange(current: number, previous: number): number {
 export function DashboardBento({
   isAdmin,
   currencyCode,
-  allowGlobalUsageView,
   enableHighConcurrencyMode,
   initialStatistics,
   initialOverview,
@@ -161,7 +159,7 @@ export function DashboardBento({
   >({
     queryKey: ["leaderboard", "user"],
     queryFn: () => fetchLeaderboard("user"),
-    enabled: isAdmin || allowGlobalUsageView,
+    enabled: true,
     staleTime: 60_000,
   });
 
@@ -170,7 +168,7 @@ export function DashboardBento({
   >({
     queryKey: ["leaderboard", "provider"],
     queryFn: () => fetchLeaderboard("provider"),
-    enabled: isAdmin || allowGlobalUsageView,
+    enabled: isAdmin,
     staleTime: 60_000,
   });
 
@@ -179,7 +177,7 @@ export function DashboardBento({
   >({
     queryKey: ["leaderboard", "model"],
     queryFn: () => fetchLeaderboard("model"),
-    enabled: isAdmin || allowGlobalUsageView,
+    enabled: isAdmin,
     staleTime: 60_000,
   });
 
@@ -214,8 +212,6 @@ export function DashboardBento({
       })),
     [sessions]
   );
-
-  const canViewLeaderboard = isAdmin || allowGlobalUsageView;
 
   return (
     <div className="space-y-6">
@@ -280,26 +276,28 @@ export function DashboardBento({
       )}
 
       {/* Section 3: Leaderboards */}
-      {canViewLeaderboard && (
-        <div
-          data-testid={isAdmin ? "dashboard-home-layout" : undefined}
-          className={cn(
-            "grid gap-6",
-            isAdmin && !enableHighConcurrencyMode
-              ? "grid-cols-1 sm:grid-cols-2 lg:grid-cols-[1fr_1fr_1fr_280px]"
-              : "grid-cols-1 sm:grid-cols-2 lg:grid-cols-3"
-          )}
-        >
-          <LeaderboardCard
-            title={tl("userRankings")}
-            entries={userLeaderboard}
-            currencyCode={currencyCode}
-            isLoading={userLeaderboardLoading}
-            emptyText={tl("noData")}
-            viewAllHref="/dashboard/leaderboard"
-            maxItems={3}
-            accentColor="primary"
-          />
+      <div
+        data-testid={isAdmin ? "dashboard-home-layout" : undefined}
+        className={cn(
+          "grid gap-6",
+          isAdmin
+            ? enableHighConcurrencyMode
+              ? "grid-cols-1 sm:grid-cols-2 lg:grid-cols-3"
+              : "grid-cols-1 sm:grid-cols-2 lg:grid-cols-[1fr_1fr_1fr_280px]"
+            : "grid-cols-1"
+        )}
+      >
+        <LeaderboardCard
+          title={tl("userRankings")}
+          entries={userLeaderboard}
+          currencyCode={currencyCode}
+          isLoading={userLeaderboardLoading}
+          emptyText={tl("noData")}
+          viewAllHref="/dashboard/leaderboard"
+          maxItems={3}
+          accentColor="primary"
+        />
+        {isAdmin && (
           <LeaderboardCard
             title={tl("providerRankings")}
             entries={providerLeaderboard}
@@ -310,6 +308,8 @@ export function DashboardBento({
             maxItems={3}
             accentColor="purple"
           />
+        )}
+        {isAdmin && (
           <LeaderboardCard
             title={tl("modelRankings")}
             entries={modelLeaderboard}
@@ -320,11 +320,11 @@ export function DashboardBento({
             maxItems={3}
             accentColor="blue"
           />
-          {isAdmin && !enableHighConcurrencyMode && (
-            <LiveSessionsPanel sessions={sessionsWithActivity} isLoading={sessionsLoading} />
-          )}
-        </div>
-      )}
+        )}
+        {isAdmin && !enableHighConcurrencyMode && (
+          <LiveSessionsPanel sessions={sessionsWithActivity} isLoading={sessionsLoading} />
+        )}
+      </div>
     </div>
   );
 }

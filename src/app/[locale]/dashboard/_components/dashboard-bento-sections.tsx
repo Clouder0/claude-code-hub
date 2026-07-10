@@ -22,7 +22,6 @@ export async function DashboardBentoSection({ isAdmin }: DashboardBentoSectionPr
     <DashboardBento
       isAdmin={isAdmin}
       currencyCode={systemSettings.currencyDisplay}
-      allowGlobalUsageView={systemSettings.allowGlobalUsageView}
       enableHighConcurrencyMode={systemSettings.enableHighConcurrencyMode}
       initialStatistics={statistics.ok ? statistics.data : undefined}
       initialOverview={overviewResult.ok ? overviewResult.data : undefined}

@@ -11,6 +11,7 @@ import { NextIntlClientProvider } from "next-intl";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { DashboardBento } from "@/app/[locale]/dashboard/_components/bento/dashboard-bento";
 import { DashboardMain } from "@/app/[locale]/dashboard/_components/dashboard-main";
+import { TodayLeaderboard } from "@/app/[locale]/dashboard/_components/today-leaderboard";
 import type { OverviewData } from "@/actions/overview";
 import type { UserStatisticsData } from "@/types/statistics";
 
@@ -41,7 +42,9 @@ vi.mock("@/app/[locale]/dashboard/_components/bento/live-sessions-panel", () => 
 }));
 
 vi.mock("@/app/[locale]/dashboard/_components/bento/leaderboard-card", () => ({
-  LeaderboardCard: () => <div data-testid="leaderboard-card" />,
+  LeaderboardCard: ({ title }: { title: string }) => (
+    <div data-testid="leaderboard-card" data-title={title} />
+  ),
 }));
 
 vi.mock("@/app/[locale]/dashboard/_components/bento/statistics-chart-card", () => ({
@@ -209,9 +212,9 @@ describe("DashboardBento admin layout", () => {
       <DashboardBento
         isAdmin={true}
         currencyCode="USD"
-        allowGlobalUsageView={false}
         enableHighConcurrencyMode={true}
         initialStatistics={mockStatisticsData}
+        initialOverview={mockOverviewData}
       />
     );
     await flushPromises();
@@ -231,14 +234,38 @@ describe("DashboardBento admin layout", () => {
     unmount();
   });
 
+  test("normal Web users request and render only the user cost leaderboard", async () => {
+    const { container, unmount } = renderWithProviders(
+      <DashboardBento
+        isAdmin={false}
+        currencyCode="USD"
+        enableHighConcurrencyMode={false}
+        initialStatistics={mockStatisticsData}
+        initialOverview={mockOverviewData}
+      />
+    );
+
+    await vi.waitFor(() => {
+      expect(vi.mocked(fetch)).toHaveBeenCalled();
+    });
+
+    const urls = vi.mocked(fetch).mock.calls.map(([url]) => String(url));
+    expect(urls.some((url) => url.includes("scope=user"))).toBe(true);
+    expect(urls.some((url) => url.includes("scope=provider"))).toBe(false);
+    expect(urls.some((url) => url.includes("scope=model"))).toBe(false);
+    expect(container.querySelectorAll('[data-testid="leaderboard-card"]')).toHaveLength(1);
+
+    unmount();
+  });
+
   test("renders active sessions metric and live sessions panel in normal mode", async () => {
     const { container, unmount } = renderWithProviders(
       <DashboardBento
         isAdmin={true}
         currencyCode="USD"
-        allowGlobalUsageView={false}
         enableHighConcurrencyMode={false}
         initialStatistics={mockStatisticsData}
+        initialOverview={mockOverviewData}
       />
     );
     await flushPromises();
@@ -251,6 +278,25 @@ describe("DashboardBento admin layout", () => {
 
     const text = container.textContent ?? "";
     expect(text).toContain("Active Sessions");
+
+    unmount();
+  });
+});
+
+describe("TodayLeaderboard scope gating", () => {
+  test("normal Web users never request or render provider/model rankings", async () => {
+    const { container, unmount } = renderWithProviders(
+      <TodayLeaderboard currencyCode="USD" isAdmin={false} />
+    );
+
+    await vi.waitFor(() => {
+      expect(container.querySelectorAll('[role="region"]')).toHaveLength(1);
+    });
+
+    const urls = vi.mocked(fetch).mock.calls.map(([url]) => String(url));
+    expect(urls).toEqual([expect.stringContaining("scope=user")]);
+    expect(container.textContent).not.toContain(dashboardMessages.leaderboard.providerRankings);
+    expect(container.textContent).not.toContain(dashboardMessages.leaderboard.modelRankings);
 
     unmount();
   });

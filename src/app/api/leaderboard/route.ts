@@ -1,5 +1,5 @@
 import { type NextRequest, NextResponse } from "next/server";
-import { getSession } from "@/lib/auth";
+import { getSession, hasAdminAuthority } from "@/lib/auth";
 import { logger } from "@/lib/logger";
 import { getLeaderboardWithCache } from "@/lib/redis";
 import type {
@@ -38,7 +38,7 @@ export const runtime = "nodejs";
  * 当 scope=providerCacheHitRate 时，可选 providerType=claude|claude-auth|codex|gemini|gemini-cli|openai-compatible
  * 当 scope=provider 时，可选 includeModelStats=true|1，返回供应商下各模型的拆分数据
  *
- * 需要认证，普通用户需要 allowGlobalUsageView 权限
+ * 需要完整 Web 会话；普通用户只能查看未筛选的用户成本聚合榜
  * 实时计算 + Redis 乐观缓存（60 秒 TTL）
  */
 export async function GET(request: NextRequest) {
@@ -50,25 +50,21 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: "未登录" }, { status: 401 });
     }
 
-    // 获取系统配置
-    const systemSettings = await getSystemSettings();
-
-    // 检查权限：管理员或开启了全站使用量查看权限
-    const isAdmin = session.user.role === "admin";
-    const hasPermission = isAdmin || systemSettings.allowGlobalUsageView;
+    // 排行榜属于 Web 管理面。只读 key 即使通过 scoped adapter 建立会话也不能访问。
+    const isAdmin = hasAdminAuthority(session);
+    const hasPermission = isAdmin || session.key?.canLoginWebUi === true;
 
     if (!hasPermission) {
       logger.warn("Leaderboard API: Access denied", {
         userId: session.user.id,
         userName: session.user.name,
         isAdmin,
-        allowGlobalUsageView: systemSettings.allowGlobalUsageView,
+        canLoginWebUi: session.key?.canLoginWebUi === true,
       });
-      return NextResponse.json(
-        { error: "无权限访问排行榜，请联系管理员开启全站使用量查看权限" },
-        { status: 403 }
-      );
+      return NextResponse.json({ error: "LEADERBOARD_WEB_ACCESS_REQUIRED" }, { status: 403 });
     }
+
+    const systemSettings = await getSystemSettings();
 
     // 验证参数
     const searchParams = request.nextUrl.searchParams;
@@ -103,6 +99,16 @@ export async function GET(request: NextRequest) {
         },
         { status: 400 }
       );
+    }
+
+    const hasPrivilegedFilters =
+      providerTypeParam !== null ||
+      includeModelStatsParam !== null ||
+      includeUserModelStatsParam !== null ||
+      userTagsParam !== null ||
+      userGroupsParam !== null;
+    if (!isAdmin && (scope !== "user" || hasPrivilegedFilters)) {
+      return NextResponse.json({ error: "LEADERBOARD_ADMIN_SCOPE_REQUIRED" }, { status: 403 });
     }
 
     // 验证自定义日期范围参数
@@ -283,7 +289,7 @@ export async function GET(request: NextRequest) {
     logger.info("Leaderboard API: Access granted", {
       userId: session.user.id,
       userName: session.user.name,
-      isAdmin: session.user.role === "admin",
+      isAdmin,
       period,
       scope,
       dateRange,
@@ -296,10 +302,7 @@ export async function GET(request: NextRequest) {
 
     return NextResponse.json(data, {
       headers: {
-        "Cache-Control":
-          includeUserModelStats || !systemSettings.allowGlobalUsageView
-            ? "private, no-store"
-            : "public, s-maxage=60, stale-while-revalidate=120",
+        "Cache-Control": "private, no-store",
       },
     });
   } catch (error) {

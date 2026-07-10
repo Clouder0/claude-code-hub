@@ -27,7 +27,6 @@ interface NormalizedEntry {
 interface TodayLeaderboardProps {
   currencyCode: CurrencyCode;
   isAdmin: boolean;
-  allowGlobalUsageView: boolean;
 }
 
 function RankBadge({ rank }: { rank: number }) {
@@ -179,11 +178,7 @@ function LeaderboardCard({
   );
 }
 
-export function TodayLeaderboard({
-  currencyCode,
-  isAdmin,
-  allowGlobalUsageView,
-}: TodayLeaderboardProps) {
+export function TodayLeaderboard({ currencyCode, isAdmin }: TodayLeaderboardProps) {
   const t = useTranslations("dashboard.leaderboard");
   const [userEntries, setUserEntries] = useState<NormalizedEntry[]>([]);
   const [providerEntries, setProviderEntries] = useState<NormalizedEntry[]>([]);
@@ -241,8 +236,8 @@ export function TodayLeaderboard({
         setProviderError(null);
         setModelError(null);
 
-        if (isAdmin || allowGlobalUsageView) {
-          // Admin or users with global usage view: fetch all three scopes in parallel
+        if (isAdmin) {
+          // Only effective admins can request provider and model scopes.
           const [userResult, providerResult, modelResult] = await Promise.allSettled([
             fetchScope<LeaderboardEntry>("user"),
             fetchScope<ProviderLeaderboardEntry>("provider"),
@@ -287,7 +282,7 @@ export function TodayLeaderboard({
             setModelEntries([]);
           }
         } else {
-          // Non-admin: only fetch user data
+          // Normal Web users can request only the global user aggregate.
           const userData = await fetchScope<LeaderboardEntry>("user");
           if (cancelled) return;
           setUserEntries(normalize.user(userData));
@@ -310,7 +305,7 @@ export function TodayLeaderboard({
     return () => {
       cancelled = true;
     };
-  }, [allowGlobalUsageView, isAdmin, t]);
+  }, [isAdmin, t]);
 
   const cards = useMemo(() => {
     const list = [
@@ -326,29 +321,19 @@ export function TodayLeaderboard({
         title: t("providerRankings"),
         entries: providerEntries,
         error: providerError,
-        shouldShow: isAdmin || allowGlobalUsageView,
+        shouldShow: isAdmin,
       },
       {
         key: "model",
         title: t("modelRankings"),
         entries: modelEntries,
         error: modelError,
-        shouldShow: isAdmin || allowGlobalUsageView,
+        shouldShow: isAdmin,
       },
     ];
 
     return list.filter((item) => item.shouldShow);
-  }, [
-    allowGlobalUsageView,
-    error,
-    isAdmin,
-    modelEntries,
-    modelError,
-    providerEntries,
-    providerError,
-    t,
-    userEntries,
-  ]);
+  }, [error, isAdmin, modelEntries, modelError, providerEntries, providerError, t, userEntries]);
 
   return (
     <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">

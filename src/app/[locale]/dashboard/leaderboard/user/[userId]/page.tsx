@@ -1,5 +1,5 @@
 import { redirect } from "@/i18n/routing";
-import { getSession } from "@/lib/auth";
+import { getSession, hasAdminAuthority } from "@/lib/auth";
 import { findUserById } from "@/repository/user";
 import { UserInsightsView } from "./_components/user-insights-view";
 
@@ -13,7 +13,7 @@ export default async function UserInsightsPage({
   const { locale, userId: userIdStr } = await params;
   const session = await getSession();
 
-  if (!session || session.user.role !== "admin") {
+  if (!session || !hasAdminAuthority(session)) {
     return redirect({ href: "/dashboard/leaderboard", locale });
   }
 

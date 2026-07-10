@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   getSession: vi.fn(),
+  hasAdminAuthority: vi.fn(),
   getLeaderboardWithCache: vi.fn(),
   getSystemSettings: vi.fn(),
   formatCurrency: vi.fn(),
@@ -9,6 +10,7 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("@/lib/auth", () => ({
   getSession: mocks.getSession,
+  hasAdminAuthority: mocks.hasAdminAuthority,
 }));
 
 vi.mock("@/repository/system-config", () => ({
@@ -27,6 +29,9 @@ describe("GET /api/leaderboard", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.formatCurrency.mockImplementation((val: number) => String(val));
+    mocks.hasAdminAuthority.mockImplementation(
+      (session: { user?: { role?: string } } | null) => session?.user?.role === "admin"
+    );
     mocks.getSystemSettings.mockResolvedValue({
       currencyDisplay: "USD",
       allowGlobalUsageView: true,
@@ -418,7 +423,10 @@ describe("GET /api/leaderboard", () => {
     });
 
     it("non-admin + includeUserModelStats=1 returns 403", async () => {
-      mocks.getSession.mockResolvedValue({ user: { id: 2, name: "user", role: "user" } });
+      mocks.getSession.mockResolvedValue({
+        user: { id: 2, name: "user", role: "user" },
+        key: { canLoginWebUi: true },
+      });
 
       const { GET } = await import("@/app/api/leaderboard/route");
       const url =
@@ -427,11 +435,14 @@ describe("GET /api/leaderboard", () => {
 
       expect(response.status).toBe(403);
       const body = await response.json();
-      expect(body.error).toBe("INCLUDE_USER_MODEL_STATS_ADMIN_REQUIRED");
+      expect(body.error).toBe("LEADERBOARD_ADMIN_SCOPE_REQUIRED");
     });
 
     it("non-admin with allowGlobalUsageView + includeUserModelStats=1 returns 403", async () => {
-      mocks.getSession.mockResolvedValue({ user: { id: 2, name: "user", role: "user" } });
+      mocks.getSession.mockResolvedValue({
+        user: { id: 2, name: "user", role: "user" },
+        key: { canLoginWebUi: true },
+      });
       mocks.getSystemSettings.mockResolvedValue({
         currencyDisplay: "USD",
         allowGlobalUsageView: true,
@@ -444,7 +455,7 @@ describe("GET /api/leaderboard", () => {
 
       expect(response.status).toBe(403);
       const body = await response.json();
-      expect(body.error).toBe("INCLUDE_USER_MODEL_STATS_ADMIN_REQUIRED");
+      expect(body.error).toBe("LEADERBOARD_ADMIN_SCOPE_REQUIRED");
     });
 
     it("admin + userCacheHitRate + includeUserModelStats=1 forwards includeModelStats to cache", async () => {
@@ -485,5 +496,91 @@ describe("GET /api/leaderboard", () => {
       expect(body[0].modelStats).toHaveLength(1);
       expect(body[0].modelStats[0]).not.toHaveProperty("totalCostFormatted");
     });
+  });
+
+  it("allows normal Web users to read the user aggregate even when the legacy switch is off", async () => {
+    mocks.getSession.mockResolvedValue({
+      user: { id: 2, name: "user", role: "user" },
+      key: { canLoginWebUi: true },
+    });
+    mocks.getSystemSettings.mockResolvedValue({
+      currencyDisplay: "USD",
+      allowGlobalUsageView: false,
+    });
+
+    const { GET } = await import("@/app/api/leaderboard/route");
+    const response = await GET({
+      nextUrl: new URL("http://localhost/api/leaderboard?scope=user&period=weekly"),
+    } as any);
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("Cache-Control")).toBe("private, no-store");
+    expect(mocks.getLeaderboardWithCache).toHaveBeenCalledWith("weekly", "USD", "user", undefined, {
+      providerType: undefined,
+      userTags: undefined,
+      userGroups: undefined,
+      includeModelStats: false,
+    });
+  });
+
+  it.each([
+    "scope=provider",
+    "scope=model",
+    "scope=userCacheHitRate",
+    "scope=user&providerType=all",
+    "scope=user&includeModelStats=false",
+    "scope=user&includeUserModelStats=false",
+    "scope=user&userTags=vip",
+    "scope=user&userGroups=team-a",
+  ])("rejects privileged non-admin leaderboard query: %s", async (query) => {
+    mocks.getSession.mockResolvedValue({
+      user: { id: 2, name: "user", role: "user" },
+      key: { canLoginWebUi: true },
+    });
+
+    const { GET } = await import("@/app/api/leaderboard/route");
+    const response = await GET({
+      nextUrl: new URL(`http://localhost/api/leaderboard?period=daily&${query}`),
+    } as any);
+
+    expect(response.status).toBe(403);
+    expect(await response.json()).toEqual({ error: "LEADERBOARD_ADMIN_SCOPE_REQUIRED" });
+    expect(mocks.getLeaderboardWithCache).not.toHaveBeenCalled();
+  });
+
+  it("does not trust a stored admin role without effective admin authority", async () => {
+    mocks.getSession.mockResolvedValue({
+      user: { id: 1, name: "admin", role: "admin" },
+      key: { canLoginWebUi: true },
+    });
+    mocks.hasAdminAuthority.mockReturnValue(false);
+
+    const { GET } = await import("@/app/api/leaderboard/route");
+    const response = await GET({
+      nextUrl: new URL("http://localhost/api/leaderboard?scope=provider"),
+    } as any);
+
+    expect(response.status).toBe(403);
+    expect(mocks.getLeaderboardWithCache).not.toHaveBeenCalled();
+  });
+
+  it("rejects read-only key sessions before loading leaderboard data", async () => {
+    mocks.getSession.mockResolvedValue({
+      user: { id: 2, name: "user", role: "user" },
+      key: { canLoginWebUi: false },
+    });
+    mocks.getSystemSettings.mockResolvedValue({
+      currencyDisplay: "USD",
+      allowGlobalUsageView: true,
+    });
+
+    const { GET } = await import("@/app/api/leaderboard/route");
+    const response = await GET({
+      nextUrl: new URL("http://localhost/api/leaderboard?scope=user"),
+    } as any);
+
+    expect(response.status).toBe(403);
+    expect(await response.json()).toEqual({ error: "LEADERBOARD_WEB_ACCESS_REQUIRED" });
+    expect(mocks.getLeaderboardWithCache).not.toHaveBeenCalled();
   });
 });
