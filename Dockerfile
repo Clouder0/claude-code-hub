@@ -12,7 +12,7 @@ ENV NEXT_TELEMETRY_DISABLED=1
 ENV CI=true
 RUN --mount=type=cache,target=/app/.next/cache bun run build
 
-FROM node:22-slim AS runner
+FROM node:26-trixie-slim AS runner
 WORKDIR /app
 ENV NODE_ENV=production
 ENV PORT=3000

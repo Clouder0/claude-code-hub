@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { Request as UndiciRequest } from "undici";
 import type { Provider } from "@/types/provider";
 import {
   buildOpenAIImageLogicalBody,
@@ -454,11 +455,11 @@ describe("openai-image-compat - multipart round-trip", () => {
 
     const serialized = await serializeOpenAIImageMultipartRequest(metadata);
     const reparsed = await parseOpenAIImageMultipartMetadata(
-      new Request("https://proxy.example.com/v1/images/edits", {
+      new UndiciRequest("https://proxy.example.com/v1/images/edits", {
         method: "POST",
         body: serialized.body,
         headers: { "content-type": serialized.contentType ?? "" },
-      }),
+      }) as unknown as Request,
       "/v1/images/edits",
       serialized.contentType
     );

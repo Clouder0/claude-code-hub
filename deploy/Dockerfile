@@ -30,8 +30,8 @@ RUN bun run build
 # 运行阶段：使用 Node.js（避免 Bun 流式响应内存泄漏 Issue #18488）
 # 要求 Node >= 22.15（入站请求体 zstd 解压依赖 node:zlib 原生 zstd，见
 # src/app/v1/_lib/proxy/request-body-codec.ts 与 package.json engines）。
-# node:trixie-slim 基于 Debian Trixie，提供 Node 24+，满足该要求。
-FROM node:trixie-slim AS runner
+# node:26-trixie-slim 基于 Debian Trixie，满足该要求并与本地运行版本一致。
+FROM node:26-trixie-slim AS runner
 ENV NODE_ENV=production
 ENV PORT=3000
 ENV HOST=0.0.0.0
@@ -39,7 +39,7 @@ ENV HOSTNAME=0.0.0.0
 WORKDIR /app
 
 # 安装 PostgreSQL 18 客户端工具（用于数据库备份/恢复功能）和 curl（用于健康检查）
-# node:trixie-slim 基于 Debian Trixie，默认只有 PostgreSQL 17.x
+# node:26-trixie-slim 基于 Debian Trixie，默认只有 PostgreSQL 17.x
 # 使用 PostgreSQL 官方仓库安装 18.x 以匹配 docker-compose 中的 postgres:18
 RUN apt-get update && \
     apt-get install -y --no-install-recommends curl ca-certificates gnupg && \
