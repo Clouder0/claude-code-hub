@@ -83,6 +83,12 @@ function filters(n: number): RequestFilter[] {
   return Array.from({ length: n }, () => buildFilter());
 }
 
+function waitForLoadResolver(
+  getResolver: () => ((value: RequestFilter[]) => void) | undefined
+): Promise<(value: RequestFilter[]) => void> {
+  return vi.waitUntil(getResolver, { timeout: 5_000, interval: 5 });
+}
+
 describe("RequestFilterEngine reload queue", () => {
   afterEach(() => {
     vi.resetModules();
@@ -116,10 +122,10 @@ describe("RequestFilterEngine reload queue", () => {
     const firstReload = requestFilterEngine.reload(); // starts load #1 (pending)
     const secondReload = requestFilterEngine.reload(); // requested mid-flight -> must queue
 
-    // Let the dynamic import inside reload() settle so load #1 actually calls
-    // getActiveRequestFilters (assigning resolveFirstLoad) before we resolve it.
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    resolveFirstLoad?.(filters(1));
+    // A cold Vite transform can take more than one event-loop turn. Wait for the
+    // repository mock to expose its resolver instead of silently skipping it.
+    const resolveFirst = await waitForLoadResolver(() => resolveFirstLoad);
+    resolveFirst(filters(1));
     await Promise.all([firstReload, secondReload]);
 
     // The concurrent reload must NOT be silently dropped: a second DB read runs
@@ -147,8 +153,8 @@ describe("RequestFilterEngine reload queue", () => {
     const firstReload = requestFilterEngine.reload();
     mocks.eventEmitter.emit("requestFiltersUpdated");
 
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    resolveFirstLoad?.(filters(1));
+    const resolveFirst = await waitForLoadResolver(() => resolveFirstLoad);
+    resolveFirst(filters(1));
     await firstReload;
     // Let the queued rerun (kicked by the event handler) settle.
     await new Promise((resolve) => setTimeout(resolve, 0));
@@ -180,8 +186,8 @@ describe("RequestFilterEngine reload queue", () => {
     // Action's awaited reload races in while the first is still loading.
     const awaitedReload = requestFilterEngine.reload();
 
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    resolveFirstLoad?.(filters(1));
+    const resolveFirst = await waitForLoadResolver(() => resolveFirstLoad);
+    resolveFirst(filters(1));
     await awaitedReload;
 
     expect(mocks.getActiveRequestFilters).toHaveBeenCalledTimes(2);
@@ -206,8 +212,8 @@ describe("RequestFilterEngine reload queue", () => {
     const first = requestFilterEngine.reload(false); // starts load #1
     const second = requestFilterEngine.reload(false); // in-flight + queue=false -> reuse
 
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    resolveLoad?.(filters(2));
+    const resolve = await waitForLoadResolver(() => resolveLoad);
+    resolve(filters(2));
     await Promise.all([first, second]);
 
     expect(mocks.getActiveRequestFilters).toHaveBeenCalledTimes(1);
