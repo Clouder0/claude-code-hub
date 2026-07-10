@@ -7,7 +7,6 @@ function sqlToString(sqlObj: unknown): string {
     visited.add(node);
     if (typeof node === "string") return node;
     if (typeof node === "object") {
-      // biome-ignore lint/suspicious/noExplicitAny: test-only structural walk
       const anyNode = node as any;
       if (Array.isArray(anyNode)) return anyNode.map(walk).join("");
       if (anyNode.name && typeof anyNode.name === "string") return anyNode.name;
@@ -109,6 +108,21 @@ describe("addMessageRequestHedgeLoserCost (idempotent + retried direct write)", 
     // 传入无法解析为 Decimal 的值 -> 直接跳过，不写库。
     await addMessageRequestHedgeLoserCost(1, "not-a-number", LOSER);
     expect(update).not.toHaveBeenCalled();
+  });
+
+  test("写入 hedge_losers 前清理 providerName 中的 JSONB 非法字符", async () => {
+    vi.resetModules();
+    const { setArgs } = mockDbWithWhere(async () => []);
+
+    const { addMessageRequestHedgeLoserCost } = await import("@/repository/message");
+    await addMessageRequestHedgeLoserCost(1, "0.01", {
+      ...LOSER,
+      providerName: "bad\u0000provider\u0001name \u{1f600}\ud800",
+    });
+
+    const setSql = sqlToString(setArgs[0]);
+    expect(setSql).not.toContain("\\u0000");
+    expect(setSql).toContain("badprovider name \u{1f600}\uFFFD");
   });
 });
 

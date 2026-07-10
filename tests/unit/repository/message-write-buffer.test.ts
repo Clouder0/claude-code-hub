@@ -143,6 +143,45 @@ describe("message_request 异步批量写入", () => {
     expect(built.sql).toContain("::jsonb");
   });
 
+  it("写入 buffered JSONB 字段前递归清理非法 key、value 和孤立 surrogate", async () => {
+    process.env.MESSAGE_REQUEST_WRITE_MODE = "async";
+
+    const { enqueueMessageRequestUpdate, stopMessageRequestWriteBuffer } = await import(
+      "@/repository/message-write-buffer"
+    );
+    const providerChainEntry: Record<string, unknown> = {
+      id: 1,
+      name: "provider",
+      body: "bad\u0000body\ud800 valid \u{1f600}",
+    };
+    Object.defineProperty(providerChainEntry, "bad\u0000key\udc00", {
+      value: "kept",
+      enumerable: true,
+    });
+
+    enqueueMessageRequestUpdate(8, {
+      providerChain: [providerChainEntry],
+      costBreakdown: {
+        input: "0.01",
+        output: "0.02",
+        cache_creation: "0",
+        cache_read: "0",
+        base_total: "0.03",
+        provider_multiplier: 1,
+        group_multiplier: 1,
+        total: "0.03\u0000",
+      },
+    });
+
+    await stopMessageRequestWriteBuffer();
+
+    const built = toSqlText(executeMock.mock.calls[0]?.[0]);
+    const serializedParams = JSON.stringify(built.params);
+    expect(serializedParams).not.toContain("\\u0000");
+    expect(serializedParams).toContain("badbody\uFFFD valid \u{1f600}");
+    expect(serializedParams).toContain("badkey\uFFFD");
+  });
+
   it("stop 应等待 in-flight flush 完成", async () => {
     process.env.MESSAGE_REQUEST_WRITE_MODE = "async";
 
@@ -236,6 +275,44 @@ describe("message_request 异步批量写入", () => {
     const built = toSqlText(secondQuery);
     expect(built.sql).toContain("duration_ms");
     expect(built.sql).toContain("status_code");
+  });
+
+  it("JSONB poison 记录失败时拆批并保留同批健康记录与 poison 记录的标量字段", async () => {
+    process.env.MESSAGE_REQUEST_WRITE_MODE = "async";
+    process.env.MESSAGE_REQUEST_ASYNC_BATCH_SIZE = "10";
+    const poisonError = new Error("Failed query: update message_request", {
+      cause: new Error("unsupported Unicode escape sequence"),
+    });
+    executeMock.mockRejectedValueOnce(poisonError);
+    executeMock.mockRejectedValueOnce(poisonError);
+    executeMock.mockResolvedValue([]);
+
+    const {
+      enqueueMessageRequestUpdate,
+      flushMessageRequestWriteBuffer,
+      stopMessageRequestWriteBuffer,
+    } = await import("@/repository/message-write-buffer");
+
+    enqueueMessageRequestUpdate(1, {
+      statusCode: 500,
+      providerChain: [{ id: 1, name: "poison" }],
+    });
+    enqueueMessageRequestUpdate(2, { statusCode: 200, durationMs: 12 });
+
+    await flushMessageRequestWriteBuffer();
+    await stopMessageRequestWriteBuffer();
+
+    expect(executeMock).toHaveBeenCalledTimes(4);
+    const queries = executeMock.mock.calls.map(([query]) => toSqlText(query));
+    expect(
+      queries.some(
+        (query) =>
+          query.params.includes(1) &&
+          query.sql.includes("status_code") &&
+          !query.sql.includes("provider_chain")
+      )
+    ).toBe(true);
+    expect(queries.some((query) => query.params.includes(2))).toBe(true);
   });
 
   it("队列溢出时应优先保留带 statusCode 的终态 patch", async () => {

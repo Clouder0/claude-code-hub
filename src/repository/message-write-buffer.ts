@@ -7,6 +7,10 @@ import { getEnvConfig } from "@/lib/config/env.schema";
 import { logger } from "@/lib/logger";
 import type { StoredCostBreakdown } from "@/types/cost-breakdown";
 import type { CreateMessageRequestData } from "@/types/message";
+import {
+  sanitizeMessageRequestJsonbPatch,
+  sanitizeMessageRequestJsonbValue,
+} from "./message-request-jsonb-sanitizer";
 
 export type MessageRequestUpdatePatch = {
   durationMs?: number;
@@ -74,6 +78,52 @@ const COLUMN_MAP: Record<keyof MessageRequestUpdatePatch, string> = {
   costBreakdown: "cost_breakdown",
 };
 
+const JSONB_KEYS = new Set<keyof MessageRequestUpdatePatch>([
+  "providerChain",
+  "specialSettings",
+  "costBreakdown",
+]);
+
+const POSTGRES_JSONB_INPUT_ERROR_PATTERNS = [
+  "unsupported unicode escape sequence",
+  "\\u0000 cannot be converted to text",
+  "invalid input syntax for type json",
+  "unicode low surrogate must follow a high surrogate",
+  "unicode high surrogate must be followed by a low surrogate",
+];
+
+function stripJsonbFields(patch: MessageRequestUpdatePatch): MessageRequestUpdatePatch {
+  const stripped = { ...patch };
+  for (const key of JSONB_KEYS) {
+    delete stripped[key];
+  }
+  return stripped;
+}
+
+function hasUpdateFields(patch: MessageRequestUpdatePatch): boolean {
+  return Object.values(patch).some((value) => value !== undefined);
+}
+
+function isJsonbInputError(error: unknown): boolean {
+  const seen = new Set<unknown>();
+  let current = error;
+
+  while (current !== null && current !== undefined && !seen.has(current)) {
+    seen.add(current);
+    const message = (current instanceof Error ? current.message : String(current)).toLowerCase();
+    if (POSTGRES_JSONB_INPUT_ERROR_PATTERNS.some((pattern) => message.includes(pattern))) {
+      return true;
+    }
+
+    if (typeof current !== "object" || !("cause" in current)) {
+      break;
+    }
+    current = current.cause;
+  }
+
+  return false;
+}
+
 function loadWriterConfig(): WriterConfig {
   const env = getEnvConfig();
   return {
@@ -118,7 +168,7 @@ export function buildBatchUpdateSql(updates: MessageRequestUpdateRecord[]): SQL 
           cases.push(sql`WHEN ${update.id} THEN NULL`);
           continue;
         }
-        const json = JSON.stringify(value);
+        const json = JSON.stringify(sanitizeMessageRequestJsonbValue(value));
         cases.push(sql`WHEN ${update.id} THEN ${json}::jsonb`);
         continue;
       }
@@ -208,7 +258,7 @@ class MessageRequestWriteBuffer {
   enqueue(id: number, patch: MessageRequestUpdatePatch): void {
     const existing = this.pending.get(id) ?? {};
     // existing is older, patch is newer -> for replacement fields newer wins.
-    this.pending.set(id, mergePatch(existing, patch));
+    this.pending.set(id, mergePatch(existing, sanitizeMessageRequestJsonbPatch(patch)));
 
     // 队列上限保护：DB 异常时避免无限增长导致 OOM
     if (this.pending.size > this.config.maxPending) {
@@ -309,6 +359,25 @@ class MessageRequestWriteBuffer {
           try {
             await db.execute(query);
           } catch (error) {
+            if (isJsonbInputError(error)) {
+              const retryableRecords = await this.flushJsonbPoisonBatch(batch, error);
+              if (retryableRecords === 0) {
+                logger.warn("[MessageRequestWriteBuffer] JSONB poison batch isolated", {
+                  pending: this.pending.size,
+                  batchSize: batch.length,
+                });
+                continue;
+              }
+
+              logger.error("[MessageRequestWriteBuffer] JSONB batch has retryable failures", {
+                error: error instanceof Error ? error.message : String(error),
+                pending: this.pending.size,
+                batchSize: batch.length,
+                retryableRecords,
+              });
+              break;
+            }
+
             // 失败重试：将 batch 放回队列
             // 合并策略：保留“更新更晚”的字段（existing 优先），避免覆盖新数据。
             for (const item of batch) {
@@ -336,6 +405,67 @@ class MessageRequestWriteBuffer {
     });
 
     await this.flushInFlight;
+  }
+
+  private async flushJsonbPoisonBatch(
+    batch: MessageRequestUpdateRecord[],
+    originalError: unknown
+  ): Promise<number> {
+    logger.warn("[MessageRequestWriteBuffer] JSONB batch failed, isolating records", {
+      error: originalError instanceof Error ? originalError.message : String(originalError),
+      batchSize: batch.length,
+    });
+
+    let retryableRecords = 0;
+
+    for (const item of batch) {
+      const singleQuery = buildBatchUpdateSql([item]);
+      if (!singleQuery) {
+        continue;
+      }
+
+      try {
+        await db.execute(singleQuery);
+        continue;
+      } catch (singleError) {
+        if (!isJsonbInputError(singleError)) {
+          const existing = this.pending.get(item.id) ?? {};
+          this.pending.set(item.id, mergePatch(item.patch, existing));
+          retryableRecords += 1;
+          continue;
+        }
+      }
+
+      const fallbackPatch = stripJsonbFields(item.patch);
+      if (!hasUpdateFields(fallbackPatch)) {
+        logger.warn("[MessageRequestWriteBuffer] Dropping poison JSONB-only update", {
+          id: item.id,
+        });
+        continue;
+      }
+
+      const fallbackQuery = buildBatchUpdateSql([{ id: item.id, patch: fallbackPatch }]);
+      if (!fallbackQuery) {
+        continue;
+      }
+
+      try {
+        await db.execute(fallbackQuery);
+        logger.warn("[MessageRequestWriteBuffer] Persisted update without poison JSONB fields", {
+          id: item.id,
+        });
+      } catch (fallbackError) {
+        const existing = this.pending.get(item.id) ?? {};
+        this.pending.set(item.id, mergePatch(fallbackPatch, existing));
+        retryableRecords += 1;
+        logger.error("[MessageRequestWriteBuffer] Fallback scalar update failed", {
+          id: item.id,
+          error: fallbackError instanceof Error ? fallbackError.message : String(fallbackError),
+        });
+      }
+    }
+
+    return retryableRecords;
   }
 
   async stop(): Promise<void> {

@@ -17,6 +17,10 @@ import type { SpecialSetting } from "@/types/special-settings";
 import { LEDGER_BILLING_CONDITION } from "./_shared/ledger-conditions";
 import { EXCLUDE_WARMUP_CONDITION } from "./_shared/message-request-conditions";
 import { toMessageRequest } from "./_shared/transformers";
+import {
+  sanitizeMessageRequestJsonbPatch,
+  sanitizeMessageRequestJsonbValue,
+} from "./message-request-jsonb-sanitizer";
 import { enqueueMessageRequestUpdate } from "./message-write-buffer";
 
 type PublicStatusRequestSeed = {
@@ -224,7 +228,10 @@ export async function createMessageRequest(
     clientIp: data.client_ip, // 客户端 IP（IPv4/IPv6）
     endpoint: data.endpoint, // 请求端点（可为空）
     messagesCount: data.messages_count, // Messages 数量
-    specialSettings: data.special_settings ?? undefined, // 特殊设置（审计/展示）
+    specialSettings:
+      data.special_settings !== undefined && data.special_settings !== null
+        ? sanitizeMessageRequestJsonbValue(data.special_settings)
+        : undefined, // 特殊设置（审计/展示）
     cacheTtlApplied: data.cache_ttl_applied,
     cacheCreationInputTokens: data.cache_creation_input_tokens,
     cacheCreation5mInputTokens: data.cache_creation_5m_input_tokens,
@@ -326,11 +333,14 @@ export async function updateMessageRequestCostWithBreakdown(
   if (!formattedCost) {
     return;
   }
+  const sanitizedCostBreakdown = costBreakdown
+    ? sanitizeMessageRequestJsonbValue(costBreakdown)
+    : undefined;
 
   if (getEnvConfig().MESSAGE_REQUEST_WRITE_MODE === "async") {
     enqueueMessageRequestUpdate(id, {
       costUsd: formattedCost,
-      ...(costBreakdown ? { costBreakdown } : {}),
+      ...(sanitizedCostBreakdown ? { costBreakdown: sanitizedCostBreakdown } : {}),
     });
     return;
   }
@@ -339,7 +349,7 @@ export async function updateMessageRequestCostWithBreakdown(
     .update(messageRequest)
     .set({
       costUsd: formattedCost,
-      ...(costBreakdown ? { costBreakdown } : {}),
+      ...(sanitizedCostBreakdown ? { costBreakdown: sanitizedCostBreakdown } : {}),
       updatedAt: new Date(),
     })
     .where(eq(messageRequest.id, id));
@@ -369,6 +379,9 @@ export async function updateMessageRequestWinnerCost(
   if (!formattedCost) {
     return;
   }
+  const sanitizedCostBreakdown = costBreakdown
+    ? sanitizeMessageRequestJsonbValue(costBreakdown)
+    : undefined;
 
   const MAX_ATTEMPTS = 3;
   let lastError: unknown;
@@ -378,7 +391,7 @@ export async function updateMessageRequestWinnerCost(
         .update(messageRequest)
         .set({
           costUsd: sql`${formattedCost}::numeric + COALESCE((SELECT SUM((entry->>'costUsd')::numeric) FROM jsonb_array_elements(COALESCE(${messageRequest.hedgeLosers}, '[]'::jsonb)) AS entry), 0)`,
-          ...(costBreakdown ? { costBreakdown } : {}),
+          ...(sanitizedCostBreakdown ? { costBreakdown: sanitizedCostBreakdown } : {}),
           updatedAt: new Date(),
         })
         .where(eq(messageRequest.id, id));
@@ -423,7 +436,8 @@ export async function addMessageRequestHedgeLoserCost(
     return;
   }
 
-  const loserJson = JSON.stringify([loserEntry]);
+  const sanitizedLoserEntry = sanitizeMessageRequestJsonbValue(loserEntry);
+  const loserJson = JSON.stringify([sanitizedLoserEntry]);
   // Partial-match dedup key: jsonb @> matches array elements containing these fields.
   const guardJson = JSON.stringify([
     { providerId: loserEntry.providerId, attemptNumber: loserEntry.attemptNumber },
@@ -485,13 +499,14 @@ export async function updateMessageRequestDetails(
     specialSettings?: CreateMessageRequestData["special_settings"]; // 特殊设置（审计/展示）
   }
 ): Promise<void> {
+  const sanitizedDetails = sanitizeMessageRequestJsonbPatch(details);
   const shouldQueuePublicStatusRollup =
-    details.providerChain !== undefined && details.statusCode !== undefined;
+    sanitizedDetails.providerChain !== undefined && sanitizedDetails.statusCode !== undefined;
 
   if (getEnvConfig().MESSAGE_REQUEST_WRITE_MODE === "async") {
-    enqueueMessageRequestUpdate(id, details);
+    enqueueMessageRequestUpdate(id, sanitizedDetails);
     if (shouldQueuePublicStatusRollup) {
-      queuePublicStatusRollupForFinalDetails(id, details);
+      queuePublicStatusRollupForFinalDetails(id, sanitizedDetails);
     }
     return;
   }
@@ -527,8 +542,8 @@ export async function updateMessageRequestDetails(
   if (details.cacheTtlApplied !== undefined) {
     updateData.cacheTtlApplied = details.cacheTtlApplied;
   }
-  if (details.providerChain !== undefined) {
-    updateData.providerChain = details.providerChain;
+  if (sanitizedDetails.providerChain !== undefined) {
+    updateData.providerChain = sanitizedDetails.providerChain;
   }
   if (details.errorMessage !== undefined) {
     updateData.errorMessage = details.errorMessage;
@@ -554,13 +569,13 @@ export async function updateMessageRequestDetails(
   if (details.swapCacheTtlApplied !== undefined) {
     updateData.swapCacheTtlApplied = details.swapCacheTtlApplied;
   }
-  if (details.specialSettings !== undefined) {
-    updateData.specialSettings = details.specialSettings;
+  if (sanitizedDetails.specialSettings !== undefined) {
+    updateData.specialSettings = sanitizedDetails.specialSettings;
   }
 
   await db.update(messageRequest).set(updateData).where(eq(messageRequest.id, id));
   if (shouldQueuePublicStatusRollup) {
-    queuePublicStatusRollupForFinalDetails(id, details);
+    queuePublicStatusRollupForFinalDetails(id, sanitizedDetails);
   }
 }
 
