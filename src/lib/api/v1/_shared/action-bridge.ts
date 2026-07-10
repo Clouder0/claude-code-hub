@@ -16,6 +16,7 @@ export async function callAction<T>(
     auth?.session != null
       ? await (await import("@/lib/auth")).runWithAuthSession(auth.session, invoke, {
           allowReadOnlyAccess: auth.allowReadOnlyAccess,
+          adminAuthority: auth.adminAuthority,
         })
       : await invoke();
 

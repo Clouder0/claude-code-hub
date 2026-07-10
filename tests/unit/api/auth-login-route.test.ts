@@ -19,6 +19,8 @@ vi.mock("@/lib/auth", () => ({
   getSessionTokenMode: mockGetSessionTokenMode,
   getLoginRedirectTarget: mockGetLoginRedirectTarget,
   createSignedAdminAuthToken: vi.fn().mockResolvedValue("cch_admin_session_v1.payload.signature"),
+  hasAdminAuthority: (session: { user?: { id?: number } } | null | undefined) =>
+    session?.user?.id === -1,
   toKeyFingerprint: vi.fn().mockResolvedValue("sha256:fake"),
   withNoStoreHeaders: <T>(res: T): T => {
     (res as any).headers.set("Cache-Control", "no-store, no-cache, must-revalidate");
@@ -77,7 +79,7 @@ const fakeSession = {
     description: "desc",
     role: "user" as const,
   },
-  key: { canLoginWebUi: true },
+  key: { id: -1, canLoginWebUi: true },
 };
 
 const adminSession = {

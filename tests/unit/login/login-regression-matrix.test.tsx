@@ -19,6 +19,8 @@ vi.mock("@/lib/auth", () => ({
   setAuthCookie: mockSetAuthCookie,
   getSessionTokenMode: mockGetSessionTokenMode,
   getLoginRedirectTarget: mockGetLoginRedirectTarget,
+  hasAdminAuthority: (session: { user?: { id?: number } } | null | undefined) =>
+    session?.user?.id === -1,
   createSignedAdminAuthToken: vi.fn().mockResolvedValue("cch_admin_session_v1.payload.signature"),
   toKeyFingerprint: vi.fn().mockResolvedValue("sha256:mock"),
   withNoStoreHeaders: (res: any) => {
@@ -66,7 +68,7 @@ const adminSession = {
     description: "Environment admin session",
     role: "admin" as const,
   },
-  key: { canLoginWebUi: true },
+  key: { id: -1, canLoginWebUi: true },
 };
 
 const dashboardUserSession = {

@@ -1,4 +1,6 @@
-import { describe, expect, test, vi } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
+import { CSRF_HEADER } from "@/lib/api/v1/_shared/constants";
+import { createCsrfToken } from "@/lib/api/v1/_shared/csrf";
 import "@/lib/auth-session-storage.node";
 
 const redisReadMock = vi.hoisted(() => vi.fn());
@@ -26,6 +28,11 @@ vi.mock("next/headers", () => ({
 }));
 
 describe("Action Adapter：会话透传", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    redisReadMock.mockReset();
+  });
+
   test("requiresAuth=true：action 内 getSession() 应返回注入的 session", async () => {
     vi.resetModules();
 
@@ -129,8 +136,71 @@ describe("Action Adapter：会话透传", () => {
     });
   });
 
-  test("legacy admin 路由默认保持 bearer 形式的用户 API Key 兼容", async () => {
+  test("非 admin legacy action 将数据库管理员 key 注入为普通 Web 身份", async () => {
     vi.resetModules();
+    vi.stubEnv("ENABLE_API_KEY_ADMIN_ACCESS", "false");
+
+    const mockSession = {
+      user: { id: 123, name: "admin", role: "admin" as const, isEnabled: true },
+      key: {
+        id: 1,
+        userId: 123,
+        name: "admin-key",
+        key: "legacy-admin-api-key",
+        isEnabled: true,
+        canLoginWebUi: true,
+      },
+    };
+
+    vi.doMock("@/lib/auth", async (importActual) => {
+      const actual = (await importActual()) as typeof import("@/lib/auth");
+      return {
+        ...actual,
+        validateAuthToken: vi.fn(async () => mockSession),
+      };
+    });
+
+    const { createActionRoute } = await import("@/lib/api/action-adapter-openapi");
+    const action = vi.fn(async () => {
+      const { getSession, hasAdminAuthority } = await import("@/lib/auth");
+      const session = await getSession();
+      return {
+        ok: true,
+        data: {
+          role: session?.user.role,
+          adminAuthority: hasAdminAuthority(session),
+        },
+      };
+    });
+    const { handler } = createActionRoute("users", "getUsers", action as any, {
+      requiresAuth: true,
+    });
+
+    const response = (await handler({
+      req: {
+        raw: new Request("http://localhost/api/actions/users/getUsers"),
+        json: async () => ({}),
+        header: (name: string) =>
+          name.toLowerCase() === "authorization" ? "Bearer legacy-admin-api-key" : undefined,
+      },
+      json: (payload: unknown, status = 200) =>
+        new Response(JSON.stringify(payload), {
+          status,
+          headers: { "content-type": "application/json" },
+        }),
+    } as any)) as Response;
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      ok: true,
+      data: { role: "user", adminAuthority: false },
+    });
+    expect(mockSession.user.role).toBe("admin");
+  });
+
+  test("legacy admin 路由在禁用 API key admin access 时拒绝 bearer 用户 API Key", async () => {
+    vi.resetModules();
+    vi.stubEnv("ENABLE_API_KEY_ADMIN_ACCESS", "false");
 
     const mockSession = {
       user: {
@@ -211,13 +281,17 @@ describe("Action Adapter：会话透传", () => {
         }),
     } as any)) as Response;
 
-    expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toMatchObject({ ok: true, data: "ok" });
-    expect(action).toHaveBeenCalledTimes(1);
+    expect(response.status).toBe(403);
+    await expect(response.json()).resolves.toMatchObject({
+      ok: false,
+      errorCode: "AUTH_API_KEY_ADMIN_DISABLED",
+    });
+    expect(action).not.toHaveBeenCalled();
   });
 
-  test("legacy admin 路由默认保持 opaque cookie 中的用户 API Key 会话兼容", async () => {
+  test("legacy admin 路由在禁用 API key admin access 时拒绝 opaque user-api-key cookie", async () => {
     vi.resetModules();
+    vi.stubEnv("ENABLE_API_KEY_ADMIN_ACCESS", "false");
     redisReadMock.mockResolvedValue({
       sessionId: "sid_user_admin_key",
       keyFingerprint: "sha256:user",
@@ -315,14 +389,18 @@ describe("Action Adapter：会话透传", () => {
         }),
     } as any)) as Response;
 
-    expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toMatchObject({ ok: true, data: "ok" });
-    expect(redisReadMock).not.toHaveBeenCalled();
-    expect(action).toHaveBeenCalledTimes(1);
+    expect(response.status).toBe(403);
+    await expect(response.json()).resolves.toMatchObject({
+      ok: false,
+      errorCode: "AUTH_API_KEY_ADMIN_DISABLED",
+    });
+    expect(redisReadMock).toHaveBeenCalledWith("sid_user_admin_key");
+    expect(action).not.toHaveBeenCalled();
   });
 
-  test("admin 路由默认允许 opaque cookie 中的浏览器会话", async () => {
+  test("admin 路由不信任旧 opaque browser-session 标签", async () => {
     vi.resetModules();
+    vi.stubEnv("ENABLE_API_KEY_ADMIN_ACCESS", "false");
     redisReadMock.mockResolvedValue({
       sessionId: "sid_browser_admin",
       keyFingerprint: "sha256:browser",
@@ -420,14 +498,18 @@ describe("Action Adapter：会话透传", () => {
         }),
     } as any)) as Response;
 
-    expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toMatchObject({ ok: true, data: "ok" });
-    expect(redisReadMock).not.toHaveBeenCalled();
-    expect(action).toHaveBeenCalledTimes(1);
+    expect(response.status).toBe(403);
+    await expect(response.json()).resolves.toMatchObject({
+      ok: false,
+      errorCode: "AUTH_API_KEY_ADMIN_DISABLED",
+    });
+    expect(redisReadMock).toHaveBeenCalledWith("sid_browser_admin");
+    expect(action).not.toHaveBeenCalled();
   });
 
-  test("legacy admin 路由不依赖 opaque 凭据来源读取", async () => {
+  test("legacy admin 路由在 opaque 凭据来源读取失败时 fail closed", async () => {
     vi.resetModules();
+    vi.stubEnv("ENABLE_API_KEY_ADMIN_ACCESS", "false");
     redisReadMock.mockRejectedValue(new Error("redis unavailable"));
 
     const mockSession = {
@@ -517,14 +599,18 @@ describe("Action Adapter：会话透传", () => {
         }),
     } as any)) as Response;
 
-    expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toMatchObject({ ok: true, data: "ok" });
-    expect(redisReadMock).not.toHaveBeenCalled();
-    expect(action).toHaveBeenCalledTimes(1);
+    expect(response.status).toBe(403);
+    await expect(response.json()).resolves.toMatchObject({
+      ok: false,
+      errorCode: "AUTH_API_KEY_ADMIN_DISABLED",
+    });
+    expect(redisReadMock).toHaveBeenCalledWith("sid_broken");
+    expect(action).not.toHaveBeenCalled();
   });
 
-  test("legacy cookie mutation 默认保持无 CSRF token 兼容", async () => {
+  test("legacy cookie mutation 使用 cookie 会话时要求 CSRF token", async () => {
     vi.resetModules();
+    vi.stubEnv("ENABLE_API_KEY_ADMIN_ACCESS", "true");
 
     const mockSession = {
       user: {
@@ -608,8 +694,45 @@ describe("Action Adapter：会话透传", () => {
         }),
     } as any)) as Response;
 
-    expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toMatchObject({ ok: true, data: "ok" });
+    expect(response.status).toBe(403);
+    await expect(response.json()).resolves.toMatchObject({
+      ok: false,
+      errorCode: "auth.csrf_invalid",
+    });
+    expect(action).not.toHaveBeenCalled();
+
+    const csrfToken = createCsrfToken({ authToken: "cookie-session-token", userId: 123 });
+    expect(csrfToken).toEqual(expect.any(String));
+
+    const validRequest = new Request(
+      "http://localhost/api/actions/model-prices/syncLiteLLMPrices",
+      {
+        method: "POST",
+        headers: new Headers({
+          cookie: "auth-token=cookie-session-token",
+          [CSRF_HEADER]: csrfToken ?? "",
+        }),
+      }
+    );
+
+    const validResponse = (await handler({
+      req: {
+        raw: validRequest,
+        json: async () => ({}),
+        header: (name: string) => {
+          if (name.toLowerCase() === "cookie") return "auth-token=cookie-session-token";
+          return validRequest.headers.get(name) ?? undefined;
+        },
+      },
+      json: (payload: unknown, status = 200) =>
+        new Response(JSON.stringify(payload), {
+          status,
+          headers: { "content-type": "application/json" },
+        }),
+    } as any)) as Response;
+
+    expect(validResponse.status).toBe(200);
+    await expect(validResponse.json()).resolves.toMatchObject({ ok: true, data: "ok" });
     expect(action).toHaveBeenCalledTimes(1);
   });
 

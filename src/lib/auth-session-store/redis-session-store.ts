@@ -13,12 +13,14 @@ import {
 
 const SESSION_KEY_PREFIX = "cch:session:";
 const MIN_TTL_SECONDS = 1;
+const DEFAULT_REDIS_READY_WAIT_MS = 1_500;
 
-type RedisSessionClient = Pick<Redis, "status" | "setex" | "get" | "del">;
+type RedisSessionClient = Pick<Redis, "status" | "setex" | "get" | "del" | "on" | "off">;
 
 export interface RedisSessionStoreOptions {
   defaultTtlSeconds?: number;
   redisClient?: RedisSessionClient | null;
+  redisReadyWaitMs?: number;
 }
 
 function toLogError(error: unknown): string {
@@ -60,16 +62,13 @@ function parseSessionData(raw: string): SessionData | null {
     if (typeof obj.keyFingerprint !== "string") return null;
     if (typeof obj.userRole !== "string") return null;
     if (typeof obj.userId !== "number" || !Number.isInteger(obj.userId)) return null;
-    const credentialType =
-      obj.credentialType === "session" ||
-      obj.credentialType === "admin-token" ||
-      obj.credentialType === "user-api-key"
-        ? obj.credentialType
-        : obj.userId === -1
-          ? "admin-token"
-          : "session";
     if (!Number.isFinite(obj.createdAt) || typeof obj.createdAt !== "number") return null;
     if (!Number.isFinite(obj.expiresAt) || typeof obj.expiresAt !== "number") return null;
+
+    // Old payloads used `session` to describe cookie transport, which erased the originating
+    // database-key provenance. Only the virtual ADMIN_TOKEN identity is privileged; every stored
+    // database-user session is treated as user-api-key, including legacy payloads.
+    const credentialType = obj.userId === -1 ? "admin-token" : "user-api-key";
 
     return {
       sessionId: obj.sessionId,
@@ -97,9 +96,39 @@ function resolveRotateTtlSeconds(expiresAt: number): number | null {
   return Math.max(MIN_TTL_SECONDS, Math.ceil(remainingMs / 1000));
 }
 
+function waitForRedisReady(redis: RedisSessionClient, timeoutMs: number): Promise<boolean> {
+  if (redis.status === "ready") return Promise.resolve(true);
+  if (redis.status === "end") return Promise.resolve(false);
+
+  return new Promise((resolve) => {
+    let settled = false;
+
+    const settle = (ready: boolean) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      redis.off("ready", onReady);
+      redis.off("end", onUnavailable);
+      resolve(ready);
+    };
+
+    const onReady = () => settle(true);
+    const onUnavailable = () => settle(false);
+    const timer = setTimeout(() => settle(false), timeoutMs);
+
+    redis.on("ready", onReady);
+    redis.on("end", onUnavailable);
+
+    // Close the gap between the initial status check and listener registration.
+    if (redis.status === "ready") settle(true);
+    else if (redis.status === "end") settle(false);
+  });
+}
+
 export class RedisSessionStore implements SessionStore {
   private readonly defaultTtlSeconds: number;
   private readonly redisClient?: RedisSessionClient | null;
+  private readonly redisReadyWaitMs: number;
 
   constructor(options: RedisSessionStoreOptions = {}) {
     this.defaultTtlSeconds =
@@ -107,6 +136,10 @@ export class RedisSessionStore implements SessionStore {
         ? resolveDefaultAuthSessionTtlSeconds()
         : normalizeTtlSeconds(options.defaultTtlSeconds);
     this.redisClient = options.redisClient;
+    this.redisReadyWaitMs =
+      Number.isFinite(options.redisReadyWaitMs) && typeof options.redisReadyWaitMs === "number"
+        ? Math.max(0, Math.floor(options.redisReadyWaitMs))
+        : DEFAULT_REDIS_READY_WAIT_MS;
   }
 
   private resolveRedisClient(): RedisSessionClient | null {
@@ -117,10 +150,14 @@ export class RedisSessionStore implements SessionStore {
     return getRedisClient({ allowWhenRateLimitDisabled: true }) as RedisSessionClient | null;
   }
 
-  private getReadyRedis(): RedisSessionClient | null {
+  private async getReadyRedis(options?: {
+    waitForReady?: boolean;
+  }): Promise<RedisSessionClient | null> {
     const redis = this.resolveRedisClient();
     if (!redis || redis.status !== "ready") {
-      return null;
+      if (!redis || !options?.waitForReady || this.redisReadyWaitMs <= 0) return null;
+      const becameReady = await waitForRedisReady(redis, this.redisReadyWaitMs);
+      return becameReady && redis.status === "ready" ? redis : null;
     }
 
     return redis;
@@ -135,14 +172,14 @@ export class RedisSessionStore implements SessionStore {
     const sessionData: SessionData = {
       sessionId: `sid_${globalThis.crypto.randomUUID()}`,
       keyFingerprint: data.keyFingerprint,
-      credentialType: data.credentialType,
+      credentialType: data.userId === -1 ? "admin-token" : "user-api-key",
       userId: data.userId,
       userRole: data.userRole,
       createdAt,
       expiresAt: createdAt + ttl * 1000,
     };
 
-    const redis = this.getReadyRedis();
+    const redis = await this.getReadyRedis({ waitForReady: true });
     if (!redis) {
       throw new Error("Redis not ready: session not persisted");
     }
@@ -161,7 +198,7 @@ export class RedisSessionStore implements SessionStore {
   }
 
   async read(sessionId: string): Promise<SessionData | null> {
-    const redis = this.getReadyRedis();
+    const redis = await this.getReadyRedis({ waitForReady: true });
     if (!redis) {
       return null;
     }
@@ -189,7 +226,7 @@ export class RedisSessionStore implements SessionStore {
   }
 
   async revoke(sessionId: string): Promise<boolean> {
-    const redis = this.getReadyRedis();
+    const redis = await this.getReadyRedis({ waitForReady: true });
     if (!redis) {
       logger.warn("[AuthSessionStore] Redis not ready during revoke", { sessionId });
       return false;

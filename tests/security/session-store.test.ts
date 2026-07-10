@@ -22,9 +22,10 @@ vi.mock("@/lib/logger", () => ({
 }));
 
 class FakeRedis {
-  status: "ready" | "end" = "ready";
+  status: "ready" | "end" | "connecting" | "reconnecting" = "ready";
   readonly store = new Map<string, string>();
   readonly ttlByKey = new Map<string, number>();
+  readonly listeners = new Map<string, Set<(...args: unknown[]) => void>>();
 
   throwOnGet = false;
   throwOnSetex = false;
@@ -48,6 +49,32 @@ class FakeRedis {
     this.ttlByKey.delete(key);
     return existed ? 1 : 0;
   });
+
+  on(eventName: string, listener: (...args: unknown[]) => void) {
+    const listeners = this.listeners.get(eventName) ?? new Set<(...args: unknown[]) => void>();
+    listeners.add(listener);
+    this.listeners.set(eventName, listeners);
+    return this;
+  }
+
+  once(eventName: string, listener: (...args: unknown[]) => void) {
+    const wrapper = (...args: unknown[]) => {
+      this.off(eventName, wrapper);
+      listener(...args);
+    };
+    return this.on(eventName, wrapper);
+  }
+
+  off(eventName: string, listener: (...args: unknown[]) => void) {
+    this.listeners.get(eventName)?.delete(listener);
+    return this;
+  }
+
+  emit(eventName: string, ...args: unknown[]) {
+    for (const listener of [...(this.listeners.get(eventName) ?? [])]) {
+      listener(...args);
+    }
+  }
 }
 
 describe("RedisSessionStore", () => {
@@ -93,6 +120,23 @@ describe("RedisSessionStore", () => {
     expect(created.expiresAt).toBe(created.createdAt + DEFAULT_SESSION_TTL * 1000);
   });
 
+  it("create() normalizes old browser transport labels to database-key provenance", async () => {
+    const { RedisSessionStore } = await import("@/lib/auth-session-store/redis-session-store");
+
+    const store = new RedisSessionStore();
+    const created = await store.create({
+      keyFingerprint: "fp-old-browser-label",
+      credentialType: "session",
+      userId: 101,
+      userRole: "admin",
+    });
+
+    expect(created.credentialType).toBe("user-api-key");
+    expect(JSON.parse(redis.store.get(`cch:session:${created.sessionId}`) ?? "{}")).toMatchObject({
+      credentialType: "user-api-key",
+    });
+  });
+
   it("read() returns data for existing session", async () => {
     const { RedisSessionStore } = await import("@/lib/auth-session-store/redis-session-store");
 
@@ -100,7 +144,7 @@ describe("RedisSessionStore", () => {
       sessionId: "6b5097ff-a11e-4425-aad0-f57f7d2206fc",
       keyFingerprint: "fp-existing",
       credentialType: "admin-token",
-      userId: 7,
+      userId: -1,
       userRole: "admin",
       createdAt: 1_700_000_000_000,
       expiresAt: 1_700_000_360_000,
@@ -113,7 +157,70 @@ describe("RedisSessionStore", () => {
     expect(found).toEqual(session);
   });
 
-  it("read() preserves browser session credential provenance", async () => {
+  it("read() waits briefly for a connecting Redis client before treating the session as missing", async () => {
+    const { RedisSessionStore } = await import("@/lib/auth-session-store/redis-session-store");
+
+    const session = {
+      sessionId: "cold-start-session",
+      keyFingerprint: "fp-cold-start",
+      credentialType: "user-api-key" as const,
+      userId: 7,
+      userRole: "user",
+      createdAt: 1_700_000_000_000,
+      expiresAt: 1_700_000_360_000,
+    };
+    redis.store.set(`cch:session:${session.sessionId}`, JSON.stringify(session));
+    redis.status = "connecting";
+
+    const store = new RedisSessionStore({ redisReadyWaitMs: 1_000 });
+    const pendingRead = store.read(session.sessionId);
+
+    await Promise.resolve();
+    expect(redis.get).not.toHaveBeenCalled();
+
+    redis.status = "ready";
+    redis.emit("ready");
+
+    await expect(pendingRead).resolves.toEqual(session);
+    expect(redis.get).toHaveBeenCalledWith(`cch:session:${session.sessionId}`);
+  });
+
+  it("read() keeps waiting while Redis reconnects after transient connection failures", async () => {
+    const { RedisSessionStore } = await import("@/lib/auth-session-store/redis-session-store");
+
+    const session = {
+      sessionId: "reconnecting-session",
+      keyFingerprint: "fp-reconnecting",
+      credentialType: "user-api-key" as const,
+      userId: 8,
+      userRole: "user",
+      createdAt: 1_700_000_000_000,
+      expiresAt: 1_700_000_360_000,
+    };
+    redis.store.set(`cch:session:${session.sessionId}`, JSON.stringify(session));
+    redis.status = "connecting";
+
+    const store = new RedisSessionStore({ redisReadyWaitMs: 1_000 });
+    const pendingRead = store.read(session.sessionId);
+
+    await Promise.resolve();
+    redis.emit("error", new Error("connection refused"));
+    redis.emit("close");
+    redis.status = "reconnecting";
+    await Promise.resolve();
+
+    expect(redis.get).not.toHaveBeenCalled();
+
+    redis.status = "ready";
+    redis.emit("ready");
+
+    await expect(pendingRead).resolves.toEqual(session);
+    expect(redis.get).toHaveBeenCalledWith(`cch:session:${session.sessionId}`);
+    expect(redis.listeners.get("ready")?.size ?? 0).toBe(0);
+    expect(redis.listeners.get("end")?.size ?? 0).toBe(0);
+  });
+
+  it("read() downgrades old browser transport labels to database-key provenance", async () => {
     const { RedisSessionStore } = await import("@/lib/auth-session-store/redis-session-store");
 
     const session = {
@@ -130,7 +237,7 @@ describe("RedisSessionStore", () => {
     const store = new RedisSessionStore();
     const found = await store.read(session.sessionId);
 
-    expect(found).toEqual(session);
+    expect(found).toEqual({ ...session, credentialType: "user-api-key" });
   });
 
   it("read() classifies legacy admin opaque sessions without credentialType as admin-token", async () => {
@@ -158,7 +265,7 @@ describe("RedisSessionStore", () => {
     });
   });
 
-  it("read() classifies legacy opaque browser sessions without credentialType as session", async () => {
+  it("read() classifies legacy opaque browser sessions without credentialType as user-api-key", async () => {
     const { RedisSessionStore } = await import("@/lib/auth-session-store/redis-session-store");
 
     const legacyUserSession = {
@@ -179,7 +286,7 @@ describe("RedisSessionStore", () => {
 
     expect(found).toMatchObject({
       ...legacyUserSession,
-      credentialType: "session",
+      credentialType: "user-api-key",
     });
   });
 

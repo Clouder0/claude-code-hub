@@ -17,6 +17,8 @@ vi.mock("@/lib/auth", () => ({
   validateKey: mockValidateKey,
   setAuthCookie: mockSetAuthCookie,
   getLoginRedirectTarget: mockGetLoginRedirectTarget,
+  hasAdminAuthority: (session: { user?: { role?: string } } | null | undefined) =>
+    session?.user?.role === "admin",
   getSessionTokenMode: mockGetSessionTokenMode,
   createSignedAdminAuthToken: vi.fn().mockResolvedValue("cch_admin_session_v1.payload.signature"),
   toKeyFingerprint: vi.fn().mockResolvedValue("sha256:mock"),

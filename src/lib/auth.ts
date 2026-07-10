@@ -13,6 +13,9 @@ import { constantTimeEqual } from "@/lib/security/constant-time-compare";
 import { findKeyList, validateApiKeyAndGetUser } from "@/repository/key";
 import type { Key } from "@/types/key";
 import type { User } from "@/types/user";
+import { AUTH_COOKIE_NAME } from "./auth-constants";
+
+export { AUTH_COOKIE_NAME };
 
 /**
  * Apply no-store / cache-busting headers to auth responses that mutate session state.
@@ -32,6 +35,8 @@ export type ScopedAuthContext = {
    * - false：严格要求 canLoginWebUi=true
    */
   allowReadOnlyAccess: boolean;
+  /** Effective cross-user administrator authority for this request. */
+  adminAuthority: boolean;
 };
 
 export type AuthSessionStorage = {
@@ -44,7 +49,6 @@ declare global {
   var __cchAuthSessionStorage: AuthSessionStorage | undefined;
 }
 
-export const AUTH_COOKIE_NAME = "auth-token";
 const MIN_AUTH_SESSION_TTL_SECONDS = 1;
 
 export interface AuthSession {
@@ -151,6 +155,58 @@ export function detectSessionTokenKind(token: string): SessionTokenKind {
 
 export type AuthCredentialType = "session" | "admin-token" | "user-api-key" | "none";
 
+// Keep effective authority out of the serializable session object. Some server components pass
+// AuthSession to client components, while authorization checks only need this server-local bit.
+type AuthSessionSecurityMetadata = {
+  adminAuthority: boolean;
+  subjectRole: User["role"];
+};
+
+const authSessionSecurityMetadata = new WeakMap<AuthSession, AuthSessionSecurityMetadata>();
+
+function isDatabaseKeyAdminAccessEnabled(): boolean {
+  try {
+    return getEnvConfig().ENABLE_API_KEY_ADMIN_ACCESS === true;
+  } catch {
+    return false;
+  }
+}
+
+function deriveAdminAuthority(
+  session: AuthSession,
+  credentialType: Exclude<AuthCredentialType, "none">
+): boolean {
+  if (session.user.role !== "admin") return false;
+  if (credentialType === "admin-token") return true;
+  if (credentialType === "user-api-key") return isDatabaseKeyAdminAccessEnabled();
+
+  // `session` was an old browser-transport label, not proof of credential origin. New opaque
+  // sessions persist the originating database key as `user-api-key`, so old values fail closed.
+  return false;
+}
+
+function rememberAdminAuthority(
+  session: AuthSession,
+  credentialType: Exclude<AuthCredentialType, "none">
+): AuthSession {
+  return toEffectiveAuthSession(session, deriveAdminAuthority(session, credentialType));
+}
+
+export function toEffectiveAuthSession(session: AuthSession, adminAuthority: boolean): AuthSession {
+  const subjectRole = authSessionSecurityMetadata.get(session)?.subjectRole ?? session.user.role;
+  const effectiveSession =
+    !adminAuthority && session.user.role === "admin"
+      ? { ...session, user: { ...session.user, role: "user" as const } }
+      : session;
+  authSessionSecurityMetadata.set(effectiveSession, { adminAuthority, subjectRole });
+  return effectiveSession;
+}
+
+export function isAdminAuthSubject(session?: AuthSession | null): boolean {
+  if (!session) return false;
+  return (authSessionSecurityMetadata.get(session)?.subjectRole ?? session.user.role) === "admin";
+}
+
 export function isSessionTokenAccepted(
   token: string,
   mode: SessionTokenMode = getSessionTokenMode()
@@ -161,11 +217,21 @@ export function isSessionTokenAccepted(
 export function runWithAuthSession<T>(
   session: AuthSession,
   fn: () => T,
-  options?: { allowReadOnlyAccess?: boolean }
+  options?: { allowReadOnlyAccess?: boolean; adminAuthority?: boolean }
 ): T {
+  const adminAuthority = options?.adminAuthority ?? hasAdminAuthority(session);
+  const effectiveSession = toEffectiveAuthSession(session, adminAuthority);
+
   const storage = globalThis.__cchAuthSessionStorage;
   if (!storage) return fn();
-  return storage.run({ session, allowReadOnlyAccess: options?.allowReadOnlyAccess ?? false }, fn);
+  return storage.run(
+    {
+      session: effectiveSession,
+      allowReadOnlyAccess: options?.allowReadOnlyAccess ?? false,
+      adminAuthority,
+    },
+    fn
+  );
 }
 
 export function getScopedAuthSession(): AuthSession | null {
@@ -176,6 +242,19 @@ export function getScopedAuthSession(): AuthSession | null {
 export function getScopedAuthContext(): ScopedAuthContext | null {
   const storage = globalThis.__cchAuthSessionStorage;
   return storage?.getStore() ?? null;
+}
+
+export function hasAdminAuthority(session?: AuthSession | null): boolean {
+  const scoped = getScopedAuthContext();
+  if (scoped) {
+    if (!session) return scoped.adminAuthority;
+    if (scoped.session.user.id === session.user.id && scoped.session.key.id === session.key.id) {
+      return scoped.adminAuthority;
+    }
+  }
+
+  if (!session) return false;
+  return authSessionSecurityMetadata.get(session)?.adminAuthority ?? session.user.role === "admin";
 }
 
 export async function validateKey(
@@ -230,7 +309,7 @@ export async function validateKey(
       updatedAt: now,
     };
 
-    return { user: adminUser, key: adminKey };
+    return rememberAdminAuthority({ user: adminUser, key: adminKey }, "admin-token");
   }
 
   // 默认鉴权链路：Vacuum Filter（仅负向短路） → Redis（key/user 缓存） → DB（权威校验）
@@ -254,11 +333,10 @@ export async function validateKey(
     return null;
   }
 
-  return { user, key };
+  return rememberAdminAuthority({ user, key }, "user-api-key");
 }
 
 export function getLoginRedirectTarget(session: AuthSession): string {
-  if (session.user.role === "admin") return "/dashboard";
   if (session.key.canLoginWebUi) return "/dashboard";
   return "/my-usage";
 }
@@ -478,12 +556,34 @@ function parseBearerToken(raw: string | null | undefined): string | undefined {
   return token || undefined;
 }
 
+function parseCookieToken(raw: string | null | undefined, cookieName: string): string | undefined {
+  const cookiePairs = raw?.split(";") ?? [];
+  for (const pair of cookiePairs) {
+    const [name, ...valueParts] = pair.trim().split("=");
+    if (name !== cookieName) continue;
+
+    const value = valueParts.join("=").trim();
+    if (!value) return undefined;
+
+    try {
+      return decodeURIComponent(value);
+    } catch {
+      return undefined;
+    }
+  }
+
+  return undefined;
+}
+
 async function getAuthToken(): Promise<string | undefined> {
   // 优先使用 Cookie（兼容现有 Web UI 的登录态）
   const cookieToken = await getAuthCookie();
   if (cookieToken) return cookieToken;
 
-  // Cookie 缺失时，允许通过 Authorization: Bearer <token> 自助调用只读接口
   const headersStore = await headers();
+  const cookieHeaderToken = parseCookieToken(headersStore.get("cookie"), AUTH_COOKIE_NAME);
+  if (cookieHeaderToken) return cookieHeaderToken;
+
+  // Cookie 缺失时，允许通过 Authorization: Bearer <token> 自助调用只读接口
   return parseBearerToken(headersStore.get("authorization"));
 }

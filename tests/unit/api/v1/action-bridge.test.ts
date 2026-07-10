@@ -51,6 +51,7 @@ describe("v1 action bridge", () => {
     const auth = {
       kind: "session",
       allowReadOnlyAccess: true,
+      adminAuthority: false,
       session: {
         user: { id: 1, role: "admin" },
         key: { id: 1, userId: 1, key: "admin-token" },
@@ -62,6 +63,7 @@ describe("v1 action bridge", () => {
     expect(result).toEqual({ ok: true, data: "ok" });
     expect(runWithAuthSessionMock).toHaveBeenCalledWith(auth.session, expect.any(Function), {
       allowReadOnlyAccess: true,
+      adminAuthority: false,
     });
   });
 });

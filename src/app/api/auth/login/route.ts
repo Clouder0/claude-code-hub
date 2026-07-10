@@ -7,6 +7,7 @@ import {
   createSignedAdminAuthToken,
   getLoginRedirectTarget,
   getSessionTokenMode,
+  hasAdminAuthority,
   setAuthCookie,
   toKeyFingerprint,
   validateKey,
@@ -130,7 +131,7 @@ async function getLoginSessionStore() {
 async function createOpaqueSession(
   key: string,
   session: AuthSession,
-  credentialType = classifyLoginCredential(key, session)
+  credentialType = classifyLoginCredential(session)
 ) {
   const store = await getLoginSessionStore();
   return store.create({
@@ -142,14 +143,13 @@ async function createOpaqueSession(
 }
 
 function classifyLoginCredential(
-  key: string,
   session: AuthSession
-): Extract<AuthCredentialType, "admin-token" | "session" | "user-api-key"> {
-  if (getEnvConfig().ADMIN_TOKEN && key === getEnvConfig().ADMIN_TOKEN) {
+): Extract<AuthCredentialType, "admin-token" | "user-api-key"> {
+  if (session.user.id === -1 && session.key.id === -1) {
     return "admin-token";
   }
 
-  return session.key.canLoginWebUi ? "session" : "user-api-key";
+  return "user-api-key";
 }
 
 export async function POST(request: NextRequest) {
@@ -279,7 +279,7 @@ export async function POST(request: NextRequest) {
         });
       }
     } else {
-      const credentialType = classifyLoginCredential(key, session);
+      const credentialType = classifyLoginCredential(session);
       try {
         if (credentialType === "admin-token") {
           await setAuthCookie(await createSignedAdminAuthToken());
@@ -304,12 +304,11 @@ export async function POST(request: NextRequest) {
     loginPolicy.recordSuccess(clientIp);
 
     const redirectTo = getLoginRedirectTarget(session);
-    const loginType =
-      session.user.role === "admin"
+    const loginType = !session.key.canLoginWebUi
+      ? "readonly_user"
+      : hasAdminAuthority(session)
         ? "admin"
-        : session.key.canLoginWebUi
-          ? "dashboard_user"
-          : "readonly_user";
+        : "dashboard_user";
 
     createAuditLogAsync({
       actionCategory: "auth",

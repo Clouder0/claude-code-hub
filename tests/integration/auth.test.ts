@@ -232,12 +232,12 @@ describe("auth.ts：Cookie 工具函数与跳转目标", () => {
     expect(await getAuthCookie()).toBeUndefined();
   });
 
-  test("getLoginRedirectTarget：应根据 role 与 canLoginWebUi 决定跳转", () => {
+  test("getLoginRedirectTarget：应只根据 canLoginWebUi 决定跳转", () => {
     const adminTarget = getLoginRedirectTarget({
       user: { role: "admin" } as any,
       key: { canLoginWebUi: false } as any,
     });
-    expect(adminTarget).toBe("/dashboard");
+    expect(adminTarget).toBe("/my-usage");
 
     const webUiTarget = getLoginRedirectTarget({
       user: { role: "user" } as any,

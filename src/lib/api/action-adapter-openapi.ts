@@ -12,9 +12,19 @@ import { createRoute, z } from "@hono/zod-openapi";
 import type { Context } from "hono";
 import { getCookie } from "hono/cookie";
 import type { ActionResult } from "@/actions/types";
+import { classifyManagementCredential } from "@/lib/api/v1/_shared/auth-middleware";
+import { CSRF_HEADER } from "@/lib/api/v1/_shared/constants";
+import { isMutationMethod, verifyCsrfToken } from "@/lib/api/v1/_shared/csrf";
 import { redactHeaderRecord, redactUrlCredentials } from "@/lib/api/v1/_shared/redaction";
 import { runWithRequestContext } from "@/lib/audit/request-context";
-import { AUTH_COOKIE_NAME, runWithAuthSession, validateAuthToken } from "@/lib/auth";
+import {
+  AUTH_COOKIE_NAME,
+  isAdminAuthSubject,
+  runWithAuthSession,
+  toEffectiveAuthSession,
+  validateAuthToken,
+} from "@/lib/auth";
+import { isApiKeyAdminAccessEnabled } from "@/lib/config/env.schema";
 import { getClientIp } from "@/lib/ip";
 import { logger } from "@/lib/logger";
 
@@ -389,6 +399,7 @@ export function createActionRoute(
 
     try {
       let authSession: Awaited<ReturnType<typeof validateAuthToken>> | null = null;
+      let adminAuthority = false;
 
       // 0. 认证检查 (如果需要)
       if (requiresAuth) {
@@ -402,25 +413,78 @@ export function createActionRoute(
           );
         const bearerToken = getBearerTokenFromAuthHeader(c.req.header("authorization"));
         const authToken = bearerToken ?? cookieToken;
+        const authSource = bearerToken ? "bearer" : "cookie";
         if (!authToken) {
           logger.warn(`[ActionAPI] ${fullPath} 认证失败: 缺少 ${AUTH_COOKIE_NAME}`);
           return c.json({ ok: false, error: "未认证" }, 401);
         }
 
-        const session = await validateAuthToken(authToken, { allowReadOnlyAccess });
-        if (!session) {
+        const validatedSession = await validateAuthToken(authToken, { allowReadOnlyAccess });
+        if (!validatedSession) {
           logger.warn(`[ActionAPI] ${fullPath} 认证失败: 无效的 ${AUTH_COOKIE_NAME}`);
           return c.json({ ok: false, error: "认证无效或已过期" }, 401);
         }
-        authSession = session;
 
-        // 检查角色权限
-        if (requiredRole === "admin" && session.user.role !== "admin") {
+        const credentialType = await classifyManagementCredential(authToken, authSource);
+        const apiKeyAdminAccessEnabled = isApiKeyAdminAccessEnabled();
+        const adminSubject = isAdminAuthSubject(validatedSession);
+        const adminCredentialPermitted =
+          credentialType === "admin-token" ||
+          (credentialType === "user-api-key" && apiKeyAdminAccessEnabled);
+        adminAuthority = adminSubject && adminCredentialPermitted;
+
+        if (
+          requiredRole === "admin" &&
+          adminSubject &&
+          credentialType === "user-api-key" &&
+          !apiKeyAdminAccessEnabled
+        ) {
+          logger.warn(`[ActionAPI] ${fullPath} 权限不足: API Key 管理员访问已禁用`, {
+            userId: validatedSession.user.id,
+            credentialType,
+          });
+          return c.json(
+            {
+              ok: false,
+              error: "API key admin access is disabled.",
+              errorCode: "AUTH_API_KEY_ADMIN_DISABLED",
+            },
+            403
+          );
+        }
+
+        if (requiredRole === "admin" && !adminAuthority) {
           logger.warn(`[ActionAPI] ${fullPath} 权限不足: 需要 admin 角色`, {
-            userId: session.user.id,
-            userRole: session.user.role,
+            userId: validatedSession.user.id,
+            userRole: validatedSession.user.role,
           });
           return c.json({ ok: false, error: "权限不足" }, 403);
+        }
+
+        authSession = toEffectiveAuthSession(validatedSession, adminAuthority);
+
+        const requestMethod = c.req.method ?? c.req.raw?.method ?? "GET";
+        if (
+          authSource === "cookie" &&
+          isMutationMethod(requestMethod) &&
+          !verifyCsrfToken({
+            token: c.req.header(CSRF_HEADER),
+            authToken,
+            userId: authSession.user.id,
+          })
+        ) {
+          logger.warn(`[ActionAPI] ${fullPath} CSRF 校验失败`, {
+            userId: authSession.user.id,
+            method: requestMethod,
+          });
+          return c.json(
+            {
+              ok: false,
+              error: "CSRF token is missing or invalid.",
+              errorCode: "auth.csrf_invalid",
+            },
+            403
+          );
         }
       }
 
@@ -473,7 +537,7 @@ export function createActionRoute(
           ? await runWithAuthSession(
               authSession,
               () => runWithRequestContext(requestCtx, () => action(...args)),
-              { allowReadOnlyAccess }
+              { allowReadOnlyAccess, adminAuthority }
             )
           : await runWithRequestContext(requestCtx, () => action(...args));
 

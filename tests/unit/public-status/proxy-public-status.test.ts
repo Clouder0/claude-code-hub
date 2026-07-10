@@ -22,7 +22,7 @@ vi.mock("@/i18n/routing", () => ({
   },
 }));
 
-vi.mock("@/lib/auth", () => ({
+vi.mock("@/lib/auth-constants", () => ({
   AUTH_COOKIE_NAME: "cch-auth",
 }));
 

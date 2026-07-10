@@ -87,15 +87,55 @@ describe("opaque session with admin token (userId=-1)", () => {
       expiresAt: Date.now() + 86400_000,
     });
 
-    const { getSession } = await import("@/lib/auth");
+    const { getSession, hasAdminAuthority } = await import("@/lib/auth");
     const session = await getSession();
 
     expect(session).not.toBeNull();
     expect(session!.user.id).toBe(-1);
     expect(session!.user.role).toBe("admin");
     expect(session!.key.name).toBe("ADMIN_TOKEN");
+    expect(hasAdminAuthority(session)).toBe(true);
     // Must NOT call findKeyList -- virtual admin user has no DB keys
     expect(mockFindKeyList).not.toHaveBeenCalled();
+  });
+
+  it("downgrades direct opaque database-key sessions without mutating the cached user", async () => {
+    const keyString = "db-admin-key";
+    const cachedUser = {
+      id: 7,
+      name: "Database Admin",
+      role: "admin" as const,
+      isEnabled: true,
+      expiresAt: null,
+    };
+    const cachedKey = {
+      id: 17,
+      userId: 7,
+      name: "admin-key",
+      key: keyString,
+      isEnabled: true,
+      canLoginWebUi: true,
+    };
+    mockCookieStore.get.mockReturnValue({ value: "sid_database_admin" });
+    mockReadSession.mockResolvedValue({
+      sessionId: "sid_database_admin",
+      keyFingerprint: toFingerprint(keyString),
+      credentialType: "user-api-key",
+      userId: 7,
+      userRole: "admin",
+      createdAt: Date.now() - 1000,
+      expiresAt: Date.now() + 86_400_000,
+    });
+    mockFindKeyList.mockResolvedValue([cachedKey]);
+    mockValidateApiKeyAndGetUser.mockResolvedValue({ user: cachedUser, key: cachedKey });
+
+    const { getSession, hasAdminAuthority } = await import("@/lib/auth");
+    const session = await getSession();
+
+    expect(session?.user.role).toBe("user");
+    expect(hasAdminAuthority(session)).toBe(false);
+    expect(cachedUser.role).toBe("admin");
+    expect(JSON.stringify(session)).not.toMatch(/adminAuthority|credentialType/);
   });
 
   it("returns null when admin token is not configured but session has userId=-1", async () => {

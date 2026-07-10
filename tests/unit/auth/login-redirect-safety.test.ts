@@ -64,13 +64,13 @@ describe("resolveLoginRedirectTarget", () => {
 });
 
 describe("getLoginRedirectTarget invariants", () => {
-  it("routes admin user to /dashboard", () => {
+  it("does not bypass readonly-key routing for admin users", () => {
     expect(
       getLoginRedirectTarget({
         user: { role: "admin" } as any,
         key: { canLoginWebUi: false } as any,
       })
-    ).toBe("/dashboard");
+    ).toBe("/my-usage");
   });
 
   it("routes canLoginWebUi user to /dashboard", () => {

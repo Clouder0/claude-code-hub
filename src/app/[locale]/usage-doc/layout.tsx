@@ -47,8 +47,7 @@ export default async function UsageDocLayout({
   // U06: read-only sessions (canLoginWebUi=false) can open the docs but cannot
   // use the dashboard, so the "Back to Dashboard" quick link would dead-end at
   // the login form. Gate it on the same predicate as DashboardHeader.
-  const canUseDashboard =
-    !!session && (session.user?.role === "admin" || session.key?.canLoginWebUi);
+  const canUseDashboard = !!session?.key?.canLoginWebUi;
 
   return (
     <div className="min-h-[var(--cch-viewport-height,100vh)] bg-background">

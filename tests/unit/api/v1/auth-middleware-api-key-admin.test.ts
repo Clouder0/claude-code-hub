@@ -83,11 +83,16 @@ describe("v1 API key admin access flag", () => {
     const got = await resolveAuth(createCookieAuthContext("sid_admin"), "admin");
 
     expect(got).not.toBeInstanceOf(Response);
-    expect(got).toMatchObject({ credentialType: "admin-token", source: "cookie" });
+    expect(got).toMatchObject({
+      credentialType: "admin-token",
+      source: "cookie",
+      adminAuthority: true,
+      session: { user: { role: "admin" } },
+    });
     expect(redisReadMock).toHaveBeenCalledWith("sid_admin");
   });
 
-  test("allows opaque browser session cookies on admin routes when API key admin access is disabled", async () => {
+  test("rejects old opaque browser labels on admin routes when API key admin access is disabled", async () => {
     vi.resetModules();
     vi.stubEnv("ENABLE_API_KEY_ADMIN_ACCESS", "false");
     validateAuthTokenMock.mockResolvedValue(adminSession);
@@ -113,12 +118,14 @@ describe("v1 API key admin access flag", () => {
     const { resolveAuth } = await import("@/lib/api/v1/_shared/auth-middleware");
     const got = await resolveAuth(createCookieAuthContext("sid_browser_admin"), "admin");
 
-    expect(got).not.toBeInstanceOf(Response);
-    expect(got).toMatchObject({ credentialType: "session", source: "cookie" });
+    const body = got instanceof Response ? await got.json() : null;
+    expect(got).toBeInstanceOf(Response);
+    expect((got as Response).status).toBe(403);
+    expect(body).toMatchObject({ errorCode: "auth.api_key_admin_disabled" });
     expect(redisReadMock).toHaveBeenCalledWith("sid_browser_admin");
   });
 
-  test("allows legacy opaque browser cookies without credential provenance on admin routes", async () => {
+  test("rejects legacy opaque browser cookies without credential provenance on admin routes", async () => {
     vi.resetModules();
     vi.stubEnv("ENABLE_API_KEY_ADMIN_ACCESS", "false");
     validateAuthTokenMock.mockResolvedValue(adminSession);
@@ -144,15 +151,14 @@ describe("v1 API key admin access flag", () => {
     const { resolveAuth } = await import("@/lib/api/v1/_shared/auth-middleware");
     const got = await resolveAuth(createCookieAuthContext("sid_legacy_browser_admin"), "admin");
 
-    expect(got).not.toBeInstanceOf(Response);
-    expect(got).toMatchObject({ credentialType: "session", source: "cookie" });
+    const body = got instanceof Response ? await got.json() : null;
+    expect(got).toBeInstanceOf(Response);
+    expect((got as Response).status).toBe(403);
+    expect(body).toMatchObject({ errorCode: "auth.api_key_admin_disabled" });
     expect(redisReadMock).toHaveBeenCalledWith("sid_legacy_browser_admin");
   });
 
-  test("allows legacy raw API-key cookies on admin routes (cookie source = session)", async () => {
-    // Legacy/dual modes store the raw API key in the auth cookie. A cookie that passes
-    // validateAuthToken arrived via the login flow, so it is treated as a session credential
-    // rather than a programmatic API key call — avoiding admin lockout during migration.
+  test("rejects legacy raw API-key cookies on admin routes when admin key access is disabled", async () => {
     vi.resetModules();
     vi.stubEnv("ENABLE_API_KEY_ADMIN_ACCESS", "false");
     vi.stubEnv("SESSION_TOKEN_MODE", "legacy");
@@ -165,17 +171,17 @@ describe("v1 API key admin access flag", () => {
     const { resolveAuth } = await import("@/lib/api/v1/_shared/auth-middleware");
     const got = await resolveAuth(createCookieAuthContext("db-admin-key"), "admin");
 
-    expect(got).not.toBeInstanceOf(Response);
-    expect(got).toMatchObject({ credentialType: "session", source: "cookie" });
+    const body = got instanceof Response ? await got.json() : null;
+    expect(got).toBeInstanceOf(Response);
+    expect((got as Response).status).toBe(403);
+    expect(body).toMatchObject({ errorCode: "auth.api_key_admin_disabled" });
     expect(validateAuthTokenMock).toHaveBeenCalledWith("db-admin-key", {
       allowReadOnlyAccess: false,
     });
     expect(redisReadMock).not.toHaveBeenCalled();
   });
 
-  test("still rejects legacy raw API-key bearer headers on admin routes when API key admin access is disabled", async () => {
-    // The fix only relaxes cookie-sourced legacy tokens. Header-sourced legacy keys remain
-    // classified as user-api-key and continue to require ENABLE_API_KEY_ADMIN_ACCESS.
+  test("rejects legacy raw API-key bearer headers on admin routes when API key admin access is disabled", async () => {
     vi.resetModules();
     vi.stubEnv("ENABLE_API_KEY_ADMIN_ACCESS", "false");
     vi.stubEnv("SESSION_TOKEN_MODE", "legacy");
@@ -196,6 +202,92 @@ describe("v1 API key admin access flag", () => {
       allowReadOnlyAccess: false,
     });
     expect(redisReadMock).not.toHaveBeenCalled();
+  });
+
+  test("downgrades admin database-key headers to effective web users", async () => {
+    vi.resetModules();
+    vi.stubEnv("ENABLE_API_KEY_ADMIN_ACCESS", "false");
+    vi.stubEnv("SESSION_TOKEN_MODE", "legacy");
+    validateAuthTokenMock.mockResolvedValue(adminSession);
+
+    vi.doMock("@/lib/auth", async (importOriginal) => {
+      const actual = await importOriginal<typeof import("@/lib/auth")>();
+      return { ...actual, validateAuthToken: validateAuthTokenMock };
+    });
+
+    const { resolveAuth } = await import("@/lib/api/v1/_shared/auth-middleware");
+    const got = await resolveAuth(createBearerAuthContext("db-admin-key"), "web");
+
+    expect(got).not.toBeInstanceOf(Response);
+    expect(got).toMatchObject({
+      credentialType: "user-api-key",
+      adminAuthority: false,
+      allowReadOnlyAccess: false,
+      session: { user: { role: "user" } },
+    });
+    expect(adminSession.user.role).toBe("admin");
+    expect(JSON.stringify((got as { session: AuthSession }).session)).not.toMatch(
+      /adminAuthority|credentialType/
+    );
+  });
+
+  test("downgrades legacy raw database-key cookies to effective web users", async () => {
+    vi.resetModules();
+    vi.stubEnv("ENABLE_API_KEY_ADMIN_ACCESS", "false");
+    vi.stubEnv("SESSION_TOKEN_MODE", "legacy");
+    validateAuthTokenMock.mockResolvedValue(adminSession);
+
+    vi.doMock("@/lib/auth", async (importOriginal) => {
+      const actual = await importOriginal<typeof import("@/lib/auth")>();
+      return { ...actual, validateAuthToken: validateAuthTokenMock };
+    });
+
+    const { resolveAuth } = await import("@/lib/api/v1/_shared/auth-middleware");
+    const got = await resolveAuth(createCookieAuthContext("db-admin-key"), "web");
+
+    expect(got).not.toBeInstanceOf(Response);
+    expect(got).toMatchObject({
+      credentialType: "user-api-key",
+      source: "cookie",
+      adminAuthority: false,
+      session: { user: { role: "user" } },
+    });
+  });
+
+  test("downgrades opaque sessions created from admin database keys to effective web users", async () => {
+    vi.resetModules();
+    vi.stubEnv("ENABLE_API_KEY_ADMIN_ACCESS", "false");
+    validateAuthTokenMock.mockResolvedValue(adminSession);
+    redisReadMock.mockResolvedValue({
+      sessionId: "sid_admin_db_login",
+      keyFingerprint: "sha256:admin-db-key",
+      credentialType: "user-api-key",
+      userId: 1,
+      userRole: "admin",
+      createdAt: Date.now(),
+      expiresAt: Date.now() + 60_000,
+    });
+
+    vi.doMock("@/lib/auth", async (importOriginal) => {
+      const actual = await importOriginal<typeof import("@/lib/auth")>();
+      return { ...actual, validateAuthToken: validateAuthTokenMock };
+    });
+    vi.doMock("@/lib/auth-session-store/redis-session-store", () => ({
+      RedisSessionStore: class {
+        read = redisReadMock;
+      },
+    }));
+
+    const { resolveAuth } = await import("@/lib/api/v1/_shared/auth-middleware");
+    const got = await resolveAuth(createCookieAuthContext("sid_admin_db_login"), "web");
+
+    expect(got).not.toBeInstanceOf(Response);
+    expect(got).toMatchObject({
+      credentialType: "user-api-key",
+      adminAuthority: false,
+      session: { user: { role: "user" } },
+    });
+    expect(redisReadMock).toHaveBeenCalledWith("sid_admin_db_login");
   });
 
   test("does not classify signed admin tokens as admin-token credentials in legacy mode", async () => {

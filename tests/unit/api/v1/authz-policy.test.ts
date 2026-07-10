@@ -1,5 +1,4 @@
-import { describe, expect, test } from "vitest";
-import { resolveAuth } from "@/lib/api/v1/_shared/auth-middleware";
+import { afterEach, describe, expect, test, vi } from "vitest";
 
 function createContext(method = "GET") {
   const request = new Request("http://localhost/api/v1/test", { method });
@@ -14,7 +13,14 @@ function createContext(method = "GET") {
 }
 
 describe("v1 authz policy", () => {
+  afterEach(() => {
+    vi.clearAllMocks();
+    vi.doUnmock("@/lib/auth");
+    vi.resetModules();
+  });
+
   test("public routes do not require credentials", async () => {
+    const { resolveAuth } = await import("@/lib/api/v1/_shared/auth-middleware");
     const result = await resolveAuth(createContext() as never, "public");
 
     expect(result).not.toBeInstanceOf(Response);
@@ -24,11 +30,13 @@ describe("v1 authz policy", () => {
       source: "none",
       credentialType: "none",
       allowReadOnlyAccess: true,
+      adminAuthority: false,
     });
   });
 
-  test("read and admin routes reject missing credentials with problem json", async () => {
-    for (const tier of ["read", "admin"] as const) {
+  test("read web and admin routes reject missing credentials with problem json", async () => {
+    const { resolveAuth } = await import("@/lib/api/v1/_shared/auth-middleware");
+    for (const tier of ["read", "web", "admin"] as const) {
       const result = await resolveAuth(createContext() as never, tier);
 
       expect(result).toBeInstanceOf(Response);
@@ -41,5 +49,42 @@ describe("v1 authz policy", () => {
         errorCode: "auth.missing",
       });
     }
+  });
+
+  test("web tier requires strict web-login-capable auth", async () => {
+    const validateAuthTokenMock = vi.fn().mockResolvedValue({
+      user: { id: 42, role: "user", isEnabled: true },
+      key: { id: 7, userId: 42, key: "user-token", canLoginWebUi: true },
+    });
+
+    vi.doMock("@/lib/auth", async (importOriginal) => {
+      const actual = await importOriginal<typeof import("@/lib/auth")>();
+      return { ...actual, validateAuthToken: validateAuthTokenMock };
+    });
+
+    const request = new Request("http://localhost/api/v1/test", {
+      headers: { Authorization: "Bearer user-token" },
+    });
+    const context = {
+      req: {
+        method: "GET",
+        url: request.url,
+        raw: request,
+        header: (name: string) => request.headers.get(name) ?? undefined,
+      },
+    };
+
+    const { resolveAuth } = await import("@/lib/api/v1/_shared/auth-middleware");
+    const result = await resolveAuth(context as never, "web");
+
+    expect(result).not.toBeInstanceOf(Response);
+    expect(validateAuthTokenMock).toHaveBeenCalledWith("user-token", {
+      allowReadOnlyAccess: false,
+    });
+    expect(result).toMatchObject({
+      allowReadOnlyAccess: false,
+      adminAuthority: false,
+      credentialType: "user-api-key",
+    });
   });
 });

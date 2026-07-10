@@ -87,13 +87,14 @@ describe("admin token opaque-mode fallback", () => {
   it("opaque mode + raw admin token via cookie -> auth succeeds", async () => {
     setAuthCookie(ADMIN_TOKEN);
 
-    const { getSession } = await import("@/lib/auth");
+    const { getSession, hasAdminAuthority } = await import("@/lib/auth");
     const session = await getSession();
 
     expect(session).not.toBeNull();
     expect(session!.user.id).toBe(-1);
     expect(session!.user.role).toBe("admin");
     expect(session!.key.name).toBe("ADMIN_TOKEN");
+    expect(hasAdminAuthority(session)).toBe(true);
   });
 
   it("opaque mode + raw non-admin API key via cookie -> auth fails", async () => {
@@ -135,7 +136,9 @@ describe("admin token opaque-mode fallback", () => {
   it("opaque mode + signed admin auth cookie -> auth succeeds without Redis", async () => {
     mockReadSession.mockRejectedValue(new Error("redis unavailable"));
 
-    const { createSignedAdminAuthToken, getSession } = await import("@/lib/auth");
+    const { createSignedAdminAuthToken, getSession, hasAdminAuthority } = await import(
+      "@/lib/auth"
+    );
     const signedToken = await createSignedAdminAuthToken();
     setAuthCookie(signedToken);
 
@@ -145,6 +148,7 @@ describe("admin token opaque-mode fallback", () => {
     expect(session!.user.id).toBe(-1);
     expect(session!.user.role).toBe("admin");
     expect(session!.key.name).toBe("ADMIN_TOKEN");
+    expect(hasAdminAuthority(session)).toBe(true);
     expect(mockReadSession).not.toHaveBeenCalled();
   });
 

@@ -2,13 +2,14 @@ import type { Context, MiddlewareHandler } from "hono";
 import { getCookie } from "hono/cookie";
 import { extractApiCredentialFromHeaders } from "@/lib/api/auth-header-extractor";
 import type { AuthCredentialType, AuthSession } from "@/lib/auth";
+import { AUTH_COOKIE_NAME } from "@/lib/auth-constants";
 import { isApiKeyAdminAccessEnabled } from "@/lib/config/env.schema";
 import { logger } from "@/lib/logger";
 import { CSRF_HEADER } from "./constants";
 import { isMutationMethod, verifyCsrfToken } from "./csrf";
 import { createProblemResponse } from "./error-envelope";
 
-export type AuthTier = "public" | "read" | "admin";
+export type AuthTier = "public" | "read" | "web" | "admin";
 
 export type ResolvedAuth = {
   session: AuthSession | null;
@@ -16,6 +17,7 @@ export type ResolvedAuth = {
   source: "bearer" | "api-key" | "cookie" | "none";
   credentialType: AuthCredentialType;
   allowReadOnlyAccess: boolean;
+  adminAuthority: boolean;
 };
 
 export async function extractManagementAuthToken(
@@ -33,7 +35,6 @@ export async function extractManagementAuthToken(
     };
   }
 
-  const { AUTH_COOKIE_NAME } = await import("@/lib/auth");
   const cookieToken =
     getCookie(c, AUTH_COOKIE_NAME) ||
     getAuthCookieFromHeader(
@@ -73,6 +74,7 @@ export async function resolveAuth(c: Context, tier: AuthTier): Promise<ResolvedA
       source: "none",
       credentialType: "none",
       allowReadOnlyAccess: true,
+      adminAuthority: false,
     };
   }
 
@@ -87,12 +89,13 @@ export async function resolveAuth(c: Context, tier: AuthTier): Promise<ResolvedA
   }
 
   const allowReadOnlyAccess = tier === "read";
-  const [{ validateAuthToken }, credentialType] = await Promise.all([
-    import("@/lib/auth"),
-    classifyCredential(extracted.token, extracted.source),
-  ]);
-  const session = await validateAuthToken(extracted.token, { allowReadOnlyAccess });
-  if (!session) {
+  const [{ isAdminAuthSubject, toEffectiveAuthSession, validateAuthToken }, credentialType] =
+    await Promise.all([
+      import("@/lib/auth"),
+      classifyManagementCredential(extracted.token, extracted.source),
+    ]);
+  const validatedSession = await validateAuthToken(extracted.token, { allowReadOnlyAccess });
+  if (!validatedSession) {
     return createProblemResponse({
       status: 401,
       instance: new URL(c.req.url).pathname,
@@ -100,7 +103,28 @@ export async function resolveAuth(c: Context, tier: AuthTier): Promise<ResolvedA
       detail: "Authentication is invalid or expired.",
     });
   }
-  if (tier === "admin" && session.user.role !== "admin") {
+  const apiKeyAdminAccessEnabled = isApiKeyAdminAccessEnabled();
+  const adminCredentialPermitted =
+    credentialType === "admin-token" ||
+    (credentialType === "user-api-key" && apiKeyAdminAccessEnabled);
+  const adminSubject = isAdminAuthSubject(validatedSession);
+  const adminAuthority = adminSubject && adminCredentialPermitted;
+
+  if (
+    tier === "admin" &&
+    adminSubject &&
+    credentialType === "user-api-key" &&
+    !apiKeyAdminAccessEnabled
+  ) {
+    return createProblemResponse({
+      status: 403,
+      instance: new URL(c.req.url).pathname,
+      errorCode: "auth.api_key_admin_disabled",
+      detail: "API key admin access is disabled.",
+    });
+  }
+
+  if (tier === "admin" && !adminAuthority) {
     return createProblemResponse({
       status: 403,
       instance: new URL(c.req.url).pathname,
@@ -109,14 +133,7 @@ export async function resolveAuth(c: Context, tier: AuthTier): Promise<ResolvedA
     });
   }
 
-  if (tier === "admin" && credentialType === "user-api-key" && !isApiKeyAdminAccessEnabled()) {
-    return createProblemResponse({
-      status: 403,
-      instance: new URL(c.req.url).pathname,
-      errorCode: "auth.api_key_admin_disabled",
-      detail: "API key admin access is disabled.",
-    });
-  }
+  const session = toEffectiveAuthSession(validatedSession, adminAuthority);
 
   if (
     extracted.source === "cookie" &&
@@ -141,10 +158,11 @@ export async function resolveAuth(c: Context, tier: AuthTier): Promise<ResolvedA
     source: extracted.source,
     credentialType,
     allowReadOnlyAccess,
+    adminAuthority,
   };
 }
 
-async function classifyCredential(
+export async function classifyManagementCredential(
   token: string,
   source: ResolvedAuth["source"]
 ): Promise<ResolvedAuth["credentialType"]> {
@@ -169,11 +187,8 @@ async function classifyCredential(
   if (tokenKind === "opaque") {
     return classifyOpaqueSessionCredential(token);
   }
-  // Legacy/dual modes store the raw API key inside the auth cookie. A cookie that survives
-  // validateAuthToken came through the login flow, so it is a browser session — not a
-  // programmatic API key call. The ENABLE_API_KEY_ADMIN_ACCESS gate is meant to fence off
-  // header-based key usage, not to lock admins out of the management UI during migration.
-  if (source === "cookie") return "session";
+  // Legacy and dual modes store the raw database key in the cookie. Cookie transport does not
+  // change credential provenance or grant more authority than the originating key.
   return "user-api-key";
 }
 
@@ -183,7 +198,9 @@ async function classifyOpaqueSessionCredential(
   try {
     const { RedisSessionStore } = await import("@/lib/auth-session-store/redis-session-store");
     const sessionData = await new RedisSessionStore().read(token);
-    return sessionData?.credentialType ?? "user-api-key";
+    return sessionData?.userId === -1 && sessionData.credentialType === "admin-token"
+      ? "admin-token"
+      : "user-api-key";
   } catch (error) {
     logger.warn("[V1Auth] Failed to classify opaque session credential", {
       error: error instanceof Error ? error.message : String(error),
@@ -214,6 +231,7 @@ export function requireAuth(tier: AuthTier): MiddlewareHandler {
 
     return runWithAuthSession(resolved.session, () => runWithRequestContext(requestContext, next), {
       allowReadOnlyAccess: resolved.allowReadOnlyAccess,
+      adminAuthority: resolved.adminAuthority,
     });
   };
 }

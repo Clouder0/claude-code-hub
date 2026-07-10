@@ -33,6 +33,8 @@ vi.mock("@/lib/auth", () => ({
   clearAuthCookie: mockClearAuthCookie,
   getAuthCookie: mockGetAuthCookie,
   getLoginRedirectTarget: mockGetLoginRedirectTarget,
+  hasAdminAuthority: (session: { user?: { role?: string } } | null | undefined) =>
+    session?.user?.role === "admin",
   createSignedAdminAuthToken: vi.fn().mockResolvedValue("cch_admin_session_v1.payload.signature"),
   detectSessionTokenKind: (token: string) => (token.startsWith("sid_") ? "opaque" : "legacy"),
   toKeyFingerprint: vi.fn().mockResolvedValue("sha256:mock"),

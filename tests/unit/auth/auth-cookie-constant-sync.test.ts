@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { AUTH_COOKIE_NAME } from "@/lib/auth";
+import { AUTH_COOKIE_NAME } from "@/lib/auth-constants";
 
 const readSource = (relativePath: string) =>
   readFileSync(join(process.cwd(), relativePath), "utf8");
@@ -18,6 +18,7 @@ describe("auth cookie constant sync", () => {
     expect(proxySource).not.toMatch(/["']auth-token["']/);
     expect(actionAdapterSource).not.toMatch(/["']auth-token["']/);
     expect(proxySource).toContain("AUTH_COOKIE_NAME");
+    expect(proxySource).not.toMatch(/from\s+["']@\/lib\/auth["']/);
     expect(actionAdapterSource).toContain("AUTH_COOKIE_NAME");
   });
 });

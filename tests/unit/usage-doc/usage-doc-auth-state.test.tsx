@@ -130,10 +130,11 @@ describe("usage-doc auth state - HttpOnly cookie alignment", () => {
       path.join(process.cwd(), "src", "app", "[locale]", "usage-doc", "layout.tsx"),
       "utf8"
     );
-    // The provider's isLoggedIn must be derived from a dashboard-access predicate
-    // (admin OR canLoginWebUi), not from mere session presence, otherwise a
+    // The provider's isLoggedIn must be derived only from canLoginWebUi, not
+    // role or mere session presence, otherwise an admin-owned read-only key gets
     // read-only session gets a "Back to Dashboard" link that dead-ends at /login.
     expect(srcContent).toContain("canUseDashboard");
     expect(srcContent).toContain("canLoginWebUi");
+    expect(srcContent).not.toContain('session.user?.role === "admin"');
   });
 });

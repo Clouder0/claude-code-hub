@@ -1,6 +1,11 @@
+import { connection } from "next/server";
 import type { ReactNode } from "react";
 import { redirect } from "@/i18n/routing";
 import { getSession } from "@/lib/auth";
+
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
+export const fetchCache = "force-no-store";
 
 export default async function MyUsageLayout({
   children,
@@ -10,13 +15,14 @@ export default async function MyUsageLayout({
   params: Promise<{ locale: string }>;
 }) {
   const { locale } = await params;
+  await connection();
   const session = await getSession({ allowReadOnlyAccess: true });
 
   if (!session) {
     return redirect({ href: "/login?from=/my-usage", locale });
   }
 
-  if (session.user.role === "admin" || session.key.canLoginWebUi) {
+  if (session.key.canLoginWebUi) {
     return redirect({ href: "/dashboard", locale });
   }
 

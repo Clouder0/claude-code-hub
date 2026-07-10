@@ -7,6 +7,7 @@ const mockGetSessionTokenMode = vi.hoisted(() => vi.fn());
 const mockGetLoginRedirectTarget = vi.hoisted(() => vi.fn());
 const mockToKeyFingerprint = vi.hoisted(() => vi.fn());
 const mockCreateSignedAdminAuthToken = vi.hoisted(() => vi.fn());
+const mockHasAdminAuthority = vi.hoisted(() => vi.fn());
 const mockGetTranslations = vi.hoisted(() => vi.fn());
 const mockCreateSession = vi.hoisted(() => vi.fn());
 const mockGetEnvConfig = vi.hoisted(() => vi.fn());
@@ -32,6 +33,7 @@ vi.mock("@/lib/auth", () => ({
   getLoginRedirectTarget: mockGetLoginRedirectTarget,
   toKeyFingerprint: mockToKeyFingerprint,
   createSignedAdminAuthToken: mockCreateSignedAdminAuthToken,
+  hasAdminAuthority: mockHasAdminAuthority,
   withNoStoreHeaders: realWithNoStoreHeaders,
 }));
 
@@ -85,6 +87,16 @@ const readonlySession = {
   key: { canLoginWebUi: false },
 };
 
+const readonlyAdminSession = {
+  user: {
+    id: 3,
+    name: "Readonly Admin",
+    description: "readonly admin",
+    role: "admin" as const,
+  },
+  key: { id: 3, canLoginWebUi: false },
+};
+
 const adminTokenSession = {
   user: {
     id: -1,
@@ -92,7 +104,7 @@ const adminTokenSession = {
     description: "admin",
     role: "admin" as const,
   },
-  key: { canLoginWebUi: true },
+  key: { id: -1, canLoginWebUi: true },
 };
 
 describe("POST /api/auth/login session token mode integration", () => {
@@ -111,6 +123,7 @@ describe("POST /api/auth/login session token mode integration", () => {
       "sha256:a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"
     );
     mockCreateSignedAdminAuthToken.mockResolvedValue("cch_admin_session_v1.payload.signature");
+    mockHasAdminAuthority.mockImplementation((session) => session?.user?.id === -1);
     mockGetEnvConfig.mockReturnValue({ ADMIN_TOKEN: "admin-token", ENABLE_SECURE_COOKIES: false });
     mockCreateSession.mockResolvedValue({
       sessionId: "sid_opaque_session_123",
@@ -153,7 +166,7 @@ describe("POST /api/auth/login session token mode integration", () => {
       expect.objectContaining({
         userId: 1,
         userRole: "user",
-        credentialType: "session",
+        credentialType: "user-api-key",
         keyFingerprint: expect.stringMatching(/^sha256:[a-f0-9]{64}$/),
       })
     );
@@ -178,7 +191,7 @@ describe("POST /api/auth/login session token mode integration", () => {
     expect(res.status).toBe(200);
     expect(mockCreateSession).toHaveBeenCalledTimes(1);
     expect(mockCreateSession).toHaveBeenCalledWith(
-      expect.objectContaining({ credentialType: "session" })
+      expect.objectContaining({ credentialType: "user-api-key" })
     );
     expect(mockSetAuthCookie).toHaveBeenCalledTimes(1);
     expect(mockSetAuthCookie).toHaveBeenCalledWith("sid_opaque_session_cookie");
@@ -258,6 +271,18 @@ describe("POST /api/auth/login session token mode integration", () => {
     }
   });
 
+  it("keeps admin-role readonly database keys on readonly login semantics", async () => {
+    mockValidateKey.mockResolvedValue(readonlyAdminSession);
+    mockGetLoginRedirectTarget.mockReturnValue("/my-usage");
+
+    const res = await POST(makeRequest({ key: "readonly-admin-db-key" }));
+    const json = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(json.redirectTo).toBe("/my-usage");
+    expect(json.loginType).toBe("readonly_user");
+  });
+
   it("opaque mode signs ADMIN_TOKEN login without requiring Redis session persistence", async () => {
     mockGetSessionTokenMode.mockReturnValue("opaque");
     mockValidateKey.mockResolvedValue(adminTokenSession);
@@ -274,7 +299,7 @@ describe("POST /api/auth/login session token mode integration", () => {
     expect(mockSetAuthCookie).toHaveBeenCalledWith("cch_admin_session_v1.payload.signature");
   });
 
-  it("opaque mode keeps browser-login capable admin keys as session credentials", async () => {
+  it("opaque mode preserves database-key provenance for browser-login capable admin keys", async () => {
     mockGetSessionTokenMode.mockReturnValue("opaque");
     mockValidateKey.mockResolvedValue({
       ...dashboardSession,
@@ -297,9 +322,10 @@ describe("POST /api/auth/login session token mode integration", () => {
       expect.objectContaining({
         userId: 1,
         userRole: "admin",
-        credentialType: "session",
+        credentialType: "user-api-key",
       })
     );
     expect(mockSetAuthCookie).toHaveBeenCalledWith("sid_browser_admin_session");
+    await expect(res.json()).resolves.toMatchObject({ loginType: "dashboard_user" });
   });
 });
