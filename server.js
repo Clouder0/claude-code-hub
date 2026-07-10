@@ -30,6 +30,20 @@ function isNextDevMode(nodeEnv) {
   return nodeEnv !== "production";
 }
 
+function claimNextUpgradeOwnership(app) {
+  if (!app || (typeof app !== "object" && typeof app !== "function")) return false;
+  if (!("didWebSocketSetup" in app)) return false;
+
+  // NextCustomServer lazily installs its own `upgrade` listener from the first
+  // ordinary HTTP request. CCH owns upgrade routing on this server so it can
+  // accept /v1/responses WebSockets; allowing both listeners to run makes the
+  // Next listener destroy a socket CCH has already upgraded. The dependency is
+  // lockfile-pinned, and we fail startup explicitly if this ownership seam ever
+  // changes instead of silently shipping broken WebSockets.
+  app.didWebSocketSetup = true;
+  return app.didWebSocketSetup === true;
+}
+
 // 保留既有本地语义：只有显式 production 才服务已构建产物；Docker/K8s
 // 镜像会显式设置 NODE_ENV=production 和 PORT=3000。
 const dev = isNextDevMode(process.env.NODE_ENV);
@@ -675,8 +689,13 @@ async function main() {
   }
 
   const app = nextFactory({ dev, hostname, port });
-  const handler = app.getRequestHandler();
   await app.prepare();
+  if (!claimNextUpgradeOwnership(app)) {
+    throw new Error(
+      "Unable to claim Next.js upgrade ownership; refusing to start with ambiguous WebSocket routing"
+    );
+  }
+  const handler = app.getRequestHandler();
 
   const server = http.createServer(async (req, res) => {
     try {
@@ -859,6 +878,7 @@ function registerOrchestratedShutdown(server, wss) {
 module.exports = {
   sanitizedRequestPath,
   isNextDevMode,
+  claimNextUpgradeOwnership,
   handleWebSocketConnection,
   forwardToInternalHttp,
   registerOrchestratedShutdown,

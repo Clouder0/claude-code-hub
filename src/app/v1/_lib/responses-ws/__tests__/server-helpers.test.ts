@@ -4,10 +4,12 @@
 import { describe, expect, it } from "vitest";
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
-const { sanitizedRequestPath, isNextDevMode } = require("../../../../../../server.js") as {
-  sanitizedRequestPath: (rawUrl: string) => string;
-  isNextDevMode: (nodeEnv: string | undefined) => boolean;
-};
+const { sanitizedRequestPath, isNextDevMode, claimNextUpgradeOwnership } =
+  require("../../../../../../server.js") as {
+    sanitizedRequestPath: (rawUrl: string) => string;
+    isNextDevMode: (nodeEnv: string | undefined) => boolean;
+    claimNextUpgradeOwnership: (app: unknown) => boolean;
+  };
 
 describe("server.js sanitizedRequestPath", () => {
   it("returns the path unchanged when there is no query string", () => {
@@ -41,5 +43,14 @@ describe("server.js isNextDevMode", () => {
     expect(isNextDevMode("test")).toBe(true);
     expect(isNextDevMode("staging")).toBe(true);
     expect(isNextDevMode("production")).toBe(false);
+  });
+});
+
+describe("server.js Next upgrade ownership", () => {
+  it("claims the Next custom-server upgrade hook before CCH accepts WebSockets", () => {
+    const app = { didWebSocketSetup: false };
+
+    expect(claimNextUpgradeOwnership(app)).toBe(true);
+    expect(app.didWebSocketSetup).toBe(true);
   });
 });
