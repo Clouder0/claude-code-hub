@@ -51,7 +51,8 @@ export function createBudgetLease(params: BudgetLease): BudgetLease {
 
 /**
  * Build Redis key for a lease
- * Format: lease:{entityType}:{entityId}:{window}
+ * Rolling leases and every provider lease use the v2 namespace so the green deployment cannot
+ * consume or overwrite blue snapshots that were derived from the legacy billing-event identity.
  */
 export function buildLeaseKey(
   entityType: LeaseEntityTypeType,
@@ -61,9 +62,13 @@ export function buildLeaseKey(
 ): string {
   const effectiveResetMode = resetMode ?? (window === "5h" ? "rolling" : "fixed");
   if (window === "5h" || window === "daily") {
-    return `lease:${entityType}:${entityId}:${window}:${effectiveResetMode}`;
+    const baseKey = `lease:${entityType}:${entityId}:${window}:${effectiveResetMode}`;
+    return entityType === "provider" || effectiveResetMode === "rolling"
+      ? `${baseKey}:v2`
+      : baseKey;
   }
-  return `lease:${entityType}:${entityId}:${window}`;
+  const baseKey = `lease:${entityType}:${entityId}:${window}`;
+  return entityType === "provider" ? `${baseKey}:v2` : baseKey;
 }
 
 /**

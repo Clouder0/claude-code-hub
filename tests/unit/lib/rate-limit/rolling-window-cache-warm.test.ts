@@ -88,12 +88,12 @@ describe("RateLimitService rolling window cache warm", () => {
 
     const expireCalls = pipelineCommands.filter((c) => c[0] === "expire");
     expect(expireCalls).toHaveLength(1);
-    expect(expireCalls[0][1]).toBe("key:1:cost_5h_rolling");
+    expect(expireCalls[0][1]).toBe("key:1:cost_5h_rolling:v2");
     expect(expireCalls[0][2]).toBe(21600);
 
     // member format: `${createdAtMs}:${requestId}:${costUsd}`
     const first = zaddCalls[0];
-    expect(first[1]).toBe("key:1:cost_5h_rolling");
+    expect(first[1]).toBe("key:1:cost_5h_rolling:v2");
     expect(first[2]).toBe(nowMs - 4 * 60 * 60 * 1000);
     expect(first[3]).toBe(`${nowMs - 4 * 60 * 60 * 1000}:101:1.5`);
   });
@@ -162,7 +162,7 @@ describe("RateLimitService rolling window cache warm", () => {
     expect(evalCalls.length).toBeGreaterThanOrEqual(2);
 
     const [firstCall] = evalCalls;
-    expect(firstCall[2]).toBe("key:1:cost_5h_rolling");
+    expect(firstCall[2]).toBe("key:1:cost_5h_rolling:v2");
     expect(firstCall[4]).toBe(String(nowMs - 1000));
     expect(firstCall[6]).toBe("123");
   });
@@ -204,7 +204,7 @@ describe("RateLimitService rolling window cache warm", () => {
       billingEventId: "123:loser:2",
     });
 
-    for (const key of ["key:1:cost_5h_rolling", "key:1:cost_daily_rolling"]) {
+    for (const key of ["key:1:cost_5h_rolling:v2", "key:1:cost_daily_rolling:v2"]) {
       const members = redisClient.eval.mock.calls
         .filter((call) => call[2] === key)
         .map(rollingMemberFromEvalCall);
@@ -225,7 +225,7 @@ describe("RateLimitService rolling window cache warm", () => {
     await RateLimitService.trackCost(1, 2, "sess", 0.5, options);
     await RateLimitService.trackCost(1, 2, "sess", 0.5, options);
 
-    for (const key of ["key:1:cost_5h_rolling", "key:1:cost_daily_rolling"]) {
+    for (const key of ["key:1:cost_5h_rolling:v2", "key:1:cost_daily_rolling:v2"]) {
       const members = redisClient.eval.mock.calls
         .filter((call) => call[2] === key)
         .map(rollingMemberFromEvalCall);
@@ -245,7 +245,7 @@ describe("RateLimitService rolling window cache warm", () => {
 
     expect(redisClient.eval).toHaveBeenCalledTimes(1);
     const call = redisClient.eval.mock.calls[0];
-    expect(call[2]).toBe("user:7:cost_daily_rolling");
+    expect(call[2]).toBe("user:7:cost_daily_rolling:v2");
     expect(call[6]).toBe("123");
     expect(call[7]).toBe("123:winner");
   });

@@ -19,7 +19,10 @@ import type {
 } from "@/types/statistics";
 import { LEDGER_BILLING_CONDITION } from "./_shared/ledger-conditions";
 import { EXCLUDE_WARMUP_CONDITION } from "./_shared/message-request-conditions";
-import { buildProviderBillingEventsQuery } from "./_shared/provider-billing-events";
+import {
+  buildProviderBillingEventsQuery,
+  buildProviderBillingTotalQuery,
+} from "./_shared/provider-billing-events";
 
 /**
  * Key ID -> key string cache
@@ -717,13 +720,12 @@ export async function sumProviderTotalCost(
   const effectiveStart =
     resetAt instanceof Date && !Number.isNaN(resetAt.getTime()) ? resetAt : null;
 
-  const result = await db.execute(sql`
-    WITH provider_cost_events AS (
-      ${buildProviderBillingEventsQuery({ providerId, startTime: effectiveStart ?? undefined })}
-    )
-    SELECT COALESCE(SUM(cost_usd), 0) AS total
-    FROM provider_cost_events
-  `);
+  const result = await db.execute(
+    buildProviderBillingTotalQuery({
+      providerId,
+      startTime: effectiveStart ?? undefined,
+    })
+  );
   const row = Array.from(result)[0] as { total?: string | number } | undefined;
   return Number(row?.total || 0);
 }
@@ -1227,13 +1229,9 @@ export async function sumProviderCostInTimeRange(
   startTime: Date,
   endTime: Date
 ): Promise<number> {
-  const result = await db.execute(sql`
-    WITH provider_cost_events AS (
-      ${buildProviderBillingEventsQuery({ providerId, startTime, endTime })}
-    )
-    SELECT COALESCE(SUM(cost_usd), 0) AS total
-    FROM provider_cost_events
-  `);
+  const result = await db.execute(
+    buildProviderBillingTotalQuery({ providerId, startTime, endTime })
+  );
   const row = Array.from(result)[0] as { total?: string | number } | undefined;
   return Number(row?.total || 0);
 }

@@ -1,4 +1,4 @@
-import { getTableConfig } from "drizzle-orm/pg-core";
+import { getTableConfig, PgDialect } from "drizzle-orm/pg-core";
 import { describe, expect, it } from "vitest";
 import { usageLedger } from "@/drizzle/schema";
 
@@ -36,5 +36,30 @@ describe("usage_ledger cost covering indexes", () => {
     ["idx_usage_ledger_key_cost", ["key", "created_at", "cost_usd", "endpoint"]],
   ])("%s keeps endpoint as a trailing column so SUM(cost_usd) stays index-only", (name, expected) => {
     expect(indexColumns(name)).toEqual(expected);
+  });
+
+  it("indexes hedge-loser containment lookups with jsonb_path_ops", () => {
+    const index = indexes.find(
+      (entry) => entry.config.name === "idx_usage_ledger_hedge_losers_gin"
+    );
+
+    expect(index?.config.method).toBe("gin");
+    expect(index?.config.columns).toHaveLength(1);
+    expect(index?.config.columns[0]).toMatchObject({
+      name: "hedge_losers",
+      indexConfig: { opClass: "jsonb_path_ops" },
+    });
+  });
+
+  it("indexes the sparse winner rows that contain hedge losers", () => {
+    const index = indexes.find(
+      (entry) => entry.config.name === "idx_usage_ledger_winner_hedge_losers"
+    );
+
+    expect(index?.config.columns).toMatchObject([
+      { name: "final_provider_id" },
+      { name: "created_at" },
+    ]);
+    expect(new PgDialect().sqlToQuery(index!.config.where!).sql).toContain("IS NOT NULL");
   });
 });

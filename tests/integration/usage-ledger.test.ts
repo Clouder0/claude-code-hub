@@ -319,6 +319,144 @@ run("usage ledger integration", () => {
         await db.execute(sql`DROP SCHEMA IF EXISTS ${sql.identifier(schemaName)} CASCADE`);
       }
     });
+
+    test("0111-0112 create missing indexes and validate pre-created online indexes", async () => {
+      const migrationSources = await Promise.all(
+        ["0111_flippant_mikhail_rasputin.sql", "0112_yielding_wallflower.sql"].map((fileName) =>
+          readFile(resolve(process.cwd(), "drizzle", fileName), "utf8")
+        )
+      );
+      const schemaName = `it_provider_indexes_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+
+      await db.execute(sql`CREATE SCHEMA ${sql.identifier(schemaName)}`);
+      try {
+        await db.transaction(async (tx) => {
+          await tx.execute(sql`SET LOCAL search_path TO ${sql.identifier(schemaName)}, pg_catalog`);
+          await tx.execute(
+            sql.raw(`
+              CREATE TABLE usage_ledger (
+                id serial PRIMARY KEY,
+                final_provider_id integer,
+                created_at timestamptz NOT NULL DEFAULT now(),
+                blocked_by varchar(64),
+                hedge_losers jsonb
+              )
+            `)
+          );
+
+          for (let pass = 0; pass < 2; pass++) {
+            for (const migrationSource of migrationSources) {
+              await tx.execute(sql.raw(migrationSource));
+            }
+          }
+
+          const rows = await tx.execute(
+            sql.raw(`
+              SELECT
+                index_relation.relname AS index_name,
+                idx.indisvalid,
+                idx.indisready,
+                pg_get_indexdef(idx.indexrelid) AS index_definition
+              FROM pg_index AS idx
+              JOIN pg_class AS index_relation ON index_relation.oid = idx.indexrelid
+              WHERE idx.indrelid = 'usage_ledger'::regclass
+                AND index_relation.relname IN (
+                  'idx_usage_ledger_hedge_losers_gin',
+                  'idx_usage_ledger_winner_hedge_losers'
+                )
+              ORDER BY index_relation.relname
+            `)
+          );
+
+          expect(rows).toHaveLength(2);
+          expect(rows).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                index_name: "idx_usage_ledger_hedge_losers_gin",
+                indisvalid: true,
+                indisready: true,
+                index_definition: expect.stringContaining("jsonb_path_ops"),
+              }),
+              expect.objectContaining({
+                index_name: "idx_usage_ledger_winner_hedge_losers",
+                indisvalid: true,
+                indisready: true,
+                index_definition: expect.stringContaining("blocked_by IS NULL"),
+              }),
+            ])
+          );
+        });
+      } finally {
+        await db.execute(sql`DROP SCHEMA IF EXISTS ${sql.identifier(schemaName)} CASCADE`);
+      }
+    });
+
+    test("0111 rejects a conflicting same-name index instead of accepting it", async () => {
+      const migrationSource = await readFile(
+        resolve(process.cwd(), "drizzle", "0111_flippant_mikhail_rasputin.sql"),
+        "utf8"
+      );
+      const schemaName = `it_provider_index_conflict_${Date.now()}_${Math.random()
+        .toString(16)
+        .slice(2)}`;
+
+      await db.execute(sql`CREATE SCHEMA ${sql.identifier(schemaName)}`);
+      try {
+        await expect(
+          db.transaction(async (tx) => {
+            await tx.execute(
+              sql`SET LOCAL search_path TO ${sql.identifier(schemaName)}, pg_catalog`
+            );
+            await tx.execute(
+              sql.raw(`
+                CREATE TABLE usage_ledger (
+                  id serial PRIMARY KEY,
+                  hedge_losers jsonb
+                );
+                CREATE INDEX idx_usage_ledger_hedge_losers_gin
+                  ON usage_ledger USING gin (hedge_losers)
+              `)
+            );
+            await tx.execute(sql.raw(migrationSource));
+          })
+        ).rejects.toThrow("exists but is invalid, not ready, or has an unexpected definition");
+      } finally {
+        await db.execute(sql`DROP SCHEMA IF EXISTS ${sql.identifier(schemaName)} CASCADE`);
+      }
+    });
+
+    test("0111 refuses to build a missing index on a non-empty ledger", async () => {
+      const migrationSource = await readFile(
+        resolve(process.cwd(), "drizzle", "0111_flippant_mikhail_rasputin.sql"),
+        "utf8"
+      );
+      const schemaName = `it_provider_index_missing_${Date.now()}_${Math.random()
+        .toString(16)
+        .slice(2)}`;
+
+      await db.execute(sql`CREATE SCHEMA ${sql.identifier(schemaName)}`);
+      try {
+        await expect(
+          db.transaction(async (tx) => {
+            await tx.execute(
+              sql`SET LOCAL search_path TO ${sql.identifier(schemaName)}, pg_catalog`
+            );
+            await tx.execute(
+              sql.raw(`
+                CREATE TABLE usage_ledger (
+                  id serial PRIMARY KEY,
+                  hedge_losers jsonb
+                );
+                INSERT INTO usage_ledger (hedge_losers) VALUES (NULL)
+              `)
+            );
+            await tx.execute(sql.raw(migrationSource));
+          })
+        ).rejects.toThrow("create it concurrently before running migrations");
+      } finally {
+        await db.execute(sql`DROP SCHEMA IF EXISTS ${sql.identifier(schemaName)} CASCADE`);
+      }
+    });
   });
 
   describe("trigger", () => {
@@ -1231,6 +1369,38 @@ run("usage ledger integration", () => {
 
       expect(afterUserCost).toBeCloseTo(beforeUserCost, 10);
       expect(afterProviderCost).toBeCloseTo(beforeProviderCost, 10);
+    });
+
+    test("provider aggregate and detailed events clamp negative winner costs per request", async () => {
+      const providerId = nextProviderId();
+      const createdAt = new Date(Date.now() - 45_000);
+      const negativeRequestId = await insertMessageRequestRow({
+        key: nextKey("provider-negative-winner"),
+        userId: nextUserId(),
+        providerId,
+        costUsd: "0.000000000000000",
+        createdAt,
+      });
+      await insertMessageRequestRow({
+        key: nextKey("provider-positive-winner"),
+        userId: nextUserId(),
+        providerId,
+        costUsd: "10.000000000000000",
+        createdAt,
+      });
+      await db
+        .update(usageLedger)
+        .set({ costUsd: "-5.000000000000000" })
+        .where(eq(usageLedger.requestId, negativeRequestId));
+
+      const entries = await findProviderCostEntriesInTimeRange(
+        providerId,
+        new Date(createdAt.getTime() - 1_000),
+        new Date(createdAt.getTime() + 1_000)
+      );
+
+      expect(entries.reduce((sum, entry) => sum + entry.costUsd, 0)).toBe(10);
+      expect(await sumProviderTotalCost(providerId)).toBe(10);
     });
 
     test("provider cost queries expand one hedged request into stable winner and loser events", async () => {

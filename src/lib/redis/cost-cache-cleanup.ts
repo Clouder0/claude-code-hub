@@ -1,5 +1,6 @@
 import { logger } from "@/lib/logger";
 import { buildLeaseKey } from "@/lib/rate-limit/lease";
+import { buildRollingCostKey } from "@/lib/rate-limit/redis-keys";
 import { getRedisClient } from "@/lib/redis";
 import { getKeyActiveSessionsKey, getUserActiveSessionsKey } from "@/lib/redis/active-session-keys";
 import { scanPattern } from "@/lib/redis/scan-helper";
@@ -33,12 +34,63 @@ export interface ClearUser5hCostCacheOptions {
   resetMode: "fixed" | "rolling";
 }
 
+export interface Clear5hResetModeCacheOptions {
+  entityType: "key" | "user" | "provider";
+  entityId: number;
+}
+
 export interface ClearUser5hCostCacheResult {
   costKeysDeleted: number;
   leaseKeysDeleted: number;
   durationMs: number;
   cleanupFailed?: boolean;
   errorCount?: number;
+}
+
+export async function clear5hResetModeCache(
+  options: Clear5hResetModeCacheOptions
+): Promise<ClearUser5hCostCacheResult | null> {
+  const { entityType, entityId } = options;
+  const redis = getRedisClient();
+  if (!redis || redis.status !== "ready") {
+    return null;
+  }
+
+  const startTime = Date.now();
+  const keys = [
+    `${entityType}:${entityId}:cost_5h_rolling`,
+    buildRollingCostKey(entityType, entityId, "5h"),
+    `lease:${entityType}:${entityId}:5h:rolling`,
+    buildLeaseKey(entityType, entityId, "5h", "rolling"),
+  ];
+  const pipeline = redis.pipeline();
+  for (const key of keys) {
+    pipeline.del(key);
+  }
+
+  try {
+    const results = await pipeline.exec();
+    const errors = results?.filter(([error]) => error) ?? [];
+    return {
+      costKeysDeleted: 2,
+      leaseKeysDeleted: 2,
+      durationMs: Date.now() - startTime,
+      ...(errors.length > 0 ? { cleanupFailed: true, errorCount: errors.length } : {}),
+    };
+  } catch (error) {
+    logger.warn("Redis pipeline.exec() failed during 5h reset-mode cache cleanup", {
+      entityType,
+      entityId,
+      error,
+    });
+    return {
+      costKeysDeleted: 2,
+      leaseKeysDeleted: 2,
+      durationMs: Date.now() - startTime,
+      cleanupFailed: true,
+      errorCount: 1,
+    };
+  }
 }
 
 /**
@@ -197,12 +249,19 @@ export async function clearUser5hCostCache(
   }
 
   const startTime = Date.now();
-  const costKey = `user:${userId}:cost_5h_${resetMode}`;
-  const leaseKey = buildLeaseKey("user", userId, "5h", resetMode);
+  const costKeys =
+    resetMode === "rolling"
+      ? [`user:${userId}:cost_5h_rolling`, buildRollingCostKey("user", userId, "5h")]
+      : [`user:${userId}:cost_5h_fixed`];
+  const leaseKeys =
+    resetMode === "rolling"
+      ? [`lease:user:${userId}:5h:rolling`, buildLeaseKey("user", userId, "5h", "rolling")]
+      : [buildLeaseKey("user", userId, "5h", "fixed")];
   const pipeline = redis.pipeline();
 
-  pipeline.del(costKey);
-  pipeline.del(leaseKey);
+  for (const key of [...costKeys, ...leaseKeys]) {
+    pipeline.del(key);
+  }
 
   try {
     const results = await pipeline.exec();
@@ -214,8 +273,8 @@ export async function clearUser5hCostCache(
         errorCount: errors.length,
       });
       return {
-        costKeysDeleted: 1,
-        leaseKeysDeleted: 1,
+        costKeysDeleted: costKeys.length,
+        leaseKeysDeleted: leaseKeys.length,
         durationMs: Date.now() - startTime,
         cleanupFailed: true,
         errorCount: errors.length,
@@ -228,8 +287,8 @@ export async function clearUser5hCostCache(
       error,
     });
     return {
-      costKeysDeleted: 1,
-      leaseKeysDeleted: 1,
+      costKeysDeleted: costKeys.length,
+      leaseKeysDeleted: leaseKeys.length,
       durationMs: Date.now() - startTime,
       cleanupFailed: true,
       errorCount: 1,
@@ -237,8 +296,8 @@ export async function clearUser5hCostCache(
   }
 
   return {
-    costKeysDeleted: 1,
-    leaseKeysDeleted: 1,
+    costKeysDeleted: costKeys.length,
+    leaseKeysDeleted: leaseKeys.length,
     durationMs: Date.now() - startTime,
   };
 }

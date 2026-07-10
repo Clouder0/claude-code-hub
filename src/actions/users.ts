@@ -1205,17 +1205,11 @@ export async function batchUpdateUsers(
 
     if (updates.limit5hResetMode !== undefined && updatedIds.length > 0) {
       try {
-        const { clearUserCostCache } = await import("@/lib/redis/cost-cache-cleanup");
-        const keysMap = await findKeyListBatch(updatedIds);
+        const { clear5hResetModeCache } = await import("@/lib/redis/cost-cache-cleanup");
         await Promise.all(
           updatedIds.map(async (userId) => {
-            const keys = keysMap.get(userId) ?? [];
             await invalidateCachedUser(userId).catch(() => null);
-            await clearUserCostCache({
-              userId,
-              keyIds: keys.map((item) => item.id),
-              keyHashes: keys.map((item) => item.key),
-            }).catch(() => null);
+            await clear5hResetModeCache({ entityType: "user", entityId: userId }).catch(() => null);
           })
         );
       } catch (error) {

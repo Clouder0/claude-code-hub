@@ -4,7 +4,7 @@ import { and, eq, gte, inArray, lt, sql } from "drizzle-orm";
 import { db } from "@/drizzle/db";
 import { usageLedger } from "@/drizzle/schema";
 import { LEDGER_BILLING_CONDITION } from "./_shared/ledger-conditions";
-import { buildProviderBillingEventsQuery } from "./_shared/provider-billing-events";
+import { buildProviderBillingTotalQuery } from "./_shared/provider-billing-events";
 
 type EntityType = "user" | "key" | "provider";
 
@@ -27,17 +27,13 @@ export async function sumLedgerCostInTimeRange(
   endTime: Date
 ): Promise<string> {
   if (entityType === "provider") {
-    const result = await db.execute(sql`
-      WITH provider_cost_events AS (
-        ${buildProviderBillingEventsQuery({
-          providerId: entityId as number,
-          startTime,
-          endTime,
-        })}
-      )
-      SELECT COALESCE(SUM(cost_usd), 0) AS total
-      FROM provider_cost_events
-    `);
+    const result = await db.execute(
+      buildProviderBillingTotalQuery({
+        providerId: entityId as number,
+        startTime,
+        endTime,
+      })
+    );
     const row = Array.from(result)[0] as { total?: string | number } | undefined;
     return String(row?.total ?? "0");
   }
@@ -69,16 +65,12 @@ export async function sumLedgerTotalCost(
     resetAt instanceof Date && !Number.isNaN(resetAt.getTime()) ? resetAt : null;
 
   if (entityType === "provider") {
-    const result = await db.execute(sql`
-      WITH provider_cost_events AS (
-        ${buildProviderBillingEventsQuery({
-          providerId: entityId as number,
-          startTime: effectiveStart ?? undefined,
-        })}
-      )
-      SELECT COALESCE(SUM(cost_usd), 0) AS total
-      FROM provider_cost_events
-    `);
+    const result = await db.execute(
+      buildProviderBillingTotalQuery({
+        providerId: entityId as number,
+        startTime: effectiveStart ?? undefined,
+      })
+    );
     const row = Array.from(result)[0] as { total?: string | number } | undefined;
     return String(row?.total ?? "0");
   }

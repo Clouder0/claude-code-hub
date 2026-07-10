@@ -1119,6 +1119,15 @@ export const usageLedger = pgTable('usage_ledger', {
   usageLedgerProviderCostCoverIdx: index('idx_usage_ledger_provider_cost_cover')
     .on(table.finalProviderId, table.createdAt, table.costUsd, table.endpoint)
     .where(sql`${table.blockedBy} IS NULL`),
+  // Provider-specific billing splits winner and hedge-loser lookups so PostgreSQL can combine
+  // the provider btree with this containment index instead of scanning the entire ledger.
+  usageLedgerHedgeLosersGinIdx: index('idx_usage_ledger_hedge_losers_gin').using(
+    'gin',
+    table.hedgeLosers.op('jsonb_path_ops')
+  ),
+  usageLedgerWinnerHedgeLosersIdx: index('idx_usage_ledger_winner_hedge_losers')
+    .on(table.finalProviderId, table.createdAt)
+    .where(sql`${table.blockedBy} IS NULL AND ${table.hedgeLosers} IS NOT NULL`),
   // #slow-query: covering index for LATERAL last-usage per key (getUsers)
   // finalProviderId as trailing key column for index-only scan (Drizzle lacks INCLUDE support)
   usageLedgerKeyCreatedAtDescCoverIdx: index('idx_usage_ledger_key_created_at_desc_cover')

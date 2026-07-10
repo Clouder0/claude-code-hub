@@ -75,7 +75,7 @@ describe("lease module", () => {
     it("should build key lease key with window", async () => {
       const { buildLeaseKey } = await import("@/lib/rate-limit/lease");
 
-      expect(buildLeaseKey("key", 123, "5h")).toBe("lease:key:123:5h:rolling");
+      expect(buildLeaseKey("key", 123, "5h")).toBe("lease:key:123:5h:rolling:v2");
       expect(buildLeaseKey("key", 123, "5h", "fixed")).toBe("lease:key:123:5h:fixed");
       expect(buildLeaseKey("key", 456, "daily")).toBe("lease:key:456:daily:fixed");
       expect(buildLeaseKey("key", 789, "weekly")).toBe("lease:key:789:weekly");
@@ -85,8 +85,9 @@ describe("lease module", () => {
     it("should build provider lease key with window", async () => {
       const { buildLeaseKey } = await import("@/lib/rate-limit/lease");
 
-      expect(buildLeaseKey("provider", 1, "5h")).toBe("lease:provider:1:5h:rolling");
-      expect(buildLeaseKey("provider", 2, "daily")).toBe("lease:provider:2:daily:fixed");
+      expect(buildLeaseKey("provider", 1, "5h")).toBe("lease:provider:1:5h:rolling:v2");
+      expect(buildLeaseKey("provider", 2, "daily")).toBe("lease:provider:2:daily:fixed:v2");
+      expect(buildLeaseKey("provider", 3, "weekly")).toBe("lease:provider:3:weekly:v2");
     });
 
     it("should build user lease key with window", async () => {

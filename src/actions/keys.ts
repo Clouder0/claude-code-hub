@@ -722,12 +722,9 @@ export async function editKey(
     }
 
     if (hasLimit5hResetModeField && validatedData.limit5hResetMode !== key.limit5hResetMode) {
-      const { clearSingleKeyCostCache } = await import("@/lib/redis/cost-cache-cleanup");
+      const { clear5hResetModeCache } = await import("@/lib/redis/cost-cache-cleanup");
       await invalidateCachedKey(key.key).catch(() => null);
-      await clearSingleKeyCostCache({
-        keyId,
-        keyHash: key.key,
-      }).catch(() => null);
+      await clear5hResetModeCache({ entityType: "key", entityId: keyId }).catch(() => null);
     }
 
     revalidatePath("/dashboard");

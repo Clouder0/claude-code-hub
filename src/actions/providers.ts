@@ -904,14 +904,16 @@ export async function editProvider(
       payload.limit_5h_reset_mode !== undefined &&
       payload.limit_5h_reset_mode !== currentProvider.limit5hResetMode
     ) {
-      const { clearSingleProviderCostCache } = await import("@/lib/redis/cost-cache-cleanup");
-      await clearSingleProviderCostCache({ providerId }).catch((error) => {
-        logger.warn("editProvider:clear_provider_cost_cache_failed", {
-          providerId,
-          error: error instanceof Error ? error.message : String(error),
-        });
-        return null;
-      });
+      const { clear5hResetModeCache } = await import("@/lib/redis/cost-cache-cleanup");
+      await clear5hResetModeCache({ entityType: "provider", entityId: providerId }).catch(
+        (error) => {
+          logger.warn("editProvider:clear_provider_cost_cache_failed", {
+            providerId,
+            error: error instanceof Error ? error.message : String(error),
+          });
+          return null;
+        }
+      );
     }
 
     // 同步熔断器配置到 Redis（如果配置有变化）
@@ -2161,10 +2163,10 @@ export async function applyProviderBatchPatch(
     }
 
     if (repositoryUpdates.limit5hResetMode !== undefined) {
-      const { clearSingleProviderCostCache } = await import("@/lib/redis/cost-cache-cleanup");
+      const { clear5hResetModeCache } = await import("@/lib/redis/cost-cache-cleanup");
       await Promise.all(
         effectiveProviderIds.map((providerId) =>
-          clearSingleProviderCostCache({ providerId }).catch((error) => {
+          clear5hResetModeCache({ entityType: "provider", entityId: providerId }).catch((error) => {
             logger.warn("applyProviderBatchPatch:clear_provider_cost_cache_failed", {
               providerId,
               error: error instanceof Error ? error.message : String(error),
@@ -2509,10 +2511,10 @@ export async function batchUpdateProviders(
     const updatedCount = await updateProvidersBatch(providerIds, repositoryUpdates);
 
     if (repositoryUpdates.limit5hResetMode !== undefined) {
-      const { clearSingleProviderCostCache } = await import("@/lib/redis/cost-cache-cleanup");
+      const { clear5hResetModeCache } = await import("@/lib/redis/cost-cache-cleanup");
       await Promise.all(
         providerIds.map((providerId) =>
-          clearSingleProviderCostCache({ providerId }).catch((error) => {
+          clear5hResetModeCache({ entityType: "provider", entityId: providerId }).catch((error) => {
             logger.warn("batchUpdateProviders:clear_provider_cost_cache_failed", {
               providerId,
               error: error instanceof Error ? error.message : String(error),

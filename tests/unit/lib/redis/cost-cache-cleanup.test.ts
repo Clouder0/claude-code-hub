@@ -264,4 +264,43 @@ describe("clearUserCostCache", () => {
     expect(calls.filter((p: string) => p.startsWith("total_cost:key:"))).toHaveLength(0);
     expect(calls.filter((p: string) => p.startsWith("lease:key:"))).toHaveLength(0);
   });
+
+  test("rolling 5h reset deletes both blue and green generations", async () => {
+    redisPipelineMock.exec.mockResolvedValue([
+      [null, 1],
+      [null, 1],
+      [null, 1],
+      [null, 1],
+    ]);
+
+    const { clearUser5hCostCache } = await import("@/lib/redis/cost-cache-cleanup");
+    const result = await clearUser5hCostCache({ userId: 10, resetMode: "rolling" });
+
+    expect(redisPipelineMock.del.mock.calls.map(([key]: [string]) => key)).toEqual([
+      "user:10:cost_5h_rolling",
+      "user:10:cost_5h_rolling:v2",
+      "lease:user:10:5h:rolling",
+      "lease:user:10:5h:rolling:v2",
+    ]);
+    expect(result).toMatchObject({ costKeysDeleted: 2, leaseKeysDeleted: 2 });
+  });
+
+  test("5h mode changes delete only rolling generations and preserve fixed counters", async () => {
+    redisPipelineMock.exec.mockResolvedValue([
+      [null, 1],
+      [null, 1],
+      [null, 1],
+      [null, 1],
+    ]);
+
+    const { clear5hResetModeCache } = await import("@/lib/redis/cost-cache-cleanup");
+    await clear5hResetModeCache({ entityType: "provider", entityId: 9 });
+
+    expect(redisPipelineMock.del.mock.calls.map(([key]: [string]) => key)).toEqual([
+      "provider:9:cost_5h_rolling",
+      "provider:9:cost_5h_rolling:v2",
+      "lease:provider:9:5h:rolling",
+      "lease:provider:9:5h:rolling:v2",
+    ]);
+  });
 });

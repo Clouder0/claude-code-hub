@@ -273,7 +273,7 @@ return results
  * 3. 计算当前窗口内的总消费
  * 4. 设置兜底 TTL（6 小时）
  *
- * KEYS[1]: key:${id}:cost_5h_rolling 或 provider:${id}:cost_5h_rolling
+ * KEYS[1]: key:${id}:cost_5h_rolling:v2 或 provider:${id}:cost_5h_rolling:v2
  * ARGV[1]: cost（本次消费金额）
  * ARGV[2]: now（当前时间戳，毫秒）
  * ARGV[3]: window（窗口时长，毫秒，默认 18000000 = 5小时）
@@ -331,7 +331,7 @@ return tostring(total)
  * 1. 清理 5 小时前的消费记录
  * 2. 计算当前窗口内的总消费
  *
- * KEYS[1]: key:${id}:cost_5h_rolling 或 provider:${id}:cost_5h_rolling
+ * KEYS[1]: key:${id}:cost_5h_rolling:v2 或 provider:${id}:cost_5h_rolling:v2
  * ARGV[1]: now（当前时间戳，毫秒）
  * ARGV[2]: window（窗口时长，毫秒，默认 18000000 = 5小时）
  *
@@ -367,7 +367,7 @@ return tostring(total)
  * 3. 计算当前窗口内的总消费
  * 4. 设置兜底 TTL（25 小时）
  *
- * KEYS[1]: key:${id}:cost_daily_rolling 或 provider:${id}:cost_daily_rolling
+ * KEYS[1]: key:${id}:cost_daily_rolling:v2 或 provider:${id}:cost_daily_rolling:v2
  * ARGV[1]: cost（本次消费金额）
  * ARGV[2]: now（当前时间戳，毫秒）
  * ARGV[3]: window（窗口时长，毫秒，默认 86400000 = 24小时）
@@ -425,7 +425,7 @@ return tostring(total)
  * 1. 清理 24 小时前的消费记录
  * 2. 计算当前窗口内的总消费
  *
- * KEYS[1]: key:${id}:cost_daily_rolling 或 provider:${id}:cost_daily_rolling
+ * KEYS[1]: key:${id}:cost_daily_rolling:v2 或 provider:${id}:cost_daily_rolling:v2
  * ARGV[1]: now（当前时间戳，毫秒）
  * ARGV[2]: window（窗口时长，毫秒，默认 86400000 = 24小时）
  *

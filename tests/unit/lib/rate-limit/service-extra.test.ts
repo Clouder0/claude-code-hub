@@ -570,8 +570,8 @@ describe("RateLimitService - other quota paths", () => {
     });
 
     const evalArgs = redisClientRef.eval.mock.calls.map((c: unknown[]) => String(c[2]));
-    expect(evalArgs.some((k) => k === "key:1:cost_daily_rolling")).toBe(true);
-    expect(evalArgs.some((k) => k === "provider:9:cost_daily_rolling")).toBe(true);
+    expect(evalArgs.some((k) => k === "key:1:cost_daily_rolling:v2")).toBe(true);
+    expect(evalArgs.some((k) => k === "provider:9:cost_daily_rolling:v2")).toBe(true);
   });
 
   it("getCurrentCostBatch：pipeline.exec 返回 null 时应返回默认值", async () => {

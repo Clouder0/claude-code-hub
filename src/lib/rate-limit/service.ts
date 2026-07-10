@@ -20,9 +20,9 @@
  *    - Use case: Custom daily reset times (e.g., 18:00, 09:30)
  *
  * ### 2. Rolling Window Keys (ZSET type)
- *    Format: `{type}:{id}:cost_daily_rolling`
- *    Example: `key:123:cost_daily_rolling`
- *             `provider:456:cost_daily_rolling`
+ *    Format: `{type}:{id}:cost_daily_rolling:v2`
+ *    Example: `key:123:cost_daily_rolling:v2`
+ *             `provider:456:cost_daily_rolling:v2`
  *
  *    - Uses Redis ZSET type with Lua scripts
  *    - No time suffix - always "rolling"
@@ -33,7 +33,7 @@
  *    Format: `{type}:{id}:cost_{period}`
  *    Example: `key:123:cost_weekly` (Monday 00:00 reset)
  *             `key:123:cost_monthly` (1st day 00:00 reset)
- *             `key:123:cost_5h_rolling` (5-hour rolling, ZSET)
+ *             `key:123:cost_5h_rolling:v2` (5-hour rolling, ZSET)
  *
  * ## Why Different Patterns?
  *
@@ -92,6 +92,7 @@ import {
 import { clipStartByResetAt, resolveUser5hCostResetAt } from "./cost-reset-utils";
 import type { LeaseWindowType } from "./lease";
 import { type DecrementLeaseBudgetResult, LeaseService } from "./lease-service";
+import { buildProviderTotalCostKey, buildRollingCostKey } from "./redis-keys";
 import {
   type DailyResetMode,
   getResetAtFromTtlSeconds,
@@ -147,7 +148,7 @@ export class RateLimitService {
     id: number,
     mode: DailyResetMode = "rolling"
   ): string {
-    return `${type}:${id}:cost_5h_${mode}`;
+    return mode === "rolling" ? buildRollingCostKey(type, id, "5h") : `${type}:${id}:cost_5h_fixed`;
   }
 
   private static async getFixed5hWindowState(
@@ -332,7 +333,7 @@ export class RateLimitService {
           } else if (limit.period === "daily" && limit.resetMode === "rolling") {
             // daily 滚动窗口：使用 ZSET + Lua 脚本
             try {
-              const key = `${type}:${id}:cost_daily_rolling`;
+              const key = buildRollingCostKey(type, id, "daily");
               const window24h = 24 * 60 * 60 * 1000;
               const result = (await RateLimitService.redis.eval(
                 GET_COST_DAILY_ROLLING_WINDOW,
@@ -456,8 +457,8 @@ export class RateLimitService {
         if (entityType === "user") {
           return `total_cost:user:${entityId}${resetAtSuffix}`;
         }
-        const resetAtMs = resetAtSuffix || ":none";
-        return `total_cost:provider:${entityId}${resetAtMs}`;
+        const resetAtMs = resetAtSuffix ? Number(resetAtSuffix.slice(1)) : null;
+        return buildProviderTotalCostKey(entityId, resetAtMs);
       })();
       const cacheTtl = 300; // 5 minutes
 
@@ -640,7 +641,7 @@ export class RateLimitService {
           } else if (limit.period === "daily" && limit.resetMode === "rolling") {
             // daily 滚动窗口：使用 ZSET + Lua 脚本
             if (costEntries && costEntries.length > 0) {
-              const key = `${type}:${id}:cost_daily_rolling`;
+              const key = buildRollingCostKey(type, id, "daily");
               await RateLimitService.warmRollingCostZset(key, costEntries, 90000);
               logger.info(
                 `[RateLimit] Cache warmed for ${key}, value=${current} (daily rolling window, rebuilt)`
@@ -1039,7 +1040,7 @@ export class RateLimitService {
         await RateLimitService.redis.eval(
           TRACK_COST_DAILY_ROLLING_WINDOW,
           1,
-          `key:${keyId}:cost_daily_rolling`,
+          buildRollingCostKey("key", keyId, "daily"),
           cost.toString(),
           now.toString(),
           window24h.toString(),
@@ -1052,7 +1053,7 @@ export class RateLimitService {
         await RateLimitService.redis.eval(
           TRACK_COST_DAILY_ROLLING_WINDOW,
           1,
-          `provider:${providerId}:cost_daily_rolling`,
+          buildRollingCostKey("provider", providerId, "daily"),
           cost.toString(),
           now.toString(),
           window24h.toString(),
@@ -1157,7 +1158,7 @@ export class RateLimitService {
           // daily 滚动窗口：使用 ZSET + Lua 脚本
           const now = Date.now();
           const window24h = 24 * 60 * 60 * 1000;
-          const key = `${type}:${id}:cost_daily_rolling`;
+          const key = buildRollingCostKey(type, id, "daily");
 
           const result = (await RateLimitService.redis.eval(
             GET_COST_DAILY_ROLLING_WINDOW,
@@ -1284,7 +1285,7 @@ export class RateLimitService {
           } else if (period === "daily" && effectiveResetMode === "rolling") {
             // daily 滚动窗口：使用 ZSET + Lua 脚本
             if (costEntries && costEntries.length > 0) {
-              const key = `${type}:${id}:cost_daily_rolling`;
+              const key = buildRollingCostKey(type, id, "daily");
               await RateLimitService.warmRollingCostZset(key, costEntries, 90000);
               logger.info(
                 `[RateLimit] Cache warmed for ${key}, value=${current} (daily rolling window, rebuilt)`
@@ -1419,7 +1420,7 @@ export class RateLimitService {
 
         if (mode === "rolling") {
           // Rolling 模式：使用 ZSET + Lua 脚本
-          const key = `user:${userId}:cost_daily_rolling`;
+          const key = buildRollingCostKey("user", userId, "daily");
           const window24h = 24 * 60 * 60 * 1000;
 
           const result = (await RateLimitService.redis.eval(
@@ -1527,7 +1528,7 @@ export class RateLimitService {
     try {
       if (mode === "rolling") {
         // Rolling 模式：使用 ZSET + Lua 脚本
-        const key = `user:${userId}:cost_daily_rolling`;
+        const key = buildRollingCostKey("user", userId, "daily");
         const now = options?.createdAtMs ?? Date.now();
         const window24h = 24 * 60 * 60 * 1000;
         const requestId = options?.requestId != null ? String(options.requestId) : "";
@@ -1617,7 +1618,7 @@ export class RateLimitService {
         pipeline.eval(
           GET_COST_5H_ROLLING_WINDOW,
           1,
-          `provider:${providerId}:cost_5h_rolling`,
+          buildRollingCostKey("provider", providerId, "5h"),
           now.toString(),
           window5h.toString()
         );
@@ -1628,7 +1629,7 @@ export class RateLimitService {
           pipeline.eval(
             GET_COST_DAILY_ROLLING_WINDOW,
             1,
-            `provider:${providerId}:cost_daily_rolling`,
+            buildRollingCostKey("provider", providerId, "daily"),
             now.toString(),
             window24h.toString()
           );

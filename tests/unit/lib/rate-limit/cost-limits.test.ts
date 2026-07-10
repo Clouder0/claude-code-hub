@@ -226,7 +226,7 @@ describe("RateLimitService - cost limits and quota checks", () => {
     expect(statisticsMock.sumProviderTotalCost).toHaveBeenCalledTimes(1);
     expect(statisticsMock.sumProviderTotalCost).toHaveBeenCalledWith(9, resetAt);
     expect(redisClient.setex).toHaveBeenCalledWith(
-      `total_cost:provider:9:${resetAt.getTime()}`,
+      `total_cost:provider:9:v2:${resetAt.getTime()}`,
       300,
       "5"
     );
@@ -245,7 +245,7 @@ describe("RateLimitService - cost limits and quota checks", () => {
     expect(result.allowed).toBe(true);
     expect(result.current).toBe(5);
     expect(statisticsMock.sumProviderTotalCost).toHaveBeenCalledWith(9, null);
-    expect(redisClient.setex).toHaveBeenCalledWith("total_cost:provider:9:none", 300, "5");
+    expect(redisClient.setex).toHaveBeenCalledWith("total_cost:provider:9:v2:none", 300, "5");
   });
 
   it("checkTotalCostLimit：Provider Redis cache hit 且已超限时应返回 not allowed（按 resetAt key 命中）", async () => {
@@ -254,7 +254,7 @@ describe("RateLimitService - cost limits and quota checks", () => {
     const resetAt = new Date(nowMs - 456_000);
 
     redisClient.get.mockImplementation(async (key: string) => {
-      if (key === `total_cost:provider:9:${resetAt.getTime()}`) return "20";
+      if (key === `total_cost:provider:9:v2:${resetAt.getTime()}`) return "20";
       return null;
     });
 

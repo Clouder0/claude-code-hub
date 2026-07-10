@@ -4,6 +4,7 @@ import { afterAll, beforeAll, describe, expect, test, vi } from "vitest";
 import { db } from "@/drizzle/db";
 import { messageRequest, usageLedger, users } from "@/drizzle/schema";
 import { buildLeaseKey } from "@/lib/rate-limit/lease";
+import { buildRollingCostKey } from "@/lib/rate-limit/redis-keys";
 import { RateLimitService } from "@/lib/rate-limit/service";
 import { getRedisClient } from "@/lib/redis/client";
 import { findUserById } from "@/repository/user";
@@ -16,6 +17,8 @@ vi.mock("@/lib/auth", () => ({
     user: { id: 1, role: "admin" },
     key: { id: 1, canLoginWebUi: true },
   })),
+  hasAdminAuthority: (session: { user?: { role?: string } } | null | undefined) =>
+    session?.user?.role === "admin",
 }));
 
 vi.mock("next-intl/server", () => ({
@@ -145,7 +148,7 @@ async function cleanupRedisKeys(userIds: number[]) {
   }
 
   const keys = userIds.flatMap((userId) => [
-    `user:${userId}:cost_5h_rolling`,
+    buildRollingCostKey("user", userId, "5h"),
     `user:${userId}:cost_5h_fixed`,
     buildLeaseKey("user", userId, "5h", "rolling"),
     buildLeaseKey("user", userId, "5h", "fixed"),
@@ -220,7 +223,7 @@ run("user 5h reset flow integration", () => {
 
     const userAfterReset = await findUserById(userId);
     expect(userAfterReset?.limit5hCostResetAt).toBeInstanceOf(Date);
-    expect(await redis.exists(`user:${userId}:cost_5h_rolling`)).toBe(0);
+    expect(await redis.exists(buildRollingCostKey("user", userId, "5h"))).toBe(0);
     expect(await redis.exists(buildLeaseKey("user", userId, "5h", "rolling"))).toBe(0);
 
     await insertUserUsage({
