@@ -5,8 +5,8 @@ FROM --platform=$BUILDPLATFORM oven/bun:debian AS build-base
 WORKDIR /app
 
 FROM build-base AS deps
-COPY package.json ./
-RUN bun install
+COPY package.json bun.lock ./
+RUN bun install --frozen-lockfile
 
 FROM deps AS build
 COPY . .
