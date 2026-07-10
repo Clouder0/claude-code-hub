@@ -13,6 +13,8 @@
 # testing
 /coverage
 tests/.tmp-*
+/playwright-report
+/test-results
 
 # next.js
 /.next/
