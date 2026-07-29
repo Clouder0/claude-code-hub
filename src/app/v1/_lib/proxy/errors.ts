@@ -61,6 +61,14 @@ export class ProxyError extends Error {
       statusCodeInferenceMatcherId?: string;
 
       /**
+       * The upstream body was positively classified as transient model/server overload.
+       *
+       * This identity is kept separately from the inferred HTTP status so a synthetic
+       * all-providers-unavailable error can preserve the correct downstream protocol code.
+       */
+      isOverload?: boolean;
+
+      /**
        * 安全脱敏后的上游错误候选 message。
        *
        * 仅供标准客户端错误响应在系统开关允许时使用，不进入详细日志/规则匹配。

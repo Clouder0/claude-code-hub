@@ -4,7 +4,8 @@ export class ProxyResponses {
     message: string,
     errorType?: string,
     details?: Record<string, unknown>,
-    requestId?: string
+    requestId?: string,
+    options: { code?: string; headers?: HeadersInit } = {}
   ): Response {
     const defaultType = ProxyResponses.getErrorType(status);
     const finalType = errorType || defaultType;
@@ -21,7 +22,7 @@ export class ProxyResponses {
       error: {
         message,
         type: finalType,
-        code: ProxyResponses.getErrorCode(status, finalType),
+        code: options.code ?? ProxyResponses.getErrorCode(status, finalType),
       },
     };
 
@@ -35,11 +36,12 @@ export class ProxyResponses {
       payload.request_id = requestId;
     }
 
+    const headers = new Headers(options.headers);
+    headers.set("content-type", "application/json; charset=utf-8");
+
     return new Response(JSON.stringify(payload), {
       status,
-      headers: {
-        "content-type": "application/json; charset=utf-8",
-      },
+      headers,
     });
   }
 

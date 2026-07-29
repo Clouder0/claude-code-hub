@@ -32,6 +32,20 @@ export type UpstreamErrorDetectionResult =
       detail?: string;
     };
 
+export type UpstreamOverloadDetectionResult =
+  | { isOverload: false }
+  | {
+      isOverload: true;
+      matcherId:
+        | "error_code_server_is_overloaded"
+        | "error_code_slow_down"
+        | "message_servers_currently_overloaded"
+        | "message_server_overloaded"
+        | "message_model_overloaded"
+        | "message_model_at_capacity";
+      message?: string;
+    };
+
 /**
  * 基于“响应体文本内容”的状态码推断结果。
  *
@@ -75,6 +89,30 @@ const FAKE_200_CODES = {
   JSON_ERROR_MESSAGE_NON_EMPTY: "FAKE_200_JSON_ERROR_MESSAGE_NON_EMPTY",
   JSON_MESSAGE_KEYWORD_MATCH: "FAKE_200_JSON_MESSAGE_KEYWORD_MATCH",
 } as const;
+
+const OVERLOAD_ERROR_CODES = new Set(["server_is_overloaded", "slow_down"]);
+
+const OVERLOAD_MESSAGE_MATCHERS: Array<{
+  matcherId: Extract<UpstreamOverloadDetectionResult, { isOverload: true }>["matcherId"];
+  re: RegExp;
+}> = [
+  {
+    matcherId: "message_servers_currently_overloaded",
+    re: /\bour servers? (?:are|is) currently overloaded\b/iu,
+  },
+  {
+    matcherId: "message_server_overloaded",
+    re: /\bservers? (?:are|is) (?:currently )?overloaded\b/iu,
+  },
+  {
+    matcherId: "message_model_overloaded",
+    re: /\bmodel (?:is )?(?:currently )?overloaded\b/iu,
+  },
+  {
+    matcherId: "message_model_at_capacity",
+    re: /\bmodel (?:is )?(?:currently )?at capacity\b/iu,
+  },
+];
 
 // SSE 快速过滤：仅当文本里“看起来存在 JSON key”时才进入 parseSSEData（避免无谓解析）。
 // 注意：这里必须是 `"key"\s*:` 形式，避免误命中 JSON 字符串内容里的 `\"key\"`。
@@ -275,15 +313,128 @@ function truncateForDetail(text: string, maxLen: number = 200): string {
   return `${trimmed.slice(0, maxLen)}…`;
 }
 
+type StructuredUpstreamError = {
+  code?: string;
+  message?: string;
+};
+
+function toStructuredUpstreamError(value: unknown): StructuredUpstreamError | null {
+  if (typeof value === "string" && value.trim()) {
+    return { message: value.trim() };
+  }
+  if (!isPlainRecord(value)) return null;
+
+  const code =
+    typeof value.code === "string"
+      ? value.code
+      : typeof value.type === "string"
+        ? value.type
+        : undefined;
+  const message = typeof value.message === "string" ? value.message : undefined;
+  if (!code && !message) return null;
+  return { code, message };
+}
+
+function extractStructuredUpstreamError(
+  obj: Record<string, unknown>,
+  eventName?: string
+): StructuredUpstreamError | null {
+  const direct = toStructuredUpstreamError(obj.error);
+  if (direct) return direct;
+
+  const response = isPlainRecord(obj.response) ? obj.response : null;
+  const responseError = response ? toStructuredUpstreamError(response.error) : null;
+  if (responseError && (obj.type === "response.failed" || eventName === "response.failed")) {
+    return responseError;
+  }
+
+  if (obj.type === "error" || eventName === "error") {
+    return toStructuredUpstreamError(obj);
+  }
+
+  return null;
+}
+
+function classifyStructuredOverload(
+  error: StructuredUpstreamError
+): UpstreamOverloadDetectionResult {
+  const normalizedCode = error.code?.trim().toLowerCase();
+  if (normalizedCode && OVERLOAD_ERROR_CODES.has(normalizedCode)) {
+    return {
+      isOverload: true,
+      matcherId:
+        normalizedCode === "server_is_overloaded"
+          ? "error_code_server_is_overloaded"
+          : "error_code_slow_down",
+      message: error.message ? truncateForDetail(error.message) : undefined,
+    };
+  }
+
+  if (error.message) {
+    for (const matcher of OVERLOAD_MESSAGE_MATCHERS) {
+      if (matcher.re.test(error.message)) {
+        return {
+          isOverload: true,
+          matcherId: matcher.matcherId,
+          message: truncateForDetail(error.message),
+        };
+      }
+    }
+  }
+
+  return { isOverload: false };
+}
+
+function parseTopLevelJsonObject(text: string): Record<string, unknown> | null {
+  let trimmed = text.trim();
+  if (trimmed.charCodeAt(0) === 0xfeff) {
+    trimmed = trimmed.slice(1).trimStart();
+  }
+  if (!trimmed.startsWith("{")) return null;
+  try {
+    const parsed = JSON.parse(trimmed) as unknown;
+    return isPlainRecord(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+export function detectUpstreamOverloadFromSseOrJsonText(
+  text: string
+): UpstreamOverloadDetectionResult {
+  const topLevel = parseTopLevelJsonObject(text);
+  if (topLevel) {
+    const error = extractStructuredUpstreamError(topLevel);
+    if (error) return classifyStructuredOverload(error);
+  }
+
+  for (const event of parseSSEData(text)) {
+    if (!isPlainRecord(event.data)) continue;
+    const error = extractStructuredUpstreamError(event.data, event.event);
+    if (!error) continue;
+    const classified = classifyStructuredOverload(error);
+    if (classified.isOverload) return classified;
+  }
+
+  return { isOverload: false };
+}
+
 function detectFromJsonObject(
   obj: Record<string, unknown>,
   rawJsonChars: number,
-  options: Required<Pick<DetectionOptions, "maxJsonCharsForMessageCheck" | "messageKeyword">>
+  options: Required<Pick<DetectionOptions, "maxJsonCharsForMessageCheck" | "messageKeyword">>,
+  eventName?: string
 ): UpstreamErrorDetectionResult {
   // 判定优先级：
   // 1) `error` 非空：直接判定为错误（强信号）
   // 2) 小体积 JSON 下，`message` 命中关键字：判定为错误（弱信号，但能覆盖部分“错误只写在 message”场景）
-  const errorValue = obj.error;
+  const response = isPlainRecord(obj.response) ? obj.response : null;
+  const errorValue = (() => {
+    if (hasNonEmptyValue(obj.error)) return obj.error;
+    if (obj.type === "response.failed" || eventName === "response.failed") return response?.error;
+    if (obj.type === "error" || eventName === "error") return obj;
+    return undefined;
+  })();
   if (hasNonEmptyValue(errorValue)) {
     // 优先展示 string 或 error.message，避免把整个对象塞进 detail
     if (typeof errorValue === "string") {
@@ -415,7 +566,7 @@ export function detectUpstreamErrorFromSseOrJsonText(
       }
     }
 
-    const res = detectFromJsonObject(evt.data, chars, merged);
+    const res = detectFromJsonObject(evt.data, chars, merged, evt.event);
     if (res.isError) return res;
   }
 

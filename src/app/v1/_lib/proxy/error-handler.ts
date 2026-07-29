@@ -512,6 +512,10 @@ export class ProxyErrorHandler {
       typeof upstreamRequestId === "string" && upstreamRequestId.trim()
         ? upstreamRequestId.trim()
         : undefined;
+    const terminalErrorCode =
+      error instanceof ProxyError && error.upstreamError?.isOverload
+        ? "server_is_overloaded"
+        : undefined;
     const settings = await getSettings();
     const finalClientErrorMessage = resolveFinalClientErrorMessage({
       error,
@@ -526,7 +530,8 @@ export class ProxyErrorHandler {
         finalClientErrorMessage,
         undefined,
         details,
-        safeRequestId
+        safeRequestId,
+        { code: terminalErrorCode }
       ),
       logErrorMessage
     );

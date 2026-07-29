@@ -257,6 +257,188 @@ describe("ProxyForwarder - fake 200 HTML body", () => {
     expect(mocks.recordSuccess).not.toHaveBeenCalledWith(1);
   });
 
+  test("/v1/responses fake-200 overload 跳过同供应商立即重试并切换到可用供应商", async () => {
+    const provider1 = createProvider({
+      id: 1,
+      name: "capacity-a",
+      key: "k1",
+      providerType: "codex",
+      // Even when the provider allows multiple attempts, a confirmed overload should only
+      // consume one attempt before failover. Temporal recovery belongs to Codex's 503 backoff.
+      maxRetryAttempts: 3,
+      firstByteTimeoutStreamingMs: 0,
+    });
+    const provider2 = createProvider({
+      id: 2,
+      name: "capacity-b",
+      key: "k2",
+      providerType: "codex",
+      maxRetryAttempts: 1,
+      firstByteTimeoutStreamingMs: 0,
+    });
+    const session = createSession();
+    session.requestUrl = new URL("https://example.com/v1/responses");
+    session.endpointPolicy = resolveEndpointPolicy("/v1/responses");
+    session.originalFormat = "openai";
+    session.request.model = "gpt-5.6";
+    session.request.message = {
+      model: "gpt-5.6",
+      input: "hello",
+      stream: true,
+    };
+    session.setProvider(provider1);
+
+    mocks.pickRandomProviderWithExclusion.mockImplementationOnce(async (selectedSession) => {
+      const failedRuntime = selectedSession as ProxySession & {
+        clearResponseTimeout?: () => void;
+        releaseAgent?: () => void;
+      };
+      expect(failedRuntime.clearResponseTimeout).toBeUndefined();
+      expect(failedRuntime.releaseAgent).toBeUndefined();
+      return provider2;
+    });
+
+    const failedAttemptCancelled = vi.fn();
+    const fake200Body = JSON.stringify({
+      error: {
+        message: "Our servers are currently overloaded. Please try again later.",
+        type: "service_unavailable_error",
+        code: "service_unavailable_error",
+      },
+    });
+    const successfulBody = [
+      'event: response.created\ndata: {"type":"response.created"}\n\n',
+      'event: response.completed\ndata: {"type":"response.completed"}\n\n',
+    ].join("");
+
+    const fetchWithoutAutoDecode = vi.spyOn(ProxyForwarder as never, "fetchWithoutAutoDecode");
+    fetchWithoutAutoDecode
+      .mockResolvedValueOnce(
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(new TextEncoder().encode(fake200Body));
+            },
+            cancel(reason) {
+              failedAttemptCancelled(reason);
+            },
+          }),
+          { status: 200, headers: { "content-type": "text/event-stream" } }
+        )
+      )
+      .mockResolvedValueOnce(
+        new Response(successfulBody, {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        })
+      );
+
+    const response = await ProxyForwarder.send(session);
+
+    expect(await response.text()).toBe(successfulBody);
+    expect(fetchWithoutAutoDecode).toHaveBeenCalledTimes(2);
+    expect(mocks.pickRandomProviderWithExclusion).toHaveBeenCalledWith(session, [provider1.id]);
+    expect(mocks.recordFailure).toHaveBeenCalledWith(
+      provider1.id,
+      expect.objectContaining({ statusCode: 503 })
+    );
+    const overloadFailure = mocks.recordFailure.mock.calls[0]?.[1] as ProxyError;
+    expect(overloadFailure.upstreamError).toMatchObject({
+      rawBody: fake200Body,
+      rawBodyTruncated: true,
+      statusCodeInferred: true,
+      statusCodeInferenceMatcherId: "service_unavailable",
+      safeClientMessageCandidate: "Our servers are currently overloaded. Please try again later.",
+    });
+    expect(failedAttemptCancelled).toHaveBeenCalledWith("fake_200");
+    expect(session.provider?.id).toBe(provider2.id);
+
+    const runtime = session as ProxySession & {
+      clearResponseTimeout?: () => void;
+      releaseAgent?: () => void;
+    };
+    runtime.clearResponseTimeout?.();
+    runtime.releaseAgent?.();
+  });
+
+  test("/v1/responses 所有供应商 fake-200 overload 时保留终态 503 身份", async () => {
+    const provider1 = createProvider({
+      id: 1,
+      name: "capacity-a",
+      key: "k1",
+      providerType: "codex",
+      maxRetryAttempts: 1,
+      firstByteTimeoutStreamingMs: 0,
+    });
+    const provider2 = createProvider({
+      id: 2,
+      name: "capacity-b",
+      key: "k2",
+      providerType: "codex",
+      maxRetryAttempts: 1,
+      firstByteTimeoutStreamingMs: 0,
+    });
+    const session = createSession();
+    session.requestUrl = new URL("https://example.com/v1/responses");
+    session.endpointPolicy = resolveEndpointPolicy("/v1/responses");
+    session.originalFormat = "openai";
+    session.request.model = "gpt-5.6";
+    session.request.message = {
+      model: "gpt-5.6",
+      input: "hello",
+      stream: true,
+    };
+    session.setProvider(provider1);
+
+    const selectorExclusions: number[][] = [];
+    mocks.pickRandomProviderWithExclusion.mockImplementation(
+      async (_selectedSession: ProxySession, excludedProviderIds: number[]) => {
+        selectorExclusions.push([...excludedProviderIds]);
+        return selectorExclusions.length === 1 ? provider2 : null;
+      }
+    );
+
+    const cancelledAttempts: unknown[] = [];
+    const fake200Body = JSON.stringify({
+      error: {
+        message: "Our servers are currently overloaded. Please try again later.",
+        type: "service_unavailable_error",
+        code: "service_unavailable_error",
+      },
+    });
+    const fake200Response = () =>
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode(fake200Body));
+          },
+          cancel(reason) {
+            cancelledAttempts.push(reason);
+          },
+        }),
+        { status: 200, headers: { "content-type": "text/event-stream" } }
+      );
+
+    const fetchWithoutAutoDecode = vi.spyOn(ProxyForwarder as never, "fetchWithoutAutoDecode");
+    fetchWithoutAutoDecode
+      .mockResolvedValueOnce(fake200Response())
+      .mockResolvedValueOnce(fake200Response());
+
+    const error = await ProxyForwarder.send(session).catch((rejection) => rejection as ProxyError);
+
+    expect(error).toBeInstanceOf(ProxyError);
+    expect(error.statusCode).toBe(503);
+    expect(error.upstreamError).toMatchObject({
+      body: "",
+      isOverload: true,
+      safeClientMessageCandidate: "Our servers are currently overloaded. Please try again later.",
+    });
+    expect(fetchWithoutAutoDecode).toHaveBeenCalledTimes(2);
+    expect(cancelledAttempts).toEqual(["fake_200", "fake_200"]);
+    expect(mocks.recordFailure).toHaveBeenCalledTimes(2);
+    expect(selectorExclusions).toEqual([[1], [1, 2]]);
+  });
+
   test("200 + text/html 但 body 是 JSON error 也应视为失败并切换供应商", async () => {
     const provider1 = createProvider({ id: 1, name: "p1", key: "k1", maxRetryAttempts: 1 });
     const provider2 = createProvider({ id: 2, name: "p2", key: "k2", maxRetryAttempts: 1 });

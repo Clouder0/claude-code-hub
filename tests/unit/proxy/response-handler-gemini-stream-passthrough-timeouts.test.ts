@@ -471,28 +471,24 @@ describe("ProxyResponseHandler - Gemini stream passthrough timeouts", () => {
         }
       ).doForward;
 
-      const upstreamResponse = (await doForward.call(
-        ProxyForwarder,
-        session,
-        provider,
-        baseUrl
-      )) as Response;
-
-      const clientResponse = await ProxyResponseHandler.dispatch(session, upstreamResponse);
-      const reader = clientResponse.body?.getReader();
-      expect(reader).toBeTruthy();
-      if (!reader) throw new Error("Missing body reader");
-
       const startedAt = Date.now();
-      const firstRead = await readWithTimeout(reader, 1500);
-      if (!firstRead.ok) {
+      const forwardResult = await Promise.race([
+        Promise.resolve(doForward.call(ProxyForwarder, session, provider, baseUrl)).then(
+          () => ({ kind: "response" as const }),
+          (error: unknown) => ({ kind: "error" as const, error })
+        ),
+        new Promise<{ kind: "timeout" }>((resolve) => {
+          setTimeout(() => resolve({ kind: "timeout" }), 1500);
+        }),
+      ]);
+      if (forwardResult.kind === "timeout") {
         clientAbortController.abort(new Error("test_timeout"));
-        throw new Error("首字节超时未生效：读首块数据在 1.5s 内仍未返回（可能仍会卡死）");
+        throw new Error("首字节超时未生效：doForward 在 1.5s 内仍未返回（可能仍会卡死）");
       }
 
-      // 断言：应由超时/中断导致读取结束（done=true 或抛错均可）
-      const ended = ("value" in firstRead && firstRead.value.done === true) || "error" in firstRead;
-      expect(ended).toBe(true);
+      expect(forwardResult.kind).toBe("error");
+      if (forwardResult.kind !== "error") throw new Error("Expected timeout error");
+      expect(forwardResult.error).toMatchObject({ statusCode: 524 });
 
       // 断言：responseController 应已触发 abort（即首字节超时生效）
       const sessionWithController = session as unknown as { responseController?: AbortController };

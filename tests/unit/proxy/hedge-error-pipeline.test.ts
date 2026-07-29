@@ -137,6 +137,25 @@ describe("handleProxyRequest - hedge terminal error pipeline", async () => {
     expect(body.error.details).toBeUndefined();
   });
 
+  test("终态 overload 应返回真实 503 与 Codex 可识别的错误 code", async () => {
+    h.forwarderError = new ProxyError("所有供应商暂时不可用，请稍后重试", 503, {
+      body: "",
+      isOverload: true,
+      safeClientMessageCandidate: "Our servers are currently overloaded. Please try again later.",
+    });
+
+    const res = await handleProxyRequest({} as any);
+
+    expect(res.status).toBe(503);
+    expect(res.headers.get("content-type")).toContain("application/json");
+    const body = await res.json();
+    expect(body.error).toMatchObject({
+      message: expect.stringContaining("Our servers are currently overloaded"),
+      type: "service_unavailable_error",
+      code: "server_is_overloaded",
+    });
+  });
+
   test("新开关开启且 hedge 终态带 safe candidate 时，应透传脱敏后的上游 message", async () => {
     h.forwarderError = new ProxyError("所有供应商暂时不可用，请稍后重试", 503, {
       body: "",

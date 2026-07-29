@@ -1386,6 +1386,70 @@ describe("ProxyForwarder - first-byte hedge scheduling", () => {
     }
   });
 
+  test("fake-200 overload participant cannot become hedge winner", async () => {
+    const provider1 = createProvider({
+      id: 1,
+      name: "capacity-a",
+      firstByteTimeoutStreamingMs: 100,
+    });
+    const provider2 = createProvider({
+      id: 2,
+      name: "capacity-b",
+      firstByteTimeoutStreamingMs: 100,
+    });
+    const session = createSession();
+    setProviderWithSessionRef(session, provider1);
+
+    mocks.pickRandomProviderWithExclusion.mockResolvedValueOnce(provider2);
+    mocks.categorizeErrorAsync.mockResolvedValueOnce(ProxyErrorCategory.PROVIDER_ERROR);
+
+    const doForward = vi.spyOn(
+      ProxyForwarder as unknown as {
+        doForward: (...args: unknown[]) => Promise<Response>;
+      },
+      "doForward"
+    );
+    const winnerController = new AbortController();
+
+    doForward
+      .mockRejectedValueOnce(
+        new UpstreamProxyError("FAKE_200_JSON_ERROR_MESSAGE_NON_EMPTY", 503, {
+          body: "Our servers are currently overloaded. Please try again later.",
+          providerId: provider1.id,
+          providerName: provider1.name,
+          isOverload: true,
+        })
+      )
+      .mockImplementationOnce(async (attemptSession) => {
+        const runtime = attemptSession as ProxySession & AttemptRuntime;
+        runtime.responseController = winnerController;
+        runtime.clearResponseTimeout = vi.fn();
+        return createStreamingResponse({
+          label: "capacity-b",
+          firstChunkDelayMs: 0,
+          controller: winnerController,
+        });
+      });
+
+    const response = await ProxyForwarder.send(session);
+
+    expect(await response.text()).toContain('"provider":"capacity-b"');
+    expect(doForward).toHaveBeenCalledTimes(2);
+    expect(mocks.recordFailure).toHaveBeenCalledWith(provider1.id, expect.any(UpstreamProxyError));
+    expect(session.provider?.id).toBe(provider2.id);
+    expect(session.getProviderChain()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: provider1.id, reason: "retry_failed", statusCode: 503 }),
+        expect.objectContaining({ id: provider2.id, reason: "hedge_winner", statusCode: 200 }),
+      ])
+    );
+    expect(
+      session
+        .getProviderChain()
+        .some((item) => item.id === provider1.id && item.reason === "hedge_winner")
+    ).toBe(false);
+  });
+
   test("client abort before any winner should abort all in-flight attempts, return 499, and clear sticky provider binding", async () => {
     vi.useFakeTimers();
 

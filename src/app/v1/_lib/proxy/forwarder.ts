@@ -32,6 +32,7 @@ import { RateLimitService } from "@/lib/rate-limit/service";
 import { SessionManager } from "@/lib/session-manager";
 import {
   detectUpstreamErrorFromSseOrJsonText,
+  detectUpstreamOverloadFromSseOrJsonText,
   inferUpstreamErrorStatusCodeFromText,
 } from "@/lib/utils/upstream-error-detection";
 import {
@@ -99,6 +100,7 @@ import { ProxyProviderResolver } from "./provider-selector";
 import { finalizeHedgeLoserBilling } from "./response-handler";
 import type { ProxySession } from "./session";
 import { setDeferredStreamingFinalization } from "./stream-finalization";
+import { inspectStreamingResponsePrefix } from "./streaming-response-gate";
 import {
   detectThinkingBudgetRectifierTrigger,
   rectifyThinkingBudget,
@@ -168,6 +170,33 @@ const OUTBOUND_TRANSPORT_HEADER_BLACKLIST = [
 const PROVIDER_CUSTOM_HEADER_RESERVED_NAMES: ReadonlySet<string> = new Set(
   ["host", ...OUTBOUND_TRANSPORT_HEADER_BLACKLIST].map((n) => n.toLowerCase())
 );
+
+function buildResponseTimeoutError(
+  provider: { id: number; name: string },
+  responseTimeoutType: string,
+  responseTimeoutMs: number
+): ProxyError {
+  const timeoutMessage = `Provider failed to respond within ${responseTimeoutMs}ms`;
+  const parsed = {
+    error: {
+      type: "timeout_error",
+      message: timeoutMessage,
+      timeout_type: responseTimeoutType,
+      timeout_ms: responseTimeoutMs,
+    },
+  };
+
+  return new ProxyError(
+    `${responseTimeoutType === "streaming_first_byte" ? "供应商首字节响应超时" : "供应商响应超时"}: ${responseTimeoutMs}ms 内未收到数据`,
+    524,
+    {
+      body: JSON.stringify(parsed),
+      parsed,
+      providerId: provider.id,
+      providerName: provider.name,
+    }
+  );
+}
 
 // 把 provider 上配置的静态自定义请求头合并到 overrides 中。
 // 入参 overrides 直接被原地修改。鉴权头（authorization / x-api-key / x-goog-api-key）会在调用方
@@ -1541,8 +1570,14 @@ export class ProxyForwarder {
                 detected.code === "FAKE_200_JSON_ERROR_MESSAGE_NON_EMPTY");
 
             if (isStrongFake200) {
+              const overload = detectUpstreamOverloadFromSseOrJsonText(inspectedText);
               const inferredStatus = inferUpstreamErrorStatusCodeFromText(inspectedText);
-              const inferredStatusCode = inferredStatus?.statusCode;
+              const inferredStatusCode = overload.isOverload ? 503 : inferredStatus?.statusCode;
+              const safeClientMessageCandidate = deriveClientSafeUpstreamErrorMessage({
+                rawText: inspectedText,
+                candidateMessage: overload.isOverload ? overload.message : detected.detail,
+                providerName: currentProvider.name,
+              });
 
               throw new ProxyError(detected.code, inferredStatusCode ?? 502, {
                 body: detected.detail ?? "",
@@ -1553,7 +1588,11 @@ export class ProxyForwarder {
                 rawBody: inspectedText,
                 rawBodyTruncated: inspectedTruncated,
                 statusCodeInferred: inferredStatusCode !== undefined,
-                statusCodeInferenceMatcherId: inferredStatus?.matcherId,
+                statusCodeInferenceMatcherId:
+                  inferredStatus?.matcherId ??
+                  (overload.isOverload ? "service_unavailable" : undefined),
+                isOverload: overload.isOverload,
+                safeClientMessageCandidate: safeClientMessageCandidate ?? undefined,
               });
             }
           }
@@ -2142,7 +2181,13 @@ export class ProxyForwarder {
             // 常规 ProxyError 处理
             const proxyError = lastError as ProxyError;
             const statusCode = proxyError.statusCode;
-            const willRetry = attemptCount < maxAttemptsPerProvider;
+            // A confirmed overload is a capacity state, not a request-shape or transport failure.
+            // Retrying the same provider again after 100 ms only multiplies traffic, especially
+            // because Codex already retries a terminal 503 with exponential backoff. Give every
+            // eligible provider one chance in this CCH request, then let the client own time-based
+            // recovery if the whole provider round is overloaded.
+            const isConfirmedOverload = proxyError.upstreamError?.isOverload === true;
+            const willRetry = !isConfirmedOverload && attemptCount < maxAttemptsPerProvider;
 
             if (
               !isMcpRequest &&
@@ -2213,6 +2258,7 @@ export class ProxyForwarder {
               attemptNumber: attemptCount,
               totalProvidersAttempted,
               willRetry,
+              isConfirmedOverload,
             });
 
             // 获取熔断器健康信息（用于决策链显示）
@@ -3239,33 +3285,8 @@ export class ProxyForwarder {
             "First-byte timeout indicates slow provider response, should count towards circuit breaker",
         });
 
-        // 抛出 ProxyError 并设置特殊状态码 524（Cloudflare: A Timeout Occurred）
-        // 这样会被归类为 PROVIDER_ERROR，计入熔断器并直接切换供应商
         cleanupCombinedSignal();
-        throw new ProxyError(
-          `${responseTimeoutType === "streaming_first_byte" ? "供应商首字节响应超时" : "供应商响应超时"}: ${responseTimeoutMs}ms 内未收到数据`,
-          524, // 524 = A Timeout Occurred (Cloudflare standard)
-          {
-            body: JSON.stringify({
-              error: {
-                type: "timeout_error",
-                message: `Provider failed to respond within ${responseTimeoutMs}ms`,
-                timeout_type: responseTimeoutType,
-                timeout_ms: responseTimeoutMs,
-              },
-            }),
-            parsed: {
-              error: {
-                type: "timeout_error",
-                message: `Provider failed to respond within ${responseTimeoutMs}ms`,
-                timeout_type: responseTimeoutType,
-                timeout_ms: responseTimeoutMs,
-              },
-            },
-            providerId: provider.id,
-            providerName: provider.name,
-          }
-        );
+        throw buildResponseTimeoutError(provider, responseTimeoutType, responseTimeoutMs);
       }
 
       // ⭐ 检测流式静默期超时（streaming_idle）
@@ -3694,6 +3715,59 @@ export class ProxyForwarder {
       }
       cleanupCombinedSignal();
     };
+
+    const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
+    if (contentType.includes("text/event-stream")) {
+      try {
+        const inspection = await inspectStreamingResponsePrefix(response);
+        if (inspection.kind === "fake_200") {
+          const overload = detectUpstreamOverloadFromSseOrJsonText(inspection.rawText);
+          const inferredStatus = inferUpstreamErrorStatusCodeFromText(inspection.rawText);
+          const statusCode = overload.isOverload ? 503 : (inferredStatus?.statusCode ?? 502);
+          const safeClientMessageCandidate = deriveClientSafeUpstreamErrorMessage({
+            rawText: inspection.rawText,
+            candidateMessage: overload.isOverload ? overload.message : inspection.detail,
+            providerName: provider.name,
+          });
+
+          throw new ProxyError(inspection.code, statusCode, {
+            body: inspection.detail ?? "",
+            providerId: provider.id,
+            providerName: provider.name,
+            rawBody: inspection.rawText,
+            rawBodyTruncated: inspection.rawBodyTruncated,
+            statusCodeInferred: overload.isOverload || inferredStatus !== null,
+            statusCodeInferenceMatcherId:
+              inferredStatus?.matcherId ??
+              (overload.isOverload ? "service_unavailable" : undefined),
+            isOverload: overload.isOverload,
+            safeClientMessageCandidate: safeClientMessageCandidate ?? undefined,
+          });
+        }
+        response = inspection.response;
+      } catch (error) {
+        const errorToThrow =
+          responseController.signal.aborted && !session.clientAbortSignal?.aborted
+            ? buildResponseTimeoutError(provider, responseTimeoutType, responseTimeoutMs)
+            : error;
+        if (errorToThrow instanceof ProxyError && errorToThrow.statusCode === 524) {
+          logger.error("ProxyForwarder: Response timeout while inspecting streaming prefix", {
+            providerId: provider.id,
+            providerName: provider.name,
+            responseTimeoutMs,
+            responseTimeoutType,
+          });
+        }
+        sessionWithTimeout.clearResponseTimeout?.();
+        sessionWithTimeout.clearResponseTimeout = undefined;
+        try {
+          sessionWithTimeout.releaseAgent?.();
+        } finally {
+          sessionWithTimeout.releaseAgent = undefined;
+        }
+        throw errorToThrow;
+      }
+    }
 
     return response;
   }
@@ -4915,6 +4989,7 @@ export class ProxyForwarder {
 
     return new ProxyError(ALL_PROVIDERS_UNAVAILABLE_MESSAGE, 503, {
       body: "",
+      isOverload: finalError instanceof ProxyError && finalError.upstreamError?.isOverload === true,
       safeClientMessageCandidate,
     });
   }
