@@ -51,18 +51,30 @@ describe.sequential("lifecycle/shutdown", () => {
   });
 
   it("runApplicationCleanup invokes the staged modules and survives one step throwing", async () => {
+    const calls: string[] = [];
     const stopCache = vi.fn();
+    const stopSmartProbe = vi.fn();
     const stopProbe = vi.fn();
     const stopPublicStatus = vi.fn(async () => {});
     const stopProbeLog = vi.fn();
+    const stopCleanupQueue = vi.fn(async () => {});
+    const stopNotificationQueue = vi.fn(async () => {});
     const shutdownTasks = vi.fn(() => {
       throw new Error("simulated tasks shutdown failure");
     });
-    const stopWriteBuffer = vi.fn(async () => {});
+    const stopWriteBuffer = vi.fn(async () => {
+      calls.push("write-buffer");
+    });
     const shutdownLf = vi.fn(async () => {});
-    const closeRedis = vi.fn(async () => {});
+    const closeDatabase = vi.fn(async () => {
+      calls.push("database");
+    });
+    const closeRedis = vi.fn(async () => {
+      calls.push("redis");
+    });
 
     vi.doMock("@/lib/cache/session-cache", () => ({ stopCacheCleanup: stopCache }));
+    vi.doMock("@/lib/circuit-breaker-probe", () => ({ stopProbeScheduler: stopSmartProbe }));
     vi.doMock("@/lib/provider-endpoints/probe-scheduler", () => ({
       stopEndpointProbeScheduler: stopProbe,
     }));
@@ -72,11 +84,14 @@ describe.sequential("lifecycle/shutdown", () => {
     vi.doMock("@/lib/provider-endpoints/probe-log-cleanup", () => ({
       stopEndpointProbeLogCleanup: stopProbeLog,
     }));
+    vi.doMock("@/lib/log-cleanup/cleanup-queue", () => ({ stopCleanupQueue }));
+    vi.doMock("@/lib/notification/notification-queue", () => ({ stopNotificationQueue }));
     vi.doMock("@/lib/async-task-manager", () => ({ shutdownAllAsyncTasks: shutdownTasks }));
     vi.doMock("@/repository/message-write-buffer", () => ({
       stopMessageRequestWriteBuffer: stopWriteBuffer,
     }));
     vi.doMock("@/lib/langfuse", () => ({ shutdownLangfuse: shutdownLf }));
+    vi.doMock("@/drizzle/db", () => ({ closeDatabase }));
     vi.doMock("@/lib/redis", () => ({ closeRedis }));
 
     const cleanupSpy = vi.fn();
@@ -97,15 +112,20 @@ describe.sequential("lifecycle/shutdown", () => {
     await runApplicationCleanup("SIGTERM", { totalTimeoutMs: 5_000, perStepTimeoutMs: 500 });
 
     expect(stopCache).toHaveBeenCalled();
+    expect(stopSmartProbe).toHaveBeenCalled();
     expect(stopProbe).toHaveBeenCalled();
     expect(stopPublicStatus).toHaveBeenCalled();
     expect(stopProbeLog).toHaveBeenCalled();
+    expect(stopCleanupQueue).toHaveBeenCalled();
+    expect(stopNotificationQueue).toHaveBeenCalled();
     expect(shutdownTasks).toHaveBeenCalled();
     expect(stopWriteBuffer).toHaveBeenCalled();
     expect(shutdownLf).toHaveBeenCalled();
+    expect(closeDatabase).toHaveBeenCalled();
     expect(closeRedis).toHaveBeenCalled();
     expect(cleanupSpy).toHaveBeenCalled();
     expect(clearIntervalSpy).toHaveBeenCalledWith(intervalId);
+    expect(calls).toEqual(["write-buffer", "database", "redis"]);
   });
 
   it("runApplicationCleanup returns within totalTimeoutMs even if one step hangs", async () => {
@@ -115,6 +135,7 @@ describe.sequential("lifecycle/shutdown", () => {
     });
 
     vi.doMock("@/lib/cache/session-cache", () => ({ stopCacheCleanup: () => {} }));
+    vi.doMock("@/lib/circuit-breaker-probe", () => ({ stopProbeScheduler: () => {} }));
     vi.doMock("@/lib/provider-endpoints/probe-scheduler", () => ({
       stopEndpointProbeScheduler: () => {},
     }));
@@ -124,12 +145,17 @@ describe.sequential("lifecycle/shutdown", () => {
     vi.doMock("@/lib/provider-endpoints/probe-log-cleanup", () => ({
       stopEndpointProbeLogCleanup: () => {},
     }));
+    vi.doMock("@/lib/log-cleanup/cleanup-queue", () => ({ stopCleanupQueue: async () => {} }));
+    vi.doMock("@/lib/notification/notification-queue", () => ({
+      stopNotificationQueue: async () => {},
+    }));
     vi.doMock("@/lib/async-task-manager", () => ({ shutdownAllAsyncTasks: () => {} }));
     vi.doMock("@/repository/message-write-buffer", () => ({
       stopMessageRequestWriteBuffer: async () => {},
     }));
     // The hanging step
     vi.doMock("@/lib/langfuse", () => ({ shutdownLangfuse: async () => hang }));
+    vi.doMock("@/drizzle/db", () => ({ closeDatabase: async () => {} }));
     vi.doMock("@/lib/redis", () => ({ closeRedis: async () => {} }));
 
     const { runApplicationCleanup } = await import("@/lib/lifecycle/shutdown");

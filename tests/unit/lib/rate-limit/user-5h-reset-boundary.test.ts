@@ -4,8 +4,7 @@ const getSessionMock = vi.fn();
 const findUserByIdMock = vi.fn();
 const getTimeRangeForPeriodMock = vi.fn();
 const getTimeRangeForPeriodWithModeMock = vi.fn();
-const sumUserCostInTimeRangeMock = vi.fn();
-const sumUserTotalCostMock = vi.fn();
+const sumUserQuotaCostsMock = vi.fn();
 const rateLimitGetCurrentCostMock = vi.fn();
 
 vi.mock("@/lib/auth", () => ({
@@ -24,8 +23,7 @@ vi.mock("@/lib/rate-limit/time-utils", () => ({
 }));
 
 vi.mock("@/repository/statistics", () => ({
-  sumUserCostInTimeRange: (...args: unknown[]) => sumUserCostInTimeRangeMock(...args),
-  sumUserTotalCost: (...args: unknown[]) => sumUserTotalCostMock(...args),
+  sumUserQuotaCosts: (...args: unknown[]) => sumUserQuotaCostsMock(...args),
 }));
 
 vi.mock("@/lib/rate-limit/service", () => ({
@@ -93,8 +91,13 @@ describe("user 5h reset boundary", () => {
       endTime: now,
     });
 
-    sumUserCostInTimeRangeMock.mockResolvedValue(1);
-    sumUserTotalCostMock.mockResolvedValue(10);
+    sumUserQuotaCostsMock.mockResolvedValue({
+      cost5h: 1,
+      costDaily: 1,
+      costWeekly: 1,
+      costMonthly: 1,
+      costTotal: 10,
+    });
     rateLimitGetCurrentCostMock.mockResolvedValue(2);
   });
 
@@ -121,7 +124,14 @@ describe("user 5h reset boundary", () => {
     const result = await getUserAllLimitUsage(1);
 
     expect(result.ok).toBe(true);
-    expect(sumUserCostInTimeRangeMock).toHaveBeenCalledWith(1, limit5hCostResetAt, now);
+    expect(sumUserQuotaCostsMock).toHaveBeenCalledWith(
+      1,
+      expect.objectContaining({
+        range5h: { startTime: limit5hCostResetAt, endTime: now },
+      }),
+      Infinity,
+      costResetAt
+    );
   });
 
   it("rolling 5h falls back to the full reset marker when it is newer than the 5h marker", async () => {
@@ -144,7 +154,14 @@ describe("user 5h reset boundary", () => {
     const result = await getUserAllLimitUsage(1);
 
     expect(result.ok).toBe(true);
-    expect(sumUserCostInTimeRangeMock).toHaveBeenCalledWith(1, newerFullResetAt, now);
+    expect(sumUserQuotaCostsMock).toHaveBeenCalledWith(
+      1,
+      expect.objectContaining({
+        range5h: { startTime: newerFullResetAt, endTime: now },
+      }),
+      Infinity,
+      newerFullResetAt
+    );
   });
 
   it("fixed 5h remains redis authoritative", async () => {
@@ -167,7 +184,57 @@ describe("user 5h reset boundary", () => {
 
     expect(result.ok).toBe(true);
     expect(rateLimitGetCurrentCostMock).toHaveBeenCalledWith(1, "user", "5h", "00:00", "fixed");
-    expect(sumUserCostInTimeRangeMock).not.toHaveBeenCalledWith(1, limit5hCostResetAt, now);
+    expect(result.ok && result.data.limit5h.usage).toBe(2);
+    expect(sumUserQuotaCostsMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("contains an aggregate database failure at the action boundary", async () => {
+    findUserByIdMock.mockResolvedValue({
+      id: 1,
+      name: "Test User",
+      dailyResetMode: "fixed",
+      dailyResetTime: "00:00",
+      limit5hUsd: 5,
+      limit5hResetMode: "rolling",
+      costResetAt,
+      limit5hCostResetAt,
+    });
+    sumUserQuotaCostsMock.mockRejectedValueOnce(new Error("query_wait_timeout"));
+
+    const { getUserAllLimitUsage } = await import("@/actions/users");
+    const result = await getUserAllLimitUsage(1);
+
+    expect(result).toEqual(
+      expect.objectContaining({
+        ok: false,
+        error: "query_wait_timeout",
+      })
+    );
+  });
+
+  it("contains a fixed 5h Redis failure at the action boundary", async () => {
+    findUserByIdMock.mockResolvedValue({
+      id: 1,
+      name: "Test User",
+      dailyResetMode: "fixed",
+      dailyResetTime: "00:00",
+      limit5hUsd: 5,
+      limit5hResetMode: "fixed",
+      costResetAt,
+      limit5hCostResetAt,
+    });
+    rateLimitGetCurrentCostMock.mockRejectedValueOnce(new Error("redis unavailable"));
+
+    const { getUserAllLimitUsage } = await import("@/actions/users");
+    const result = await getUserAllLimitUsage(1);
+
+    expect(result).toEqual(
+      expect.objectContaining({
+        ok: false,
+        error: "redis unavailable",
+      })
+    );
+    expect(sumUserQuotaCostsMock).toHaveBeenCalledTimes(1);
   });
 
   it("5h only reset leaves daily weekly monthly total intact", async () => {
@@ -190,14 +257,16 @@ describe("user 5h reset boundary", () => {
     const result = await getUserAllLimitUsage(1);
 
     expect(result.ok).toBe(true);
-    expect(sumUserCostInTimeRangeMock).toHaveBeenNthCalledWith(
-      2,
+    expect(sumUserQuotaCostsMock).toHaveBeenCalledWith(
       1,
-      new Date("2026-04-22T00:00:00.000Z"),
-      now
+      {
+        range5h: { startTime: limit5hCostResetAt, endTime: now },
+        rangeDaily: { startTime: new Date("2026-04-22T00:00:00.000Z"), endTime: now },
+        rangeWeekly: { startTime: costResetAt, endTime: now },
+        rangeMonthly: { startTime: costResetAt, endTime: now },
+      },
+      Infinity,
+      costResetAt
     );
-    expect(sumUserCostInTimeRangeMock).toHaveBeenNthCalledWith(3, 1, costResetAt, now);
-    expect(sumUserCostInTimeRangeMock).toHaveBeenNthCalledWith(4, 1, costResetAt, now);
-    expect(sumUserTotalCostMock).toHaveBeenCalledWith(1, Infinity, costResetAt);
   });
 });

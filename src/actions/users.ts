@@ -2161,7 +2161,7 @@ export async function getUserAllLimitUsage(userId: number): Promise<
       "@/lib/rate-limit/time-utils"
     );
     const { RateLimitService } = await import("@/lib/rate-limit/service");
-    const { sumUserCostInTimeRange, sumUserTotalCost } = await import("@/repository/statistics");
+    const { sumUserQuotaCosts } = await import("@/repository/statistics");
     const limit5hResetMode = user.limit5hResetMode ?? "rolling";
     const user5hCostResetAt = resolveUser5hCostResetAt(
       user.costResetAt ?? null,
@@ -2182,26 +2182,43 @@ export async function getUserAllLimitUsage(userId: number): Promise<
     const clipStart = (start: Date): Date => clipStartByResetAt(start, user.costResetAt ?? null);
     const clip5hStart = (start: Date): Date => clipStartByResetAt(start, user5hCostResetAt);
 
-    // 并行查询各时间范围的消费
-    // Note: sumUserTotalCost uses ALL_TIME_MAX_AGE_DAYS for all-time semantics
-    const [usage5h, usageDaily, usageWeekly, usageMonthly, usageTotal] = await Promise.all([
+    const ranges = {
+      range5h: {
+        startTime: clip5hStart(range5h.startTime),
+        endTime: range5h.endTime,
+      },
+      rangeDaily: {
+        startTime: clipStart(rangeDaily.startTime),
+        endTime: rangeDaily.endTime,
+      },
+      rangeWeekly: {
+        startTime: clipStart(rangeWeekly.startTime),
+        endTime: rangeWeekly.endTime,
+      },
+      rangeMonthly: {
+        startTime: clipStart(rangeMonthly.startTime),
+        endTime: rangeMonthly.endTime,
+      },
+    };
+
+    // One aggregate query replaces the previous four/five-query fan-out. Fixed 5-hour accounting
+    // remains Redis-authoritative and can run alongside the single database round trip.
+    const [costs, fixed5hCost] = await Promise.all([
+      sumUserQuotaCosts(userId, ranges, ALL_TIME_MAX_AGE_DAYS, user.costResetAt),
       limit5hResetMode === "fixed"
         ? RateLimitService.getCurrentCost(userId, "user", "5h", "00:00", limit5hResetMode)
-        : sumUserCostInTimeRange(userId, clip5hStart(range5h.startTime), range5h.endTime),
-      sumUserCostInTimeRange(userId, clipStart(rangeDaily.startTime), rangeDaily.endTime),
-      sumUserCostInTimeRange(userId, clipStart(rangeWeekly.startTime), rangeWeekly.endTime),
-      sumUserCostInTimeRange(userId, clipStart(rangeMonthly.startTime), rangeMonthly.endTime),
-      sumUserTotalCost(userId, ALL_TIME_MAX_AGE_DAYS, user.costResetAt),
+        : Promise.resolve(undefined),
     ]);
+    const usage5h = fixed5hCost ?? costs.cost5h;
 
     return {
       ok: true,
       data: {
         limit5h: { usage: usage5h, limit: user.limit5hUsd ?? null },
-        limitDaily: { usage: usageDaily, limit: user.dailyQuota ?? null },
-        limitWeekly: { usage: usageWeekly, limit: user.limitWeeklyUsd ?? null },
-        limitMonthly: { usage: usageMonthly, limit: user.limitMonthlyUsd ?? null },
-        limitTotal: { usage: usageTotal, limit: user.limitTotalUsd ?? null },
+        limitDaily: { usage: costs.costDaily, limit: user.dailyQuota ?? null },
+        limitWeekly: { usage: costs.costWeekly, limit: user.limitWeeklyUsd ?? null },
+        limitMonthly: { usage: costs.costMonthly, limit: user.limitMonthlyUsd ?? null },
+        limitTotal: { usage: costs.costTotal, limit: user.limitTotalUsd ?? null },
       },
     };
   } catch (error) {

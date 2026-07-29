@@ -76,7 +76,18 @@ export async function runApplicationCleanup(
       "stopCacheCleanup"
     );
 
-    // 2. 端点探测调度器
+    // 2. 智能探测调度器。它也注册了信号监听器，但显式纳入统一生命周期，避免依赖
+    // process listener 的注册顺序后仍在数据库关闭期间发起查询。
+    await withTimeout(
+      (async () => {
+        const { stopProbeScheduler } = await import("@/lib/circuit-breaker-probe");
+        stopProbeScheduler();
+      })(),
+      stepMs,
+      "stopProbeScheduler"
+    );
+
+    // 3. 端点探测调度器
     await withTimeout(
       (async () => {
         const { stopEndpointProbeScheduler } = await import(
@@ -88,7 +99,7 @@ export async function runApplicationCleanup(
       "stopEndpointProbeScheduler"
     );
 
-    // 3. 公共状态重建调度器
+    // 4. 公共状态重建调度器
     await withTimeout(
       (async () => {
         const { stopPublicStatusRebuildScheduler } = await import("@/lib/public-status/scheduler");
@@ -98,7 +109,7 @@ export async function runApplicationCleanup(
       "stopPublicStatusRebuildScheduler"
     );
 
-    // 4. 端点探测日志清理
+    // 5. 端点探测日志清理
     await withTimeout(
       (async () => {
         const { stopEndpointProbeLogCleanup } = await import(
@@ -110,61 +121,26 @@ export async function runApplicationCleanup(
       "stopEndpointProbeLogCleanup"
     );
 
-    // 5. 取消仍在飞的后台异步任务。
-    //    必须排在 message-buffer flush 之前——任务被 abort 时仍会写出尾部日志/用量记录，
-    //    flush 才能把这些尾部更新真正落库。
+    // 6. 关闭 Bull 后台队列，等待正在执行的 cleanup/notification job 离开数据库边界。
     await withTimeout(
       (async () => {
-        const { shutdownAllAsyncTasks } = await import("@/lib/async-task-manager");
-        shutdownAllAsyncTasks();
+        const { stopCleanupQueue } = await import("@/lib/log-cleanup/cleanup-queue");
+        await stopCleanupQueue();
       })(),
       stepMs,
-      "shutdownAllAsyncTasks"
+      "stopCleanupQueue"
     );
-
-    // 6. 刷写 message_request 异步写缓冲
     await withTimeout(
       (async () => {
-        const { stopMessageRequestWriteBuffer } = await import("@/repository/message-write-buffer");
-        await stopMessageRequestWriteBuffer();
+        const { stopNotificationQueue } = await import("@/lib/notification/notification-queue");
+        await stopNotificationQueue();
       })(),
       stepMs,
-      "stopMessageRequestWriteBuffer"
+      "stopNotificationQueue"
     );
 
-    // 7. Langfuse 自带超时（LANGFUSE_SHUTDOWN_TIMEOUT_MS），这里再加一层兜底
-    await withTimeout(
-      (async () => {
-        const { shutdownLangfuse } = await import("@/lib/langfuse");
-        await shutdownLangfuse();
-      })(),
-      stepMs,
-      "shutdownLangfuse"
-    );
-
-    // 8. Redis 连接最后关：上面的步骤可能仍在写日志/缓存
-    await withTimeout(
-      (async () => {
-        const { closeRedis } = await import("@/lib/redis");
-        await closeRedis();
-      })(),
-      stepMs,
-      "closeRedis"
-    );
-
-    // 9. API Key Vacuum Filter 订阅清理 —— 同步函数，不需要 timeout
-    try {
-      const g = globalThis as unknown as {
-        __CCH_API_KEY_VF_SYNC_CLEANUP__?: (() => void) | null;
-      };
-      g.__CCH_API_KEY_VF_SYNC_CLEANUP__?.();
-    } catch (error) {
-      logger.warn("[Shutdown] api-key vacuum filter cleanup failed", {
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
-
-    // 10. 云价格定时同步
+    // 7. 云价格定时同步必须在数据库关闭前停止。清除 interval 防止新一轮开始；若已有一轮
+    // 正在查询，postgres.js end() 会等待该查询到达边界或在自己的 timeout 内结束。
     try {
       const g = globalThis as unknown as {
         __CCH_CLOUD_PRICE_SYNC_INTERVAL_ID__?: ReturnType<typeof setInterval>;
@@ -178,6 +154,70 @@ export async function runApplicationCleanup(
         error: error instanceof Error ? error.message : String(error),
       });
     }
+
+    // 8. 取消仍在飞的后台异步任务。
+    //    必须排在 message-buffer flush 之前——任务被 abort 时仍会写出尾部日志/用量记录，
+    //    flush 才能把这些尾部更新真正落库。
+    await withTimeout(
+      (async () => {
+        const { shutdownAllAsyncTasks } = await import("@/lib/async-task-manager");
+        shutdownAllAsyncTasks();
+      })(),
+      stepMs,
+      "shutdownAllAsyncTasks"
+    );
+
+    // 9. 刷写 message_request 异步写缓冲
+    await withTimeout(
+      (async () => {
+        const { stopMessageRequestWriteBuffer } = await import("@/repository/message-write-buffer");
+        await stopMessageRequestWriteBuffer();
+      })(),
+      stepMs,
+      "stopMessageRequestWriteBuffer"
+    );
+
+    // 10. Langfuse 自带超时（LANGFUSE_SHUTDOWN_TIMEOUT_MS），这里再加一层兜底
+    await withTimeout(
+      (async () => {
+        const { shutdownLangfuse } = await import("@/lib/langfuse");
+        await shutdownLangfuse();
+      })(),
+      stepMs,
+      "shutdownLangfuse"
+    );
+
+    // 11. 所有数据库 producer 已停止并完成必要 flush，现在关闭进程级共享 pool。
+    await withTimeout(
+      (async () => {
+        const { closeDatabase } = await import("@/drizzle/db");
+        await closeDatabase();
+      })(),
+      stepMs,
+      "closeDatabase"
+    );
+
+    // 12. API Key Vacuum Filter 先取消 Redis 订阅，再关闭 Redis client。
+    try {
+      const g = globalThis as unknown as {
+        __CCH_API_KEY_VF_SYNC_CLEANUP__?: (() => void) | null;
+      };
+      g.__CCH_API_KEY_VF_SYNC_CLEANUP__?.();
+    } catch (error) {
+      logger.warn("[Shutdown] api-key vacuum filter cleanup failed", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+
+    // 13. Redis 连接最后关：上面的步骤可能仍在写日志/缓存
+    await withTimeout(
+      (async () => {
+        const { closeRedis } = await import("@/lib/redis");
+        await closeRedis();
+      })(),
+      stepMs,
+      "closeRedis"
+    );
   })();
 
   const total = new Promise<void>((resolve) => {
