@@ -19,15 +19,8 @@ export async function handleProxyRequest(c: Context): Promise<Response> {
   let session: ProxySession | null = null;
   let cachedSystemSettings: Awaited<ReturnType<typeof getCachedSystemSettings>> | null = null;
   try {
-    session = await ProxySession.fromContext(c);
     try {
       cachedSystemSettings = await getCachedSystemSettings();
-      session.setHighConcurrencyModeEnabled(
-        cachedSystemSettings.enableHighConcurrencyMode ?? false
-      );
-      session.setRawCrossProviderFallbackEnabled(
-        cachedSystemSettings.allowNonConversationEndpointProviderFallback ?? true
-      );
     } catch (settingsError) {
       logger.warn(
         "[ProxyHandler] Failed to load proxy system settings, fallback highConcurrency=false and rawCrossProviderFallback=false",
@@ -35,9 +28,16 @@ export async function handleProxyRequest(c: Context): Promise<Response> {
           error: settingsError,
         }
       );
-      session.setHighConcurrencyModeEnabled(false);
-      session.setRawCrossProviderFallbackEnabled(false);
     }
+
+    const highConcurrencyModeEnabled = cachedSystemSettings?.enableHighConcurrencyMode ?? false;
+    session = await ProxySession.fromContext(c, { highConcurrencyModeEnabled });
+    session.setHighConcurrencyModeEnabled(highConcurrencyModeEnabled);
+    session.setRawCrossProviderFallbackEnabled(
+      cachedSystemSettings
+        ? (cachedSystemSettings.allowNonConversationEndpointProviderFallback ?? true)
+        : false
+    );
 
     // 自动检测请求格式（端点优先，请求体补充）
     if (session.originalFormat === "claude") {

@@ -30,6 +30,14 @@ import {
   parseOpenAIImageMultipartMetadata,
 } from "./openai-image-compat";
 import { decodeRequestBody, parseContentEncoding } from "./request-body-codec";
+import {
+  buildHighConcurrencyCodexRequestSummary,
+  type ProxySessionCreationOptions,
+  shouldDirectlyConsumeHighConcurrencyCodexRequest,
+  shouldUseHighConcurrencyCodexSseRetention,
+} from "./request-retention";
+
+export type { ProxySessionCreationOptions } from "./request-retention";
 
 /**
  * Classification of an auth failure, used to decide whether to record the
@@ -241,13 +249,16 @@ export class ProxySession {
     this.endpointPolicy = resolveSessionEndpointPolicy(init.requestUrl);
   }
 
-  static async fromContext(c: Context): Promise<ProxySession> {
+  static async fromContext(
+    c: Context,
+    options: ProxySessionCreationOptions = {}
+  ): Promise<ProxySession> {
     const startTime = Date.now();
     const method = c.req.method.toUpperCase();
     const requestUrl = new URL(c.req.url);
     const headers = new Headers(c.req.header());
     const headerLog = formatHeadersForLog(headers);
-    const bodyResult = await parseRequestBody(c);
+    const bodyResult = await parseRequestBody(c, options);
 
     // 已在代理内解压请求体：剥离 content-encoding，避免上游对明文再次解码
     // （raw passthrough 也会转发解压后的字节；content-length 由出站黑名单重算）。
@@ -310,7 +321,7 @@ export class ProxySession {
       imageRequestMetadata: bodyResult.imageRequestMetadata,
     };
 
-    return new ProxySession({
+    const session = new ProxySession({
       startTime,
       method,
       requestUrl,
@@ -321,6 +332,8 @@ export class ProxySession {
       context: c,
       clientAbortSignal,
     });
+    session.setHighConcurrencyModeEnabled(options.highConcurrencyModeEnabled ?? false);
+    return session;
   }
 
   /**
@@ -1211,7 +1224,10 @@ function parseContentLengthHeader(value: string | undefined): number | null {
   return parsed;
 }
 
-async function parseRequestBody(c: Context): Promise<RequestBodyResult> {
+async function parseRequestBody(
+  c: Context,
+  options: ProxySessionCreationOptions
+): Promise<RequestBodyResult> {
   const method = c.req.method.toUpperCase();
   const hasBody = method !== "GET" && method !== "HEAD";
 
@@ -1230,7 +1246,14 @@ async function parseRequestBody(c: Context): Promise<RequestBodyResult> {
   }
 
   // 原始（可能被压缩的）入站字节：用于截断检测与 multipart 透传。
-  const rawBodyBuffer = await c.req.raw.clone().arrayBuffer();
+  // Reading a cloned Request tees its body. If the original branch is never consumed, the stream
+  // may retain the complete request in that branch's queue for the lifetime of the Hono Context.
+  // High-concurrency standard Responses requests have no downstream raw-body consumer, so consume
+  // the original stream directly. Normal/debug and raw-passthrough paths preserve their behavior.
+  const rawRequest = shouldDirectlyConsumeHighConcurrencyCodexRequest(pathname, options)
+    ? c.req.raw
+    : c.req.raw.clone();
+  const rawBodyBuffer = await rawRequest.arrayBuffer();
   const receivedBodyBytes = rawBodyBuffer.byteLength;
 
   // Truncation detection: warn only when both conditions are met
@@ -1292,7 +1315,17 @@ async function parseRequestBody(c: Context): Promise<RequestBodyResult> {
   try {
     const parsedMessage = JSON.parse(requestBodyText) as Record<string, unknown>;
     requestMessage = parsedMessage; // 保留原始数据用于业务逻辑
-    requestBodyLog = JSON.stringify(optimizeRequestMessage(parsedMessage), null, 2); // 仅在日志中优化
+    if (shouldUseHighConcurrencyCodexSseRetention(pathname, parsedMessage, options)) {
+      requestBodyLog = buildHighConcurrencyCodexRequestSummary(
+        parsedMessage,
+        receivedBodyBytes,
+        requestBodyBuffer.byteLength
+      );
+      requestBodyLogNote =
+        "High-concurrency Codex SSE request body omitted; structural summary retained.";
+    } else {
+      requestBodyLog = JSON.stringify(optimizeRequestMessage(parsedMessage), null, 2); // 仅在日志中优化
+    }
   } catch {
     requestMessage = { raw: requestBodyText };
     requestBodyLog = requestBodyText;
@@ -1303,7 +1336,9 @@ async function parseRequestBody(c: Context): Promise<RequestBodyResult> {
     requestMessage,
     requestBodyLog,
     requestBodyLogNote,
-    requestBodyBuffer,
+    requestBodyBuffer: shouldUseHighConcurrencyCodexSseRetention(pathname, requestMessage, options)
+      ? undefined
+      : requestBodyBuffer,
     contentLength,
     // 维持原语义：actualBodyBytes 表示「接收到的原始（线上）字节」，供
     // isLargeRequestBody 的截断提示判断使用，不受解压后体积影响。

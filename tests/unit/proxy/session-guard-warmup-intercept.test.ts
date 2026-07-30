@@ -159,6 +159,7 @@ describe("ProxySessionGuard：warmup 拦截不应计入并发会话", () => {
 
   test("高并发模式：仍分配 session/requestSequence，但跳过 request 调试快照与 session 观测写入", async () => {
     const ProxySessionGuard = await loadGuard();
+    const structuredCloneSpy = vi.spyOn(globalThis, "structuredClone");
     getCachedSystemSettingsMock.mockResolvedValueOnce({
       enableHighConcurrencyMode: true,
       interceptAnthropicWarmupRequests: false,
@@ -177,10 +178,13 @@ describe("ProxySessionGuard：warmup 拦截不应计入并发会话", () => {
     expect(storeSessionRequestPhaseSnapshotMock).not.toHaveBeenCalled();
     expect(storeSessionInfoMock).not.toHaveBeenCalled();
     expect(trackSessionMock).not.toHaveBeenCalled();
+    expect(structuredCloneSpy).not.toHaveBeenCalled();
+    structuredCloneSpy.mockRestore();
   });
 
   test("落 request.before 快照时保留原始请求体，并过滤客户端网络标识 headers", async () => {
     const ProxySessionGuard = await loadGuard();
+    const structuredCloneSpy = vi.spyOn(globalThis, "structuredClone");
     const session = createMockSession({
       headers: new Headers({
         "content-type": "application/json",
@@ -218,6 +222,8 @@ describe("ProxySessionGuard：warmup 拦截不应计入并发会话", () => {
       }),
       1
     );
+    expect(structuredCloneSpy).toHaveBeenCalledTimes(1);
+    structuredCloneSpy.mockRestore();
   });
 
   test("Claude 旧版本请求缺少 user_id 但有 metadata.session_id 时，应使用最终 sessionId 补全 user_id", async () => {

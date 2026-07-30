@@ -1,4 +1,4 @@
-import { describe, expect, test, vi } from "vitest";
+import { beforeEach, describe, expect, test, vi } from "vitest";
 import { resolveEndpointPolicy } from "@/app/v1/_lib/proxy/endpoint-policy";
 import { V1_ENDPOINT_PATHS } from "@/app/v1/_lib/proxy/endpoint-paths";
 import { ProxyResponses } from "@/app/v1/_lib/proxy/responses";
@@ -36,11 +36,21 @@ const h = vi.hoisted(() => ({
 
   endpointFormat: null as string | null,
   trackerCalls: [] as string[],
+  fromContextOptions: null as unknown,
+  systemSettings: {
+    enableHighConcurrencyMode: false,
+    allowNonConversationEndpointProviderFallback: true,
+  },
+}));
+
+vi.mock("@/lib/config", () => ({
+  getCachedSystemSettings: async () => h.systemSettings,
 }));
 
 vi.mock("@/app/v1/_lib/proxy/session", () => ({
   ProxySession: {
-    fromContext: async () => {
+    fromContext: async (_context: unknown, options: unknown) => {
+      h.fromContextOptions = options;
       if (h.fromContextError) throw h.fromContextError;
       return h.session;
     },
@@ -124,6 +134,23 @@ async function expectMessageSuffixOnly(
 
 describe("handleProxyRequest - session id on errors", async () => {
   const { handleProxyRequest } = await import("@/app/v1/_lib/proxy-handler");
+
+  beforeEach(() => {
+    h.fromContextOptions = null;
+    h.systemSettings.enableHighConcurrencyMode = false;
+  });
+
+  test("passes high-concurrency retention policy before session body parsing", async () => {
+    h.fromContextError = null;
+    h.systemSettings.enableHighConcurrencyMode = true;
+    h.session.originalFormat = "openai";
+    h.pipelineError = null;
+    h.earlyResponse = ProxyResponses.buildError(400, "stop after parsing");
+
+    await handleProxyRequest({} as any);
+
+    expect(h.fromContextOptions).toEqual({ highConcurrencyModeEnabled: true });
+  });
 
   test("decorates early error response with message suffix only", async () => {
     h.fromContextError = null;

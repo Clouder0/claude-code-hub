@@ -82,7 +82,11 @@ export class ProxySessionGuard {
       const allowRawSessionContext = session.isRawCrossProviderFallbackEnabled();
       session.setHighConcurrencyModeEnabled(systemSettings.enableHighConcurrencyMode ?? false);
       let requestMessageBeforeProxyMutations = session.request.message as Record<string, unknown>;
-      if (session.request.message && typeof session.request.message === "object") {
+      if (
+        session.shouldPersistSessionDebugArtifacts() &&
+        session.request.message &&
+        typeof session.request.message === "object"
+      ) {
         try {
           requestMessageBeforeProxyMutations = structuredClone(
             session.request.message as Record<string, unknown>
