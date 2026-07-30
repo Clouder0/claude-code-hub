@@ -21,6 +21,7 @@ const mocks = vi.hoisted(() => {
     recordVendorTypeAllEndpointsTimeout: vi.fn(async () => {}),
     // ErrorCategory.PROVIDER_ERROR
     categorizeErrorAsync: vi.fn(async () => 0),
+    loggerWarn: vi.fn(),
   };
 });
 
@@ -28,7 +29,7 @@ vi.mock("@/lib/logger", () => ({
   logger: {
     debug: vi.fn(),
     info: vi.fn(),
-    warn: vi.fn(),
+    warn: mocks.loggerWarn,
     trace: vi.fn(),
     error: vi.fn(),
     fatal: vi.fn(),
@@ -85,8 +86,11 @@ vi.mock("@/app/v1/_lib/proxy/errors", async (importOriginal) => {
 
 import { ProxyForwarder } from "@/app/v1/_lib/proxy/forwarder";
 import { ProxyError } from "@/app/v1/_lib/proxy/errors";
+import { resetFake200SseDiagnosticLogRateLimitForTests } from "@/app/v1/_lib/proxy/fake-200-observability";
 import { ProxySession } from "@/app/v1/_lib/proxy/session";
 import type { Provider } from "@/types/provider";
+
+const encoder = new TextEncoder();
 
 function createProvider(overrides: Partial<Provider> = {}): Provider {
   return {
@@ -197,6 +201,7 @@ function createSession(): ProxySession {
 describe("ProxyForwarder - fake 200 HTML body", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    resetFake200SseDiagnosticLogRateLimitForTests();
   });
 
   test("200 + text/html 的 HTML 页面应视为失败并切换供应商", async () => {
@@ -286,6 +291,7 @@ describe("ProxyForwarder - fake 200 HTML body", () => {
       input: "hello",
       stream: true,
     };
+    session.setHighConcurrencyModeEnabled(true);
     session.setProvider(provider1);
 
     mocks.pickRandomProviderWithExclusion.mockImplementationOnce(async (selectedSession) => {
@@ -299,13 +305,13 @@ describe("ProxyForwarder - fake 200 HTML body", () => {
     });
 
     const failedAttemptCancelled = vi.fn();
-    const fake200Body = JSON.stringify({
-      error: {
-        message: "Our servers are currently overloaded. Please try again later.",
-        type: "service_unavailable_error",
-        code: "service_unavailable_error",
-      },
-    });
+    const overloadMessage = "Our servers are currently overloaded. Please try again later.";
+    const fake200Body = [
+      'data: {"type":"response.created"}\n\n',
+      'data: {"type":"response.in_progress"}\n\n',
+      'data: {"type":"response.failed","response":{"error":{"code":"server_is_overloaded",',
+      `"type":"service_unavailable_error","message":"${overloadMessage}"}}}\n\n`,
+    ].join("");
     const successfulBody = [
       'event: response.created\ndata: {"type":"response.created"}\n\n',
       'event: response.completed\ndata: {"type":"response.completed"}\n\n',
@@ -352,6 +358,31 @@ describe("ProxyForwarder - fake 200 HTML body", () => {
     });
     expect(failedAttemptCancelled).toHaveBeenCalledWith("fake_200");
     expect(session.provider?.id).toBe(provider2.id);
+    const fake200Diagnostic = mocks.loggerWarn.mock.calls.find(
+      ([message]) =>
+        message === "ProxyForwarder: Fake-200 SSE detected before downstream commitment"
+    )?.[1];
+    expect(fake200Diagnostic).toMatchObject({
+      event: "proxy.upstream_fake_200",
+      phase: "responses_pre_output_gate",
+      highConcurrencyMode: true,
+      providerId: provider1.id,
+      endpointId: null,
+      attemptNumber: 1,
+      upstreamStatusCode: 200,
+      downstreamCommitted: false,
+      protocol: {
+        observedEventTypes: ["response.created", "response.in_progress", "response.failed"],
+        detectorCode: "FAKE_200_JSON_ERROR_MESSAGE_NON_EMPTY",
+        overloadMatcherId: "error_code_server_is_overloaded",
+        inferredStatusCode: 503,
+        upstreamErrorCode: "server_is_overloaded",
+        upstreamErrorType: "service_unavailable_error",
+        upstreamErrorMessageLength: overloadMessage.length,
+      },
+    });
+    expect(JSON.stringify(fake200Diagnostic)).not.toContain(overloadMessage);
+    expect(JSON.stringify(fake200Diagnostic)).not.toContain('"rawText"');
 
     const runtime = session as ProxySession & {
       clearResponseTimeout?: () => void;
@@ -359,6 +390,126 @@ describe("ProxyForwarder - fake 200 HTML body", () => {
     };
     runtime.clearResponseTimeout?.();
     runtime.releaseAgent?.();
+  });
+
+  test("/v1/responses lifecycle bytes clear first-byte timeout before a later fake-200", async () => {
+    vi.useFakeTimers();
+    try {
+      const provider = createProvider({
+        id: 1,
+        name: "capacity-a",
+        providerType: "codex",
+        firstByteTimeoutStreamingMs: 50,
+        streamingIdleTimeoutMs: 0,
+      });
+      const session = createSession();
+      session.requestUrl = new URL("https://example.com/v1/responses");
+      session.endpointPolicy = resolveEndpointPolicy("/v1/responses");
+      session.originalFormat = "openai";
+      session.request.message = { model: "gpt-5.6", input: "hello", stream: true };
+      session.setProvider(provider);
+
+      const response = new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(encoder.encode('data: {"type":"response.created"}\n\n'));
+            setTimeout(() => {
+              controller.enqueue(
+                encoder.encode(
+                  'data: {"type":"response.failed","response":{"error":{"code":"server_is_overloaded"}}}\n\n'
+                )
+              );
+              controller.close();
+            }, 100);
+          },
+        }),
+        { status: 200, headers: { "content-type": "text/event-stream" } }
+      );
+      vi.spyOn(ProxyForwarder as never, "fetchWithoutAutoDecode").mockResolvedValueOnce(response);
+
+      const { doForward } = ProxyForwarder as unknown as {
+        doForward: (
+          session: ProxySession,
+          provider: Provider,
+          baseUrl: string
+        ) => Promise<Response>;
+      };
+      const forward = doForward(session, provider, provider.url);
+      const expectedFake200 = expect(forward).rejects.toMatchObject<Partial<ProxyError>>({
+        statusCode: 503,
+      });
+
+      await vi.advanceTimersByTimeAsync(100);
+      await expectedFake200;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("/v1/responses lifecycle hold reports streaming idle timeout instead of first-byte timeout", async () => {
+    vi.useFakeTimers();
+    try {
+      const provider = createProvider({
+        id: 1,
+        name: "capacity-a",
+        providerType: "codex",
+        firstByteTimeoutStreamingMs: 1_000,
+        streamingIdleTimeoutMs: 50,
+      });
+      const session = createSession();
+      session.requestUrl = new URL("https://example.com/v1/responses");
+      session.endpointPolicy = resolveEndpointPolicy("/v1/responses");
+      session.originalFormat = "openai";
+      session.request.message = { model: "gpt-5.6", input: "hello", stream: true };
+      session.setProvider(provider);
+
+      let emittedLifecycle = false;
+      const response = new Response(
+        new ReadableStream<Uint8Array>({
+          pull(controller) {
+            if (!emittedLifecycle) {
+              emittedLifecycle = true;
+              controller.enqueue(encoder.encode('data: {"type":"response.created"}\n\n'));
+              return;
+            }
+
+            const runtime = session as ProxySession & { responseController?: AbortController };
+            const abort = () => controller.error(runtime.responseController?.signal.reason);
+            if (runtime.responseController?.signal.aborted) {
+              abort();
+              return;
+            }
+            runtime.responseController?.signal.addEventListener("abort", abort, { once: true });
+          },
+        }),
+        { status: 200, headers: { "content-type": "text/event-stream" } }
+      );
+      vi.spyOn(ProxyForwarder as never, "fetchWithoutAutoDecode").mockResolvedValueOnce(response);
+
+      const { doForward } = ProxyForwarder as unknown as {
+        doForward: (
+          session: ProxySession,
+          provider: Provider,
+          baseUrl: string
+        ) => Promise<Response>;
+      };
+      const forward = doForward(session, provider, provider.url);
+      const expectedIdleTimeout = expect(forward).rejects.toMatchObject<Partial<ProxyError>>({
+        statusCode: 524,
+        upstreamError: {
+          parsed: {
+            error: {
+              type: "streaming_idle_timeout",
+            },
+          },
+        },
+      });
+
+      await vi.advanceTimersByTimeAsync(50);
+      await expectedIdleTimeout;
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   test("/v1/responses 所有供应商 fake-200 overload 时保留终态 503 身份", async () => {
@@ -399,13 +550,11 @@ describe("ProxyForwarder - fake 200 HTML body", () => {
     );
 
     const cancelledAttempts: unknown[] = [];
-    const fake200Body = JSON.stringify({
-      error: {
-        message: "Our servers are currently overloaded. Please try again later.",
-        type: "service_unavailable_error",
-        code: "service_unavailable_error",
-      },
-    });
+    const fake200Body = [
+      'data: {"type":"response.created"}\n\n',
+      'data: {"type":"response.failed","response":{"error":{"code":"server_is_overloaded",',
+      '"type":"service_unavailable_error","message":"Our servers are currently overloaded. Please try again later."}}}\n\n',
+    ].join("");
     const fake200Response = () =>
       new Response(
         new ReadableStream<Uint8Array>({

@@ -1,217 +1,280 @@
 # Fake-200 Overload Recovery Plan
 
-Status: Ready for Human Acceptance
+Status: Ready for Human Acceptance — implementation, isolated Codex evidence, and Goal review complete
 
 ## Goal
 
 ### Target
 
-When an upstream OpenAI/Codex provider labels a response as HTTP 200 SSE but the first complete
-payload is an overload error, CCH must detect the failure before committing any bytes downstream,
-then reuse the existing provider retry and failover state machine. Codex must receive only the
-eventual successful provider stream or a real HTTP 503 response that enters Codex's transport retry
-loop; an overload must never escape as an HTTP 200 stream error before CCH recovery is exhausted.
+For a standard streaming `/v1/responses` request, when an upstream OpenAI/Codex-compatible
+provider sends an HTTP 200 SSE stream whose pre-output Responses lifecycle ends in a structured
+error (in particular `response.failed.response.error.code = server_is_overloaded` or `slow_down`),
+CCH must detect it before committing any bytes to the client. It must then cancel that attempt and
+reuse the existing provider failure, retry, and failover state machine. The client must receive only
+the successful provider's stream, or a real terminal HTTP 503 carrying `server_is_overloaded` when
+CCH recovery is exhausted.
+
+The repair also adds bounded, redacted error-only diagnostics for this decision point. They must
+remain available in high-concurrency mode without retaining request/response content or adding a
+database, Redis, or session-debug write.
 
 ### Success conditions
 
-- A fake-200 overload split across arbitrary network chunks is classified before downstream commit.
-- Structured overload codes (`server_is_overloaded`, `slow_down`) take precedence over conservative
-  overload-message fallbacks; generic `try again later` text alone is not classified as overload.
-- The failed upstream attempt is cancelled and released, then the existing same-provider retry or
-  alternative-provider selection actually executes.
-- A normal SSE response remains byte-for-byte equivalent and streaming; only a bounded prefix is
-  retained.
-- Client cancellation propagates through prefix inspection and replay without leaking readers,
-  listeners, or agent references.
-- If every CCH recovery attempt fails, the complete proxy path returns HTTP 503 with a top-level
-  `server_is_overloaded` error code before committing any SSE bytes.
-- A real Codex client retries that terminal HTTP 503 according to its request retry policy and can
-  complete the same turn when a later request succeeds.
-- CCH and Codex retry composition has a measured, documented upstream-attempt bound.
-- Focused tests, full tests, lint, typecheck, and production build pass.
+- Existing generic first-payload fake-200 detection continues to protect every SSE route.
+- Only canonical streaming `/v1/responses` gets a multi-event, pre-output Responses lifecycle gate.
+- `response.created`, `response.queued`, and `response.in_progress` are held; a subsequent
+  recognized fake-200 error is raised before client commitment and upstream is cancelled.
+- The event's JSON `data.type` is authoritative; an SSE `event:` name is only a fallback when the
+  parsed data has no type. Fragmented network chunks and absent `event:` headers work correctly.
+- The first actual output-bearing, terminal, unknown, or malformed event passes through unchanged.
+  In particular, the repair never retries after potentially visible model/tool/reasoning output.
+- A normal stream remains byte-for-byte equivalent and streaming after the bounded held prefix.
+- Prefix memory stays capped at 32 KiB. EOF, malformed ambiguous input, and cap exhaustion fail
+  open to the existing streaming/finalization path rather than creating unbounded buffering.
+- First-byte and streaming-idle timeout semantics remain correct while the gate owns upstream reads:
+  no false 524 after a received lifecycle frame and no lifecycle-only stream can bypass idle timeout.
+- A gate-detected fake-200 emits one bounded, redacted structured warning before Forwarder re-enters
+  provider recovery; logging never includes a raw SSE body, request body, prompt, headers, URL/query,
+  credentials, model output, user/session identifiers, or message text.
+- Focused tests, required quality checks, and an isolated real Codex retry harness establish the
+  complete CCH-to-Codex behavior after the full path is repaired.
 
 ### Blocked stop conditions
 
-- The current connection lifecycle cannot give a failed pre-commit attempt ownership of its cleanup
-  without a broader proxy lifecycle redesign.
-- Correct detection would require buffering an unbounded response or replaying after downstream
-  bytes have already been committed.
+- Correct pre-output detection requires retaining an unbounded stream or replaying after client bytes
+  have committed.
+- The current timeout/reader lifecycle cannot transfer gate ownership without a broader, separately
+  approved proxy lifecycle redesign.
+
+## Current Model and Material Discovery
+
+The historical Codex trace proves the externally observable failure: `/v1/responses` returned HTTP
+200 with `text/event-stream`, and the same Codex turn ended as “Selected model is at capacity.” The
+stored trace does not contain the original overload SSE body, so it is not evidence for a particular
+wire envelope. The supplied CCH diagnostic screenshot is evidence that an upstream overload body was
+classified as `FAKE_200_JSON_ERROR_MESSAGE_NON_EMPTY` with inferred HTTP 503, yet only one provider
+attempt occurred despite alternatives.
+
+The detector is not the missing component. It already recognizes top-level error objects,
+`response.failed.response.error`, `server_is_overloaded`, `slow_down`, and conservative capacity
+messages. The current gate instead returns `pass` after its first complete non-error SSE `data:`
+event. This sequence therefore escapes:
+
+```text
+HTTP 200 SSE
+  response.created
+  response.in_progress
+  response.failed { response.error.code = server_is_overloaded }
+```
+
+After `response.created`, CCH has replayed the stream downstream. `ResponseHandler` can later repair
+accounting and circuit-breaker state, but it cannot re-enter Forwarder's provider loop. Codex maps the
+later `response.failed` to `ServerOverloaded`, which its turn layer deliberately treats as
+non-retryable. This explains why a real pre-stream HTTP 503 retries in Codex while this fake-200 path
+does not.
+
+The previous plan's accepted assumption—“the first complete non-error SSE payload is sufficient to
+commit”—is therefore false for the Responses protocol. The prior implementation and its tests remain
+valuable for generic first-payload errors, retry/failover, byte replay, and HTTP-503 terminal behavior,
+but are not complete for this lifecycle sequence.
 
 ## Operating Model
 
 ### Supported scope
 
-- Standard `/v1/responses` streaming requests and the shared streaming-forwarder boundary.
-- HTTP 200 responses labelled `text/event-stream` whose first complete JSON/SSE payload contains a
-  top-level error or a Responses `response.failed` error.
-- Normal responses whose first complete payload is non-error and can be replayed unchanged.
+- Streaming `session.requestUrl.pathname === "/v1/responses"` requests using the Responses SSE
+  protocol, regardless of the selected provider's marketing type.
+- The existing shared streaming gate for generic JSON/SSE fake-200 bodies on all other routes.
+- Pre-output `response.failed` error envelopes, including overload and other already-recognized
+  structured fake-200 errors.
 
-### Internal invariants
+`/v1/responses/compact`, Chat Completions, Anthropic, Gemini, and unknown future protocol surfaces do
+not gain a Responses lifecycle hold. They retain the conservative existing first-payload behavior.
 
-- Upstream request bodies are already represented by `ProxySession` and are replayable by the
-  existing Forwarder attempt loop.
-- No downstream response bytes are committed before the prefix gate returns `pass`.
-- Detection may decode a copy, but replay always uses the original `Uint8Array` chunks.
-- Prefix memory has a hard byte limit; reaching it fails open to normal streaming rather than
-  growing without bound.
-- Once a response is passed downstream, later stream failures remain ResponseHandler finalization
-  concerns and are not transparently replayed.
+### Gate invariants and decisions
 
-### Failure semantics
+- **Locked:** CCH fixes the failure before client commitment; Codex is not asked to recover an HTTP
+  200 terminal SSE error.
+- **Locked:** Recovery is limited to the existing provider state machine. No new overload-specific
+  same-provider sleep/backoff is introduced; CCH tries eligible providers once and Codex owns later
+  temporal HTTP-503 retry.
+- **Locked:** Hold only the known non-output lifecycle events `response.created`, `response.queued`,
+  and `response.in_progress`. A recognized error before output returns `fake_200`; the first output,
+  `response.completed`, `response.incomplete`, `[DONE]`, unknown event, malformed event, or conflicting
+  event/data type passes and replays unchanged. This preserves forward compatibility and avoids a
+  retry when output might already exist.
+- **Agent-delegated:** Exact parser/helper structure and how the bounded event metadata crosses from
+  the pure gate to Forwarder.
+- **Provisional, validated by tests:** 32 KiB remains the memory cap. It is a safety boundary, not a
+  hidden time deadline.
 
-- Confirmed fake-200 errors become `ProxyError` inside Forwarder, preserving inferred status and
-  matcher metadata.
-- Confirmed overload identity survives all-provider exhaustion so the terminal HTTP response can
-  carry an accurate client-facing error code without relying on message parsing.
-- Client abort is not a provider failure and stops inspection/retry immediately.
-- Reader/transport failures retain existing transport categorization.
-- Ambiguous or oversized prefixes pass through and retain the existing deferred finalization safety
-  net.
+### Timeout and resource ownership
 
-### Quality envelope
+The provider's first-byte timeout means “first nonempty upstream body chunk,” not “first byte exposed
+to the client.” Since the gate now reads lifecycle chunks first, it must notify Forwarder exactly once
+on that first upstream chunk so the existing first-byte timer is cleared at the correct instant.
 
-- Default prefix cap: 32 KiB.
-- No fixed delay on normal streams; the gate waits only for a complete JSON/SSE payload, EOF, abort,
-  or the byte cap.
-- No database migration, UI string, i18n surface, or public API schema change.
+Once a first lifecycle chunk is held, `ResponseHandler` has not yet received bytes and cannot own its
+normal idle watchdog. The gate must temporarily enforce the configured `streamingIdleTimeoutMs` until
+it passes, cancels, reaches EOF/cap, or errors, and must clean its timer and reader/agent ownership on
+every exit. Idle expiry retains the existing `streaming_idle` failure category; it must not be
+misreported as a first-byte timeout. No new gate-specific wall-clock deadline is introduced.
 
-### Non-goals
+### Failure and privacy semantics
 
-- Replaying a response after any downstream byte has been emitted.
-- Treating every 503 or every `try again later` message as model overload.
-- Replacing the existing provider selector, retry limits, or circuit breaker policy.
-- Adding overload-specific backoff before the pre-commit recovery path is proven.
-- Depending on a stream-internal error-code trick to make Codex retry an already committed HTTP 200.
-
-## Decisions and Authority
-
-### Human-decided / locked
-
-- Fix the fault in CCH rather than relying on a custom Codex client.
-- Use bounded response-prefix buffering and implement and test the complete repair.
-- Other providers are available; a single recorded attempt is evidence that the present SSE path
-  never returns to Forwarder failover.
-
-### Agent-delegated
-
-- Helper/module boundaries, exact parser structure, cleanup ownership mechanics, and test layout.
-- Whether hedge integration can directly reuse the same gate or needs a small adapter.
-
-### Provisional
-
-- Use 32 KiB as the prefix cap and pass through after the first complete non-error payload.
-- Preserve `service_unavailable_error` as the terminal error type while independently setting the
-  overload error code to `server_is_overloaded`; HTTP 503 owns retryability and the code owns final UI
-  classification.
-
-### Agent-decided after verification
-
-- A confirmed overload gets one attempt per eligible provider in a CCH request. CCH does not repeat
-  the same provider after 100 ms; after one provider round is exhausted, the terminal HTTP 503 lets
-  Codex own time-based recovery through exponential backoff.
+- A detected pre-output fake-200 cancels the upstream reader, releases timeout/agent resources, and
+  becomes a `ProxyError` before deferred streaming finalization is registered.
+- Client abort stops inspection and retry; it is never classified as a provider fake-200 failure.
+- Existing post-commit finalization remains the accounting/circuit-breaker fallback. It cannot retry
+  an already visible stream and this plan does not add a per-frame watcher to every normal stream.
+- Diagnostic data is fixed-shape and bounded: no raw body or raw message is persisted or logged. A
+  parsed error contributes only normalized/bounded code and type plus message length.
 
 ## Proposed Approach
 
-### Current system model
+### 1. Replace first-non-error commitment with a Responses pre-output gate
 
-`ProxyForwarder.send()` returns any SSE response immediately and records deferred finalization.
-`ProxyResponseHandler` detects fake 200 only after consuming the stream; it can repair accounting,
-circuit state, and session binding, but cannot return to the provider attempt loop. The displayed
-`retry_failed` chain entry therefore records a failed first attempt without proving a retry occurred.
+Refactor the existing bounded prefix inspection without creating a duplicate error matcher. For a
+canonical Responses request, it parses each complete SSE event while the stream is still pre-output:
 
-### Recommended design
+```text
+created | queued | in_progress  -> retain and inspect the next complete event
+recognized fake-200 error        -> cancel and return fake_200 before client commitment
+output | terminal | unknown      -> replay exact retained bytes and continue normal streaming
+EOF | malformed | 32 KiB cap     -> replay exact retained bytes and keep current finalization fallback
+```
 
-1. Add a pure, structured overload classifier that extracts error descriptors from top-level OpenAI
-   errors and Responses `response.failed` payloads. Prefer exact codes, then conservative messages.
-2. Add a bounded streaming prefix gate that incrementally accumulates original bytes until a
-   complete JSON document or SSE event is available, EOF occurs, or the cap is reached.
-3. On error, cancel and release the attempt and throw a `ProxyError` before deferred finalization is
-   registered. On pass, return a replay Response that emits original prefix chunks followed by the
-   untouched upstream reader with backpressure and cancellation propagation.
-4. Reuse the same classification/gate semantics in streaming hedge commitment so hedge-enabled
-   providers cannot bypass the repair.
-5. Preserve ResponseHandler's full-stream fake-200 detection as a post-commit accounting fallback.
-6. Preserve overload identity through the synthetic all-providers-unavailable error and emit a real
-   HTTP 503 JSON response with `code: server_is_overloaded`.
+Use parsed `data.type` as the canonical event identity, with `event:` only as fallback. If they
+conflict, the parsed data type wins; output or unknown data therefore commits conservatively. Generic
+top-level error detection remains active before this lifecycle classification so a one-event fake-200
+still follows the established path.
 
-### Verification strategy
+Forwarder receives the resulting `fake_200` before it registers deferred finalization, builds the
+existing `ProxyError`/inferred status, and lets current provider accounting and alternative selection
+run. Hedge commitment must use the same result so a lifecycle-failed participant cannot become winner.
 
-- Pure classifier tests for structured codes, exact overload messages, generic service unavailable,
-  model-generated text, and Responses `response.failed`.
-- Gate tests for fragmented JSON/SSE, byte-exact normal replay, EOF, cap fallback, cancel propagation,
-  and error cleanup.
-- Forwarder integration tests proving same-provider retry and alternative-provider success while the
-  client observes none of the failed attempt's bytes.
-- A complete proxy-handler test in which every provider returns fake-200 overload and the client
-  receives HTTP 503 rather than an HTTP 200 stream error.
-- A real Codex retry harness proving repeated HTTP requests and eventual same-turn success.
-- Focused checks for client abort during prefix inspection and hedge attempts that must not commit an
-  overload participant as winner.
-- Regression tests for normal streaming and deferred finalization.
-- Repository-required lint, typecheck, full test, and production build gates.
+### 2. Make timeout hand-off explicit
 
-## Progress and Material Discoveries
+Extend the gate call contract with a one-shot first-upstream-byte notification and temporary idle
+watchdog ownership. Keep timer classification in Forwarder, where provider context and retry behavior
+already live. Verify cancellation, EOF, cap fallback, fake-200, and thrown-reader paths all clean the
+watchdog and agent/combined-signal references exactly once.
 
-- Confirmed the latest clean worktree at `codex/gpt56-priority-billing@77874e00`.
-- Confirmed `/v1/responses` permits retry and provider switch; raw endpoint policy is not the cause.
-- Confirmed the actual SSE path returns at response headers and detects fake 200 only during deferred
-  finalization, explaining the single attempt despite available providers.
-- Added a conservative structured overload classifier for OpenAI error objects, Responses
-  `response.failed`, and explicit SSE error events. Generic retry advice and model output text remain
-  outside overload classification.
-- Added a 32 KiB streaming response-prefix gate in `doForward()`. It preserves original response
-  bytes on pass, cancels confirmed fake-200 attempts, releases their timeout/agent runtime, and throws
-  before deferred streaming finalization or downstream commitment.
-- Proved with a real Forwarder integration test that provider A fake-200 overload is recorded as an
-  inferred 503, provider A is excluded, provider B is selected, and the client observes only provider
-  B's SSE bytes.
-- Focused classifier, gate, and Forwarder tests pass. Typecheck passes; lint has only two pre-existing
-  unrelated warnings and a Biome CLI/schema version notice.
-- Completion review found that moving the first-byte read into Forwarder also moved first-byte timeout
-  ownership. The gate catch now preserves the existing 524 provider-timeout semantics instead of
-  leaking a raw abort error; the existing Gemini no-first-byte regression test was updated to assert
-  the new pre-commit boundary.
-- Before strengthening the terminal-client contract, the initial implementation passed 764 test files
-  and 6991 tests (2 files / 13 tests skipped), plus production build, `lint:fix`, lint, and typecheck.
-- Added a terminal proxy-handler contract proving an exhausted overload returns a real HTTP 503 with
-  top-level `code: server_is_overloaded`, including the hedge terminal path.
-- Ran Codex CLI 0.145.0 in a disposable Podman pod with both `HOME` and `CODEX_HOME` mounted from an
-  isolated `/tmp` directory. A mock that returned two 503 overload responses and then valid SSE caused
-  Codex to issue three requests (229 ms and 371 ms intervals) and complete the same turn with
-  `RETRY_OK`.
-- In the same isolated harness, an always-503 mock produced exactly five Codex HTTP attempts with
-  200, 376, 777, and 1537 ms intervals, then displayed `Selected model is at capacity`. This confirms
-  one initial request plus four transport retries and exponential backoff.
-- Measured retry composition and removed immediate same-provider retries for confirmed overload. With
-  `N` eligible providers, the default bound changed from `5 * 2 * N = 10N` upstream attempts to
-  `5 * 1 * N = 5N`; the 20-provider safety limit therefore bounds the complete Codex turn at 100
-  upstream attempts instead of 200 (and avoids the previous configured worst case of 1000).
-- The overload retry-bound regression sets `maxRetryAttempts: 3` and proves only one attempt reaches
-  the overloaded provider before failover. The focused overload/gate/hedge suite passes 59 tests.
-- Final repository verification after the retry-bound change passed: production build, `lint:fix`,
-  lint, typecheck, `git diff --check`, and 764 test files / 6995 tests (2 files / 13 tests skipped).
-  The first full-test invocation exposed only an invocation-path issue (`bun` absent from child
-  `PATH`); rerunning with Bun's directory explicitly in `PATH` passed the entire suite. Lint retains
-  only the two unrelated baseline warnings and Biome CLI/schema version notice.
-- Removed the disposable Codex pod, mock, and isolated HOME after recording evidence. Existing
-  `cch-reh-*` pods were not modified.
+### 3. Add high-concurrency-safe fake-200 diagnostics
 
-## Review and Handoff
+Keep the pure gate logger-free. When Forwarder receives a gate fake-200, write one structured `warn`
+before it throws into the current recovery loop. A separate bounded helper may rate-limit only this
+error log; it must be process-local and fixed-capacity, never Redis/DB-backed.
 
-### Review verdict
+The event has a stable shape such as:
 
-Ready for Human Acceptance. No material Goal, evidence, or quality delta remains in the local change.
-The pre-commit gate prevents fake-200 bytes from escaping, internal failover is proven, exhausted
-overload preserves a real 503 plus `server_is_overloaded`, and a real isolated Codex TUI is proven to
-retry that contract both through eventual success and terminal exhaustion.
+```text
+event: "proxy.upstream_fake_200"
+phase: "responses_pre_output_gate" | "prefix_cap_fail_open"
+downstreamCommitted: false
+highConcurrencyMode: boolean
+provider: providerId, bounded providerName, endpointId, attemptNumber
+transport: upstreamStatusCode, contentTypeClass, observedBytes, prefixCapBytes
+protocol: eventTypes[<=8], eventCount, detectorCode, overloadMatcherId,
+          inferredStatusCode, upstreamErrorCode, upstreamErrorType, messageLength
+recovery: selected action when already known
+suppressedSinceLastEmission: optional count
+```
 
-The implementation keeps post-commit fake-200 detection as a fallback, preserves exact bytes for
-normal streams, bounds inspection to 32 KiB, and proves that an OpenAI/Codex overload fake-200 reaches
-the existing provider failover state machine before any failed-attempt bytes reach the client. A
-confirmed overload is attempted once per eligible provider per CCH request; temporal retry is then
-owned by Codex's bounded exponential-backoff loop.
+No raw SSE/event data, raw error text, full request/response, headers, URL/query, prompt cache key,
+model content, credentials, session ID, user ID, or dynamic unbounded field map is permitted. The
+record is emitted only for a detected pre-output fake-200 or a 32-KiB fail-open anomaly—not for normal
+SSE frames. A small process-local bucket, keyed only by bounded provider/detector/matcher identifiers,
+retains the first few signals in a fixed window and reports later suppression; it limits a provider
+capacity storm without adding network I/O or high-cardinality state. Existing post-commit finalization
+logging stays unchanged in this scoped repair.
 
-### Human attention
+### 4. Verify the behavior end to end
 
-The local worktree is ready for review. Commit, publication, deployment, and production verification
-remain outside the authority granted for this task.
+Add focused unit and integration coverage before broad checks:
+
+1. Fragmented `created -> in_progress -> failed(server_is_overloaded)` is detected without an
+   `event:` header, cancels upstream, and replays no failed-attempt byte.
+2. `created -> output_text.delta`, `created -> completed` with output, and conflicting
+   header/data identities pass byte-exactly; no false retry occurs.
+3. Created-only EOF, malformed input, and cap exhaustion pass/replay with the declared fallback.
+4. First-byte callback fires once; held lifecycle traffic keeps first-byte timeout from firing;
+   gate-phase idle timeout fires and cleans up as `streaming_idle`.
+5. Provider A emits the real lifecycle-failed sequence and provider B succeeds: A is recorded as an
+   inferred 503, B is selected, and the client observes only B's bytes. The all-provider case returns
+   real pre-commit HTTP 503 plus `server_is_overloaded`.
+6. Hedge routing cannot commit a lifecycle-failed candidate.
+7. The warning is emitted in high-concurrency mode with only approved bounded fields; it does not
+   cause session-debug/Redis writes. Rate-limit tests use fake time and prove key/window bounds.
+8. Re-run the established focused suite, full tests, lint/fix, typecheck, build, diff check, then an
+   isolated Codex retry harness against the repaired full CCH path.
+
+## Scope, Authority, and Roadmap
+
+### In scope after approval
+
+- The Responses-aware gate, its timeout ownership, Forwarder/hedge integration, and focused tests.
+- The bounded, redacted, rate-limited fake-200 warning described above.
+- Revision of this Plan with decisive implementation and verification evidence.
+
+### Explicit non-goals
+
+- Retrying once any downstream SSE byte or possible output has been committed.
+- Broad protocol parsing for non-Responses routes or changing Codex itself.
+- Re-enabling high-concurrency session observation/debug snapshots, storing raw diagnostics, or adding
+  telemetry databases/Redis writes.
+- Changing provider selection policy, retry counts, database-pool work, deployment, or production
+  configuration.
+
+### Authority and next checkpoint
+
+The prior ready-for-acceptance state was superseded by the Responses lifecycle evidence. The Human
+subsequently approved the coupled gate and diagnostic contract and authorized local implementation and
+testing. The local implementation is therefore within scope; it must preserve the unrelated
+uncommitted high-concurrency request-retention work. Commit, push, deployment, and production traffic
+changes remain separately authorized actions.
+
+The isolated Codex checkpoint is complete. Provider A emitted
+`created -> in_progress -> failed(server_is_overloaded)` and provider B succeeded in the same Codex
+turn; the all-provider case produced a true pre-commit HTTP 503 and Codex made repeated transport
+requests. The final state therefore requires Human acceptance or a separately authorized commit, not
+another detector redesign.
+
+### Implemented checkpoint (local, uncommitted)
+
+- The bounded gate now holds only `response.created`, `response.queued`, and
+  `response.in_progress` for canonical `/v1/responses`, detects a later structured pre-output failure,
+  and otherwise replays the held bytes exactly.
+- Gate ownership now clears the first-byte timer on the first upstream chunk and temporarily applies
+  the existing streaming-idle timeout while lifecycle frames are held.
+- Forwarder records the gate result before it becomes the existing `ProxyError` and provider recovery
+  path. The new warning is metadata-only and process-locally rate-limited; it performs no Redis,
+  database, or session-debug write, including in high-concurrency mode.
+- Focused gate, forwarder, hedge, terminal-error, and logging tests passed (78 tests across 7 files).
+  The complete Vitest suite completed successfully, as did `bun run typecheck`, task-file Biome,
+  `git diff --check`, and a production build.
+- An isolated temporary CCH (high-concurrency mode enabled), loopback mock upstreams, generated test
+  key, and isolated Codex home exercised the built standalone server with Codex CLI 0.145.0. Provider
+  A sent `created -> in_progress -> failed(server_is_overloaded)`; provider B then returned the sole
+  client-visible `CCH_FAKE200_B_SUCCESS` stream. The fixture initially put both providers on one
+  vendor endpoint pool because they shared a loopback origin; moving B to a separate temporary port
+  made the intended independent-provider assertion valid. This was a harness configuration correction,
+  not a source change.
+- With both temporary providers pointed at the overload sequence, a direct request returned non-SSE
+  HTTP 503 with `error.code = server_is_overloaded` and no `response.created` prefix. Codex configured
+  with two HTTP retries raised the mock's overload request counter from 5 to 11: three Codex HTTP
+  attempts, each trying CCH's two providers. It no longer terminated on the first fake-200 SSE frame.
+- The structured `proxy.upstream_fake_200` warning was observed with
+  `phase=responses_pre_output_gate`, `downstreamCommitted=false`, and
+  `highConcurrencyMode=true`; its new fixed-shape event includes code/type/message length rather than
+  raw SSE or error text. Existing generic provider-error logging remains intentionally out of scope.
+
+## Review State
+
+Verdict: **Ready for Human Acceptance.** The Goal review found no material defect in the supported
+Responses SSE path. The gate is limited to `/v1/responses`; it passes on output, terminal, unknown,
+malformed, EOF, and prefix-cap boundaries instead of retrying after possible output. The provider
+failure remains contained in the existing recovery state machine, while terminal exhaustion becomes a
+real client-visible HTTP 503. Timeout ownership, cancellation, rate-bound logging, focused unit paths,
+the complete test suite, the production build, and the isolated real-Codex behavior all have direct
+evidence. No commit, push, deployment, or production configuration change has been performed.

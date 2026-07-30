@@ -80,6 +80,7 @@ import {
   ProxyError,
   sanitizeUrl,
 } from "./errors";
+import { logFake200SseDiagnostic } from "./fake-200-observability";
 import {
   detectGeminiFunctionIdRectifierTrigger,
   type GeminiFunctionIdRectifierResult,
@@ -196,6 +197,32 @@ function buildResponseTimeoutError(
       providerName: provider.name,
     }
   );
+}
+
+function buildStreamingIdleTimeoutError(
+  provider: { id: number; name: string },
+  idleTimeoutMs: number
+) {
+  const parsed = {
+    error: {
+      type: "streaming_idle_timeout",
+      message: `Provider stopped sending data for ${idleTimeoutMs}ms`,
+      timeout_ms: idleTimeoutMs,
+    },
+  };
+
+  return new ProxyError(`供应商流式响应静默超时: ${idleTimeoutMs}ms 内未收到新数据`, 524, {
+    body: JSON.stringify(parsed),
+    parsed,
+    providerId: provider.id,
+    providerName: provider.name,
+  });
+}
+
+function isStreamingIdleAbort(error: unknown, abortReason?: unknown): boolean {
+  const hasStreamingIdleMessage = (value: unknown): boolean =>
+    value instanceof Error && value.message.includes("streaming_idle");
+  return hasStreamingIdleMessage(error) || hasStreamingIdleMessage(abortReason);
 }
 
 // 把 provider 上配置的静态自定义请求头合并到 overrides 中。
@@ -3270,6 +3297,28 @@ export class ProxyForwarder {
 
       // ⭐ 超时错误检测（优先级：response > client）
 
+      if (
+        isStreamingIdleAbort(err, responseController.signal.reason) &&
+        !session.clientAbortSignal?.aborted
+      ) {
+        logger.error(
+          "ProxyForwarder: Streaming idle timeout (provider quality issue, will switch)",
+          {
+            providerId: provider.id,
+            providerName: provider.name,
+            idleTimeoutMs: provider.streamingIdleTimeoutMs,
+            errorName: err.name,
+            errorMessage: err.message || "(empty message)",
+            errorCode: err.code || "N/A",
+            reason:
+              "Idle timeout indicates provider stopped sending data, should count towards circuit breaker",
+          }
+        );
+
+        cleanupCombinedSignal();
+        throw buildStreamingIdleTimeoutError(provider, provider.streamingIdleTimeoutMs);
+      }
+
       if (responseController.signal.aborted && !session.clientAbortSignal?.aborted) {
         // 响应超时：HTTP 首包未在规定时间内到达
         // 修复：首字节超时应归类为供应商问题，计入熔断器并直接切换
@@ -3287,50 +3336,6 @@ export class ProxyForwarder {
 
         cleanupCombinedSignal();
         throw buildResponseTimeoutError(provider, responseTimeoutType, responseTimeoutMs);
-      }
-
-      // ⭐ 检测流式静默期超时（streaming_idle）
-      if (err.message?.includes("streaming_idle") && !session.clientAbortSignal?.aborted) {
-        // 流式静默期超时：首字节之后的连续静默窗口超时
-        // 修复：静默期超时也是供应商问题，应计入熔断器
-        logger.error(
-          "ProxyForwarder: Streaming idle timeout (provider quality issue, will switch)",
-          {
-            providerId: provider.id,
-            providerName: provider.name,
-            idleTimeoutMs: provider.streamingIdleTimeoutMs,
-            errorName: err.name,
-            errorMessage: err.message || "(empty message)",
-            errorCode: err.code || "N/A",
-            reason:
-              "Idle timeout indicates provider stopped sending data, should count towards circuit breaker",
-          }
-        );
-
-        // 抛出 ProxyError（归类为 PROVIDER_ERROR）
-        cleanupCombinedSignal();
-        throw new ProxyError(
-          `供应商流式响应静默超时: ${provider.streamingIdleTimeoutMs}ms 内未收到新数据`,
-          524, // 524 = A Timeout Occurred
-          {
-            body: JSON.stringify({
-              error: {
-                type: "streaming_idle_timeout",
-                message: `Provider stopped sending data for ${provider.streamingIdleTimeoutMs}ms`,
-                timeout_ms: provider.streamingIdleTimeoutMs,
-              },
-            }),
-            parsed: {
-              error: {
-                type: "streaming_idle_timeout",
-                message: `Provider stopped sending data for ${provider.streamingIdleTimeoutMs}ms`,
-                timeout_ms: provider.streamingIdleTimeoutMs,
-              },
-            },
-            providerId: provider.id,
-            providerName: provider.name,
-          }
-        );
       }
 
       // ⭐ 检测客户端主动中断（使用统一的精确检测函数）
@@ -3718,8 +3723,27 @@ export class ProxyForwarder {
 
     const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
     if (contentType.includes("text/event-stream")) {
+      const isCanonicalResponsesRequest = session.requestUrl.pathname === "/v1/responses";
+      let firstStreamingChunkObserved = false;
       try {
-        const inspection = await inspectStreamingResponsePrefix(response);
+        const inspection = await inspectStreamingResponsePrefix(response, {
+          enableResponsesLifecycleGate: isCanonicalResponsesRequest,
+          onFirstUpstreamByte: () => {
+            if (firstStreamingChunkObserved) return;
+            firstStreamingChunkObserved = true;
+            sessionWithTimeout.clearResponseTimeout?.();
+          },
+          ...(isCanonicalResponsesRequest && provider.streamingIdleTimeoutMs > 0
+            ? {
+                streamingIdleTimeoutMs: provider.streamingIdleTimeoutMs,
+                onStreamingIdleTimeout: () => {
+                  if (!responseController.signal.aborted) {
+                    responseController.abort(new Error("streaming_idle"));
+                  }
+                },
+              }
+            : {}),
+        });
         if (inspection.kind === "fake_200") {
           const overload = detectUpstreamOverloadFromSseOrJsonText(inspection.rawText);
           const inferredStatus = inferUpstreamErrorStatusCodeFromText(inspection.rawText);
@@ -3728,6 +3752,42 @@ export class ProxyForwarder {
             rawText: inspection.rawText,
             candidateMessage: overload.isOverload ? overload.message : inspection.detail,
             providerName: provider.name,
+          });
+
+          logFake200SseDiagnostic({
+            phase: inspection.diagnostic.phase,
+            highConcurrencyMode: session.isHighConcurrencyModeEnabled(),
+            providerId: provider.id,
+            providerName: provider.name,
+            endpointId: endpointAudit?.endpointId ?? null,
+            attemptNumber: attemptNumber ?? null,
+            upstreamStatusCode: response.status,
+            contentTypeClass: "sse",
+            downstreamCommitted: false,
+            observedBytes: inspection.diagnostic.observedBytes,
+            prefixCapBytes: inspection.diagnostic.prefixCapBytes,
+            rawBodyTruncated: inspection.diagnostic.rawBodyTruncated,
+            protocol: {
+              observedEventTypes: inspection.diagnostic.observedEventTypes,
+              eventCountObserved: inspection.diagnostic.eventCountObserved,
+              eventTypesTruncated: inspection.diagnostic.eventTypesTruncated,
+              detectorCode: inspection.diagnostic.detectorCode,
+              ...(overload.isOverload ? { overloadMatcherId: overload.matcherId } : {}),
+              ...(overload.isOverload
+                ? { inferredStatusCode: 503 }
+                : inferredStatus
+                  ? { inferredStatusCode: inferredStatus.statusCode }
+                  : {}),
+              ...(inspection.diagnostic.upstreamErrorCode
+                ? { upstreamErrorCode: inspection.diagnostic.upstreamErrorCode }
+                : {}),
+              ...(inspection.diagnostic.upstreamErrorType
+                ? { upstreamErrorType: inspection.diagnostic.upstreamErrorType }
+                : {}),
+              ...(inspection.diagnostic.upstreamErrorMessageLength != null
+                ? { upstreamErrorMessageLength: inspection.diagnostic.upstreamErrorMessageLength }
+                : {}),
+            },
           });
 
           throw new ProxyError(inspection.code, statusCode, {
@@ -3744,18 +3804,46 @@ export class ProxyForwarder {
             safeClientMessageCandidate: safeClientMessageCandidate ?? undefined,
           });
         }
+        if (inspection.diagnostic) {
+          logFake200SseDiagnostic({
+            phase: inspection.diagnostic.phase,
+            highConcurrencyMode: session.isHighConcurrencyModeEnabled(),
+            providerId: provider.id,
+            providerName: provider.name,
+            endpointId: endpointAudit?.endpointId ?? null,
+            attemptNumber: attemptNumber ?? null,
+            upstreamStatusCode: response.status,
+            contentTypeClass: "sse",
+            downstreamCommitted: false,
+            observedBytes: inspection.diagnostic.observedBytes,
+            prefixCapBytes: inspection.diagnostic.prefixCapBytes,
+            rawBodyTruncated: inspection.diagnostic.rawBodyTruncated,
+            protocol: {
+              observedEventTypes: inspection.diagnostic.observedEventTypes,
+              eventCountObserved: inspection.diagnostic.eventCountObserved,
+              eventTypesTruncated: inspection.diagnostic.eventTypesTruncated,
+              detectorCode: inspection.diagnostic.detectorCode,
+            },
+          });
+        }
         response = inspection.response;
       } catch (error) {
         const errorToThrow =
-          responseController.signal.aborted && !session.clientAbortSignal?.aborted
-            ? buildResponseTimeoutError(provider, responseTimeoutType, responseTimeoutMs)
-            : error;
+          !session.clientAbortSignal?.aborted &&
+          isStreamingIdleAbort(error, responseController.signal.reason)
+            ? buildStreamingIdleTimeoutError(provider, provider.streamingIdleTimeoutMs)
+            : responseController.signal.aborted && !session.clientAbortSignal?.aborted
+              ? buildResponseTimeoutError(provider, responseTimeoutType, responseTimeoutMs)
+              : error;
         if (errorToThrow instanceof ProxyError && errorToThrow.statusCode === 524) {
-          logger.error("ProxyForwarder: Response timeout while inspecting streaming prefix", {
+          logger.error("ProxyForwarder: Streaming timeout while inspecting streaming prefix", {
             providerId: provider.id,
             providerName: provider.name,
             responseTimeoutMs,
             responseTimeoutType,
+            timeoutKind: isStreamingIdleAbort(error, responseController.signal.reason)
+              ? "streaming_idle"
+              : "first_byte",
           });
         }
         sessionWithTimeout.clearResponseTimeout?.();
