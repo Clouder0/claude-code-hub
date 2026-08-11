@@ -7,7 +7,6 @@ import { AsyncTaskManager } from "@/lib/async-task-manager";
 import {
   allocateOpenAIUsage,
   type CacheWriteAccounting,
-  shouldInferOpenAICacheWrite,
 } from "@/lib/billing/openai-usage-accounting";
 import { getEnvConfig } from "@/lib/config/env.schema";
 import { getCachedSystemSettings } from "@/lib/config/system-settings-cache";
@@ -20,7 +19,6 @@ import { deleteLiveChain } from "@/lib/redis/live-chain-store";
 import { SessionManager } from "@/lib/session-manager";
 import { SessionTracker } from "@/lib/session-tracker";
 import { CODEX_1M_CONTEXT_TOKEN_THRESHOLD } from "@/lib/special-attributes";
-import { resolveRequestBillingRates } from "@/lib/utils/billing-rate-resolution";
 import type {
   CostBreakdown,
   RequestCostCalculationOptions,
@@ -1801,12 +1799,7 @@ export class ProxyResponseHandler {
         const priorityServiceTierApplied = priorityBillingDecision?.effectivePriority ?? false;
 
         if (usageMetrics) {
-          usageMetrics = await settleOpenAIUsageAccounting(
-            session,
-            provider,
-            usageMetrics,
-            priorityServiceTierApplied
-          );
+          usageMetrics = await settleOpenAIUsageAccounting(provider, usageMetrics);
           usageMetrics = normalizeUsageWithSwap(
             usageMetrics,
             session,
@@ -2929,12 +2922,7 @@ export class ProxyResponseHandler {
         const priorityServiceTierApplied = priorityBillingDecision?.effectivePriority ?? false;
 
         if (usageForCost) {
-          usageForCost = await settleOpenAIUsageAccounting(
-            session,
-            provider,
-            usageForCost,
-            priorityServiceTierApplied
-          );
+          usageForCost = await settleOpenAIUsageAccounting(provider, usageForCost);
           usageForCost = normalizeUsageWithSwap(
             usageForCost,
             session,
@@ -4076,7 +4064,6 @@ function adjustUsageForProviderType(
     cachedTokens: usage.cache_read_input_tokens,
     cacheWriteTokensReported:
       usage.cache_write_tokens_reported ?? usage.cache_creation_input_tokens,
-    inferUnreportedCacheWrite: false,
   });
 
   logger.debug("[UsageMetrics] Split OpenAI subset usage into disjoint billing buckets", {
@@ -4195,24 +4182,6 @@ function buildStoredPricingContext(
   };
 }
 
-function resolveCacheWriteInferenceGateRate(
-  usage: UsageMetrics,
-  resolvedPricing: ResolvedPricingResult | null | undefined,
-  priorityServiceTierApplied: boolean
-): number | undefined {
-  if (!resolvedPricing) return undefined;
-
-  const resolution = resolveRequestBillingRates({
-    usage,
-    priceData: resolvedPricing.priceData,
-    priorityServiceTierApplied,
-    modelName: resolvedPricing.resolvedModelName,
-  });
-  return resolution?.status === "resolved" && resolution.rates.cacheWrite > 0
-    ? resolution.rates.cacheWrite
-    : undefined;
-}
-
 function buildStoredCostBreakdown(input: {
   usage: UsageMetrics;
   resolvedPricing: NonNullable<ResolvedPricingResult>;
@@ -4274,14 +4243,8 @@ function buildStoredCostBreakdown(input: {
 }
 
 async function settleOpenAIUsageAccounting(
-  session: ProxySession,
   provider: Provider,
-  usage: UsageMetrics,
-  priorityServiceTierApplied: boolean,
-  overrides?: {
-    resolvedPricing?: ResolvedPricingResult | null;
-    requestBody?: unknown;
-  }
+  usage: UsageMetrics
 ): Promise<UsageMetrics> {
   if (
     (provider.providerType !== "codex" && provider.providerType !== "openai-compatible") ||
@@ -4291,50 +4254,11 @@ async function settleOpenAIUsageAccounting(
   }
 
   const reportedWrite = usage.cache_write_tokens_reported ?? usage.cache_creation_input_tokens;
-  const needsInference = !(typeof reportedWrite === "number" && reportedWrite > 0);
-  let resolvedPricing = overrides?.resolvedPricing;
-
-  if (needsInference && resolvedPricing === undefined) {
-    try {
-      resolvedPricing = await session.getResolvedPricingByBillingSource(provider);
-    } catch (error) {
-      logger.warn("[UsageMetrics] Failed to resolve pricing for cache-write inference", {
-        providerId: provider.id,
-        error: error instanceof Error ? error.message : String(error),
-      });
-      resolvedPricing = null;
-    }
-  }
-
-  const inferUnreportedCacheWrite =
-    needsInference &&
-    shouldInferOpenAICacheWrite({
-      modelName:
-        resolvedPricing?.resolvedModelName ??
-        session.getBillingModel() ??
-        session.getOriginalModel() ??
-        session.request.model,
-      providerType: provider.providerType,
-      observedInputTokens: usage.observed_input_tokens,
-      cachedTokensPresent: usage.cache_read_tokens_observed === true,
-      // This value only gates whether GPT-5.6 cache-write inference is supported. The
-      // selected tier's atomic four-rate resolution remains the sole source used to charge.
-      cacheWriteCostPerToken: resolveCacheWriteInferenceGateRate(
-        usage,
-        resolvedPricing,
-        priorityServiceTierApplied
-      ),
-      requestBody:
-        overrides && Object.hasOwn(overrides, "requestBody")
-          ? overrides.requestBody
-          : session.getBillingRequestMessage(),
-    });
 
   const allocation = allocateOpenAIUsage({
     observedInputTokens: usage.observed_input_tokens,
     cachedTokens: usage.cache_read_input_tokens,
     cacheWriteTokensReported: reportedWrite,
-    inferUnreportedCacheWrite,
   });
   const hasAccountedWrite =
     allocation.cacheWriteAccounting !== "none" || reportedWrite !== undefined;
@@ -4679,12 +4603,7 @@ export async function finalizeHedgeLoserBilling(params: {
     const priorityServiceTierApplied = priorityBillingDecision?.effectivePriority ?? false;
     let usageForCost = usageMetrics;
     if (usageForCost) {
-      usageForCost = await settleOpenAIUsageAccounting(
-        loserSession,
-        provider,
-        usageForCost,
-        priorityServiceTierApplied
-      );
+      usageForCost = await settleOpenAIUsageAccounting(provider, usageForCost);
       usageForCost = normalizeUsageWithSwap(
         usageForCost,
         loserSession,
@@ -4982,12 +4901,7 @@ export async function finalizeRequestStats(
   // 4. 更新成本
   // Invert cache TTL at data entry when provider option is enabled
   // All downstream (badge, cost, DB, logs) will see inverted values
-  const accountedUsage = await settleOpenAIUsageAccounting(
-    session,
-    provider,
-    usageMetrics,
-    priorityServiceTierApplied
-  );
+  const accountedUsage = await settleOpenAIUsageAccounting(provider, usageMetrics);
   const normalizedUsage = normalizeUsageWithSwap(
     accountedUsage,
     session,

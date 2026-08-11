@@ -4,7 +4,6 @@ import {
   calculateRequestCostBreakdown,
   matchLongContextPricing,
   resolvePricingSnapshotForCostBreakdown,
-  UnsupportedPricingCombinationError,
 } from "@/lib/utils/cost-calculation";
 import type { ModelPriceData } from "@/types/model-price";
 
@@ -98,9 +97,7 @@ describe("GPT-5.6 exact request pricing", () => {
     expect(breakdown.output).toBeCloseTo(1000 * (priceCase.standard[3] / MILLION), 12);
   });
 
-  test.each(
-    PRICE_CASES
-  )("$model switches every bucket to Standard long-context rates at 272001", (priceCase) => {
+  test.each(PRICE_CASES)("$model keeps Standard rates at 272001", (priceCase) => {
     const usage = {
       input_tokens: 270001,
       cache_read_input_tokens: 1000,
@@ -111,11 +108,14 @@ describe("GPT-5.6 exact request pricing", () => {
     const cost = calculateRequestCost(usage, priceData(priceCase));
     const breakdown = calculateRequestCostBreakdown(usage, priceData(priceCase));
 
-    expect(cost.toNumber()).toBeCloseTo(expectedCost(priceCase.long, 270001), 12);
-    expect(breakdown.input).toBeCloseTo(270001 * (priceCase.long[0] / MILLION), 12);
-    expect(breakdown.cache_read).toBeCloseTo(1000 * (priceCase.long[1] / MILLION), 12);
-    expect(breakdown.cache_creation_default).toBeCloseTo(1000 * (priceCase.long[2] / MILLION), 12);
-    expect(breakdown.output).toBeCloseTo(1000 * (priceCase.long[3] / MILLION), 12);
+    expect(cost.toNumber()).toBeCloseTo(expectedCost(priceCase.standard, 270001), 12);
+    expect(breakdown.input).toBeCloseTo(270001 * (priceCase.standard[0] / MILLION), 12);
+    expect(breakdown.cache_read).toBeCloseTo(1000 * (priceCase.standard[1] / MILLION), 12);
+    expect(breakdown.cache_creation_default).toBeCloseTo(
+      1000 * (priceCase.standard[2] / MILLION),
+      12
+    );
+    expect(breakdown.output).toBeCloseTo(1000 * (priceCase.standard[3] / MILLION), 12);
   });
 
   test.each(PRICE_CASES)("$model uses complete Priority rates below the limit", (priceCase) => {
@@ -143,18 +143,19 @@ describe("GPT-5.6 exact request pricing", () => {
     expect(breakdown.output).toBeCloseTo(1000 * (priceCase.priority[3] / MILLION), 12);
   });
 
-  test.each(PRICE_CASES)("$model rejects Priority at 272001", (priceCase) => {
-    expect(() =>
-      calculateRequestCost(
-        {
-          input_tokens: 270001,
-          cache_read_input_tokens: 1000,
-          cache_creation_input_tokens: 1000,
-        },
-        priceData(priceCase),
-        { priorityServiceTierApplied: true }
-      )
-    ).toThrowError(UnsupportedPricingCombinationError);
+  test.each(PRICE_CASES)("$model keeps Priority rates at 272001", (priceCase) => {
+    const usage = {
+      input_tokens: 270001,
+      cache_read_input_tokens: 1000,
+      cache_creation_input_tokens: 1000,
+      output_tokens: 1000,
+    };
+
+    const cost = calculateRequestCost(usage, priceData(priceCase), {
+      priorityServiceTierApplied: true,
+    });
+
+    expect(cost.toNumber()).toBeCloseTo(expectedCost(priceCase.priority, 270001), 12);
   });
 
   test("rejects Standard pricing when any short-context bucket rate is missing", () => {
@@ -172,19 +173,20 @@ describe("GPT-5.6 exact request pricing", () => {
     ).toThrowError(expect.objectContaining({ reason: "gpt56_standard_rates_incomplete" }));
   });
 
-  test("rejects Standard long-context pricing when any long-context bucket rate is missing", () => {
+  test("ignores missing long-context pricing above 272000", () => {
     const incomplete = priceData(PRICE_CASES[0]);
     incomplete.output_cost_per_token_above_272k_tokens = undefined;
 
-    expect(() =>
-      calculateRequestCostBreakdown(
-        {
-          input_tokens: 272001,
-          output_tokens: 100,
-        },
-        incomplete
-      )
-    ).toThrowError(expect.objectContaining({ reason: "gpt56_long_context_rates_incomplete" }));
+    const breakdown = calculateRequestCostBreakdown(
+      {
+        input_tokens: 272001,
+        output_tokens: 100,
+      },
+      incomplete
+    );
+
+    expect(breakdown.input).toBeCloseTo(272001 * (PRICE_CASES[0].standard[0] / MILLION), 12);
+    expect(breakdown.output).toBeCloseTo(100 * (PRICE_CASES[0].standard[3] / MILLION), 12);
   });
 
   test.each([
@@ -201,7 +203,7 @@ describe("GPT-5.6 exact request pricing", () => {
       expectedRates: PRICE_CASES[0].standard,
     },
     {
-      name: "Standard long-context",
+      name: "Standard above 272K",
       usage: {
         input_tokens: 272_001,
         cache_read_input_tokens: 100,
@@ -209,8 +211,8 @@ describe("GPT-5.6 exact request pricing", () => {
         output_tokens: 100,
       },
       priorityServiceTierApplied: false,
-      expectedTier: "standard_long_context" as const,
-      expectedRates: PRICE_CASES[0].long,
+      expectedTier: "standard" as const,
+      expectedRates: PRICE_CASES[0].standard,
     },
     {
       name: "Priority short-context",

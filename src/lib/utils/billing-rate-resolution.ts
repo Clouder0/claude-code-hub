@@ -74,13 +74,6 @@ const GPT56_STANDARD_RATE_FIELDS = {
   output: "output_cost_per_token",
 } as const;
 
-const GPT56_LONG_CONTEXT_RATE_FIELDS = {
-  input: "input_cost_per_token_above_272k_tokens",
-  cacheRead: "cache_read_input_token_cost_above_272k_tokens",
-  cacheWrite: "cache_creation_input_token_cost_above_272k_tokens",
-  output: "output_cost_per_token_above_272k_tokens",
-} as const;
-
 function isFinitePositiveNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value) && value > 0;
 }
@@ -146,17 +139,13 @@ export function resolveRequestBillingRates(
 
   const observedInputTokens = getObservedInputTokens(input.usage);
   if (!input.priorityServiceTierApplied) {
-    const longContext = observedInputTokens > 272000;
-    const fields = longContext ? GPT56_LONG_CONTEXT_RATE_FIELDS : GPT56_STANDARD_RATE_FIELDS;
-    const missingFields = Object.values(fields).filter(
+    const missingFields = Object.values(GPT56_STANDARD_RATE_FIELDS).filter(
       (field) => !isFinitePositiveNumber(input.priceData[field])
     );
     if (missingFields.length > 0) {
       return {
         status: "unsupported",
-        reason: longContext
-          ? "gpt56_long_context_rates_incomplete"
-          : "gpt56_standard_rates_incomplete",
+        reason: "gpt56_standard_rates_incomplete",
         observedInputTokens,
         missingFields,
       };
@@ -164,24 +153,15 @@ export function resolveRequestBillingRates(
 
     return {
       status: "resolved",
-      pricingTier: longContext ? "standard_long_context" : "standard",
+      pricingTier: "standard",
       observedInputTokens,
       rates: {
-        input: input.priceData[fields.input] as number,
-        cacheRead: input.priceData[fields.cacheRead] as number,
-        cacheWrite: input.priceData[fields.cacheWrite] as number,
-        output: input.priceData[fields.output] as number,
+        input: input.priceData[GPT56_STANDARD_RATE_FIELDS.input] as number,
+        cacheRead: input.priceData[GPT56_STANDARD_RATE_FIELDS.cacheRead] as number,
+        cacheWrite: input.priceData[GPT56_STANDARD_RATE_FIELDS.cacheWrite] as number,
+        output: input.priceData[GPT56_STANDARD_RATE_FIELDS.output] as number,
       },
-      ...resolveRateSource(input.priceData, fields),
-    };
-  }
-
-  if (observedInputTokens > 272000) {
-    return {
-      status: "unsupported",
-      reason: "gpt56_priority_long_context_unsupported",
-      observedInputTokens,
-      missingFields: [],
+      ...resolveRateSource(input.priceData, GPT56_STANDARD_RATE_FIELDS),
     };
   }
 

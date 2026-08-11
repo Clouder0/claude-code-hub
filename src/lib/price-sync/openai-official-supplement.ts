@@ -14,36 +14,30 @@ type Gpt56RateTuple = readonly [
 
 interface Gpt56RateProfile {
   standard: Gpt56RateTuple;
-  longContext: Gpt56RateTuple;
   priority: Gpt56RateTuple;
 }
 
 const GPT56_RATE_PROFILES: Record<string, Gpt56RateProfile> = {
   "gpt-5.6": {
     standard: [5, 0.5, 6.25, 30],
-    longContext: [10, 1, 12.5, 45],
     priority: [10, 1, 12.5, 60],
   },
   "gpt-5.6-sol": {
     standard: [5, 0.5, 6.25, 30],
-    longContext: [10, 1, 12.5, 45],
     priority: [10, 1, 12.5, 60],
   },
   "gpt-5.6-terra": {
     standard: [2.5, 0.25, 3.125, 15],
-    longContext: [5, 0.5, 6.25, 22.5],
     priority: [5, 0.5, 6.25, 30],
   },
   "gpt-5.6-luna": {
     standard: [1, 0.1, 1.25, 6],
-    longContext: [2, 0.2, 2.5, 9],
     priority: [2, 0.2, 2.5, 12],
   },
 };
 
 function toPerTokenRates(profile: Gpt56RateProfile): Record<string, number> {
   const [standardInput, standardCacheRead, standardCacheWrite, standardOutput] = profile.standard;
-  const [longInput, longCacheRead, longCacheWrite, longOutput] = profile.longContext;
   const [priorityInput, priorityCacheRead, priorityCacheWrite, priorityOutput] = profile.priority;
 
   return {
@@ -51,10 +45,6 @@ function toPerTokenRates(profile: Gpt56RateProfile): Record<string, number> {
     cache_read_input_token_cost: standardCacheRead / MILLION,
     cache_creation_input_token_cost: standardCacheWrite / MILLION,
     output_cost_per_token: standardOutput / MILLION,
-    input_cost_per_token_above_272k_tokens: longInput / MILLION,
-    cache_read_input_token_cost_above_272k_tokens: longCacheRead / MILLION,
-    cache_creation_input_token_cost_above_272k_tokens: longCacheWrite / MILLION,
-    output_cost_per_token_above_272k_tokens: longOutput / MILLION,
     input_cost_per_token_priority: priorityInput / MILLION,
     cache_read_input_token_cost_priority: priorityCacheRead / MILLION,
     cache_creation_input_token_cost_priority: priorityCacheWrite / MILLION,

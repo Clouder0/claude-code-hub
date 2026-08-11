@@ -404,7 +404,7 @@ describe("finalizeHedgeLoserBilling isolated request accounting", () => {
     expect(mocks.updateSessionCostFromRequest).not.toHaveBeenCalled();
   });
 
-  it("persists the settled GPT-5.6 cache-write provenance for a hedge loser", async () => {
+  it("persists ordinary GPT-5.6 input provenance for a hedge loser", async () => {
     const provider = createCodexProvider();
     const loserSession = createLoserSession(provider);
     loserSession.forwardedRequestBody = JSON.stringify({
@@ -462,19 +462,20 @@ describe("finalizeHedgeLoserBilling isolated request accounting", () => {
       123,
       expect.anything(),
       expect.objectContaining({
-        inputTokens: 0,
+        inputTokens: 1_080,
         observedInputTokens: 9_016,
-        cacheCreationInputTokens: 1_080,
+        cacheCreationInputTokens: 0,
         cacheReadInputTokens: 7_936,
         cacheWriteTokensReported: 0,
-        cacheWriteAccounting: "inferred_input_minus_cache_read_v1",
+        cacheWriteAccounting: "none",
         requestedServiceTier: "default",
         actualServiceTier: null,
         serviceTierResolvedFrom: "requested",
         effectivePriority: false,
         costBreakdown: expect.objectContaining({
-          cache_creation_default: "0.00675",
-          total: "0.010868",
+          input: "0.0054",
+          cache_creation_default: "0",
+          total: "0.009518",
           pricing: expect.objectContaining({
             tier: "standard",
             price_book_model: "gpt-5.6-sol",
@@ -484,7 +485,7 @@ describe("finalizeHedgeLoserBilling isolated request accounting", () => {
     );
   });
 
-  it("uses the loser's final explicit-cache request for cache-write inference", async () => {
+  it("does not infer cache write from the loser's final explicit-cache request", async () => {
     const provider = createCodexProvider();
     const loserSession = createLoserSession(provider);
     loserSession.forwardedRequestBody = JSON.stringify({
@@ -541,7 +542,7 @@ describe("finalizeHedgeLoserBilling isolated request accounting", () => {
     );
   });
 
-  it("keeps inference enabled when the final explicit-cache request includes a breakpoint", async () => {
+  it("does not infer cache write when the final explicit-cache request includes a breakpoint", async () => {
     const provider = createCodexProvider();
     const loserSession = createLoserSession(provider);
     loserSession.forwardedRequestBody = JSON.stringify({
@@ -592,15 +593,15 @@ describe("finalizeHedgeLoserBilling isolated request accounting", () => {
       expect.anything(),
       expect.objectContaining({
         observedInputTokens: 9_016,
-        inputTokens: 0,
-        cacheCreationInputTokens: 9_016,
+        inputTokens: 9_016,
+        cacheCreationInputTokens: 0,
         cacheWriteTokensReported: 0,
-        cacheWriteAccounting: "inferred_input_minus_cache_read_v1",
+        cacheWriteAccounting: "none",
       })
     );
   });
 
-  it("persists a zero-cost audit when a GPT-5.6 Priority loser exceeds 272K", async () => {
+  it("settles a GPT-5.6 Priority loser above 272K with normal Priority rates", async () => {
     const provider = createCodexProvider();
     const loserSession = createLoserSession(provider);
     loserSession.forwardedRequestBody = JSON.stringify({
@@ -655,13 +656,13 @@ describe("finalizeHedgeLoserBilling isolated request accounting", () => {
       drainComplete: true,
     });
 
-    expect(billed).toBeNull();
+    expect(billed).toBe("2.72031");
     expect(mocks.addMessageRequestHedgeLoserCost).toHaveBeenCalledWith(
       123,
       expect.anything(),
       expect.objectContaining({
         attemptNumber: 3,
-        costUsd: "0",
+        costUsd: "2.72031",
         observedInputTokens: 272_001,
         inputTokens: 272_001,
         cacheCreationInputTokens: 0,
@@ -670,9 +671,7 @@ describe("finalizeHedgeLoserBilling isolated request accounting", () => {
         requestedServiceTier: "priority",
         actualServiceTier: "priority",
         effectivePriority: true,
-        billingStatus: "unsupported",
-        billingReason: "gpt56_priority_long_context_unsupported",
-        missingPricingFields: [],
+        billingStatus: "settled",
         pricingContext: {
           source: "cloud_official",
           model: "gpt-5.6-sol",
@@ -686,13 +685,16 @@ describe("finalizeHedgeLoserBilling isolated request accounting", () => {
         },
       })
     );
-    expect(mocks.addMessageRequestHedgeLoserCost.mock.calls[0]?.[1].toString()).toBe("0");
-    expect(mocks.trackCost).not.toHaveBeenCalled();
-    expect(mocks.loggerWarn).toHaveBeenCalledWith(
-      "[BillingSettlement] Hedge loser pricing unsupported; recorded without charge",
+    expect(mocks.addMessageRequestHedgeLoserCost.mock.calls[0]?.[1].toString()).toBe("2.72031");
+    expect(mocks.trackCost).toHaveBeenCalledWith(
+      10,
+      provider.id,
+      "session-1",
+      2.72031,
       expect.objectContaining({
-        reason: "gpt56_priority_long_context_unsupported",
-        observedInputTokens: 272_001,
+        userId: 20,
+        requestId: 123,
+        billingEventId: "123:hedge-loser:11:3",
       })
     );
   });

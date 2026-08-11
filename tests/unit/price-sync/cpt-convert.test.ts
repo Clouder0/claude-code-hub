@@ -354,25 +354,21 @@ describe("convertCptModelEntry", () => {
     {
       modelName: "gpt-5.6-sol",
       standard: [5, 0.5, 6.25, 30],
-      long: [10, 1, 12.5, 45],
       priority: [10, 1, 12.5, 60],
     },
     {
       modelName: "gpt-5.6-terra",
       standard: [2.5, 0.25, 3.125, 15],
-      long: [5, 0.5, 6.25, 22.5],
       priority: [5, 0.5, 6.25, 30],
     },
     {
       modelName: "gpt-5.6-luna",
       standard: [1, 0.1, 1.25, 6],
-      long: [2, 0.2, 2.5, 9],
       priority: [2, 0.2, 2.5, 12],
     },
-  ])("supplements exact Standard, long-context, and Priority rates for $modelName", ({
+  ])("supplements exact Standard and Priority rates for $modelName", ({
     modelName,
     standard,
-    long,
     priority,
   }) => {
     const priceData = convertCptModelEntry(
@@ -401,15 +397,15 @@ describe("convertCptModelEntry", () => {
       cache_read_input_token_cost: standard[1] / 1_000_000,
       cache_creation_input_token_cost: standard[2] / 1_000_000,
       output_cost_per_token: standard[3] / 1_000_000,
-      input_cost_per_token_above_272k_tokens: long[0] / 1_000_000,
-      cache_read_input_token_cost_above_272k_tokens: long[1] / 1_000_000,
-      cache_creation_input_token_cost_above_272k_tokens: long[2] / 1_000_000,
-      output_cost_per_token_above_272k_tokens: long[3] / 1_000_000,
       input_cost_per_token_priority: priority[0] / 1_000_000,
       cache_read_input_token_cost_priority: priority[1] / 1_000_000,
       cache_creation_input_token_cost_priority: priority[2] / 1_000_000,
       output_cost_per_token_priority: priority[3] / 1_000_000,
     });
+    expect(priceData?.input_cost_per_token_above_272k_tokens).toBeUndefined();
+    expect(priceData?.cache_read_input_token_cost_above_272k_tokens).toBeUndefined();
+    expect(priceData?.cache_creation_input_token_cost_above_272k_tokens).toBeUndefined();
+    expect(priceData?.output_cost_per_token_above_272k_tokens).toBeUndefined();
   });
 
   it("keeps explicit GPT-5.6 CPT rates and records supplement conflicts", () => {

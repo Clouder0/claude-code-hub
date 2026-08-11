@@ -74,7 +74,7 @@ describe("resolveRequestBillingRates", () => {
     });
   });
 
-  test("switches the full GPT-5.6 Standard request to long-context rates at 272001", () => {
+  test("keeps GPT-5.6 Standard rates above 272000 tokens", () => {
     const resolution = resolveRequestBillingRates({
       usage: { input_tokens: 272001 },
       priceData: gpt56SolPriceData(),
@@ -83,14 +83,14 @@ describe("resolveRequestBillingRates", () => {
 
     expect(resolution).toEqual({
       status: "resolved",
-      pricingTier: "standard_long_context",
+      pricingTier: "standard",
       observedInputTokens: 272001,
       rateSource: "model_price_data",
       rates: {
-        input: 10 / 1_000_000,
-        cacheRead: 1 / 1_000_000,
-        cacheWrite: 12.5 / 1_000_000,
-        output: 45 / 1_000_000,
+        input: 5 / 1_000_000,
+        cacheRead: 0.5 / 1_000_000,
+        cacheWrite: 6.25 / 1_000_000,
+        output: 30 / 1_000_000,
       },
     });
   });
@@ -126,18 +126,23 @@ describe("resolveRequestBillingRates", () => {
     });
   });
 
-  test("rejects an incomplete GPT-5.6 long-context four-bucket rate set", () => {
+  test("does not require GPT-5.6 long-context rates above 272000 tokens", () => {
     const resolution = resolveRequestBillingRates({
       usage: { input_tokens: 272001 },
       priceData: gpt56SolPriceData({ output_cost_per_token_above_272k_tokens: undefined }),
       priorityServiceTierApplied: false,
     });
 
-    expect(resolution).toEqual({
-      status: "unsupported",
-      reason: "gpt56_long_context_rates_incomplete",
+    expect(resolution).toMatchObject({
+      status: "resolved",
+      pricingTier: "standard",
       observedInputTokens: 272001,
-      missingFields: ["output_cost_per_token_above_272k_tokens"],
+      rates: {
+        input: 5 / 1_000_000,
+        cacheRead: 0.5 / 1_000_000,
+        cacheWrite: 6.25 / 1_000_000,
+        output: 30 / 1_000_000,
+      },
     });
   });
 
@@ -162,18 +167,23 @@ describe("resolveRequestBillingRates", () => {
     });
   });
 
-  test("marks GPT-5.6 Priority above 272000 tokens as unsupported", () => {
+  test("keeps GPT-5.6 Priority rates above 272000 tokens", () => {
     const resolution = resolveRequestBillingRates({
       usage: { input_tokens: 272001 },
       priceData: gpt56SolPriceData(),
       priorityServiceTierApplied: true,
     });
 
-    expect(resolution).toEqual({
-      status: "unsupported",
-      reason: "gpt56_priority_long_context_unsupported",
+    expect(resolution).toMatchObject({
+      status: "resolved",
+      pricingTier: "priority",
       observedInputTokens: 272001,
-      missingFields: [],
+      rates: {
+        input: 10 / 1_000_000,
+        cacheRead: 1 / 1_000_000,
+        cacheWrite: 12.5 / 1_000_000,
+        output: 60 / 1_000_000,
+      },
     });
   });
 

@@ -1,39 +1,46 @@
 # GPT-5.6 Standard and Priority Billing Plan
 
+Status: Ready for Human Acceptance (Human-approved 2026-08-11)
+
+## 2026-08-11 superseding billing decision
+
+This decision replaces the previous GPT-5.6 cache-write inference and long-context pricing
+semantics. Sections from `Implementation slices` onward retain the previous release and rollout
+record for historical context; where they describe cache-write inference, 272K price switching, or
+Priority-plus-long-context rejection, this section is authoritative.
+
 ## Scope
 
-- Support GPT-5.6 Standard and Priority billing for OpenAI-compatible and private Codex response
-  usage.
+- Support GPT-5.6 Standard and Priority billing from the normal resolved pricing table for
+  OpenAI-compatible and private Codex response usage.
 - Treat upstream `input_tokens` as the observed total input and split it into mutually exclusive
-  ordinary-input, cache-read, and cache-write buckets.
-- Preserve the existing Anthropic 5-minute and 1-hour cache buckets; represent OpenAI cache writes
-  as a generic/default cache-write remainder.
+  ordinary-input, cache-read, and explicitly reported cache-write buckets.
+- Preserve the existing Anthropic 5-minute and 1-hour cache buckets; represent a positive OpenAI
+  cache-write report as a generic/default cache-write bucket.
 - Persist enough provenance and unit-rate data to explain a charge after request-log cleanup.
+- Preserve historical inferred-write and long-context audit values without producing them for new
+  GPT-5.6 settlements or repricing old rows.
 - Do not implement Flex, Batch, regional uplift, cache affinity/session binding, breakpoint
   injection, historical repricing, or cache leaderboards.
 
 ## Pricing contract
 
-All prices below are USD per one million tokens, ordered as input / cache read / cache write /
-output.
+Prices come from the normally resolved model pricing table. The expected current values below are
+USD per one million tokens, ordered as input / cache read / cache write / output.
 
-| Model | Standard at or below 272K | Standard above 272K | Priority at or below 272K |
-| --- | --- | --- | --- |
-| GPT-5.6 / Sol | 5 / 0.5 / 6.25 / 30 | 10 / 1 / 12.5 / 45 | 10 / 1 / 12.5 / 60 |
-| GPT-5.6 Terra | 2.5 / 0.25 / 3.125 / 15 | 5 / 0.5 / 6.25 / 22.5 | 5 / 0.5 / 6.25 / 30 |
-| GPT-5.6 Luna | 1 / 0.1 / 1.25 / 6 | 2 / 0.2 / 2.5 / 9 | 2 / 0.2 / 2.5 / 12 |
+| Model | Standard | Priority |
+| --- | --- | --- |
+| GPT-5.6 / Sol | 5 / 0.5 / 6.25 / 30 | 10 / 1 / 12.5 / 60 |
+| GPT-5.6 Terra | 2.5 / 0.25 / 3.125 / 15 | 5 / 0.5 / 6.25 / 30 |
+| GPT-5.6 Luna | 1 / 0.1 / 1.25 / 6 | 2 / 0.2 / 2.5 / 12 |
 
-- The long-context threshold is strict: 272,000 stays in the short tier; 272,001 switches the full
-  request to long-context pricing.
-- Long-context input, cache read, and cache write cost 2x; output costs 1.5x.
-- OpenAI currently documents Priority processing as not supporting long context. Do not synthesize
-  a Priority-plus-long-context price.
+- Input size does not change GPT-5.6 rates. Requests above 272K remain on the same resolved Standard
+  or Priority rates and are not rejected solely because of their size.
 - For public OpenAI-compatible traffic, an actual response `service_tier` overrides the requested
   tier; a missing actual tier may fall back to the request. Private Codex traffic retains the
   existing configured requested/actual policy.
 - Requested Priority that is actually returned as Standard uses Standard pricing. If an upstream
-  unexpectedly reports actual Priority above 272K, preserve the response, mark settlement as an
-  unsupported pricing combination, and alert rather than guessing a price.
+  reports actual Priority above 272K, use the resolved Priority table rates normally.
 
 Official sources:
 
@@ -51,9 +58,6 @@ remaining = observedInput - cacheRead
 if reported cache_write_tokens > 0:
   cacheWrite = clamp(reportedWrite, 0, remaining)
   source = reported_positive
-else if inference is eligible:
-  cacheWrite = remaining
-  source = inferred_input_minus_cache_read_v1
 else:
   cacheWrite = 0
   source = none
@@ -61,18 +65,25 @@ else:
 ordinaryInput = observedInput - cacheRead - cacheWrite
 ```
 
-Inference is eligible only when all of these are true:
-
-- the settled model is GPT-5.6, Sol, Terra, Luna, or a supported alias;
-- the provider uses OpenAI subset usage semantics;
-- the selected price has an explicit cache-write rate;
-- `observedInput >= 1024`;
-- `cached_tokens` is explicitly present, including an explicit zero;
-- the request is not explicit-cache mode without any cache breakpoint.
-
 The invariant `ordinaryInput + cacheRead + cacheWrite = observedInput` must hold after clamping.
-Missing and explicitly zero reported writes can both infer, but their raw observations remain
-distinguishable for audit.
+Missing and explicitly zero reported writes both leave the uncached remainder as ordinary input;
+their raw observations remain distinguishable for audit.
+
+## Current implementation and evidence
+
+- New OpenAI-subset settlements allocate only a positive upstream cache-write report to the
+  cache-write bucket. Zero or missing reports leave the uncached remainder as ordinary input.
+- GPT-5.6 Standard and Priority rate resolution is independent of input size; historical
+  long-context audit values remain readable but are no longer produced for new settlements.
+- The official GPT-5.6 supplement no longer synthesizes 272K price fields. Explicit fields already
+  present in a resolved table remain harmless because GPT-5.6 settlement ignores them.
+- No schema, migration, persisted-row rewrite, or production operation is part of this change.
+- Focused billing/proxy verification passed 127 tests. TypeScript, Biome, and the production build
+  passed. The full Vitest run passed 7,007 tests and skipped 13; two pre-existing, unrelated
+  `error-rule-detector-reload-queue` timing assertions failed again when rerun alone.
+- Completion review found no material defect or unresolved Goal delta in the approved billing scope.
+  The implementation is ready for Human acceptance; commit, push, deployment, and historical
+  repricing remain outside this local change.
 
 ## Implementation slices
 

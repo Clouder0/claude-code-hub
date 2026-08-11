@@ -1002,12 +1002,12 @@ describe("ProxyResponseHandler stream client abort finalization", () => {
       expect.objectContaining({
         statusCode: 200,
         observedInputTokens: 9_016,
-        inputTokens: 0,
+        inputTokens: 1_080,
         cacheReadInputTokens: 7_936,
-        cacheCreationInputTokens: 1_080,
+        cacheCreationInputTokens: 0,
         outputTokens: 5,
         cacheWriteTokensReported: 0,
-        cacheWriteAccounting: "inferred_input_minus_cache_read_v1",
+        cacheWriteAccounting: "none",
       })
     );
   });

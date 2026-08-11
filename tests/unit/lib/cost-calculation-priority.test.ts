@@ -56,43 +56,43 @@ describe("calculateRequestCost priority service tier", () => {
     ).toThrowError(UnsupportedPricingCombinationError);
   });
 
-  test("rejects GPT-5.6 Priority long context instead of inventing a combined price", () => {
-    expect(() =>
-      calculateRequestCost(
-        { input_tokens: 272001 },
-        makePriceData({
-          slug: "openai/gpt-5.6-sol",
-          cache_creation_input_token_cost_priority: 2.5,
-          input_cost_per_token_above_272k_tokens: 5,
-          output_cost_per_token_above_272k_tokens: 50,
-          cache_creation_input_token_cost_above_272k_tokens: 6.25,
-          cache_read_input_token_cost_above_272k_tokens: 0.5,
-        }),
-        1,
-        false,
-        true
-      )
-    ).toThrowError(expect.objectContaining({ reason: "gpt56_priority_long_context_unsupported" }));
+  test("keeps GPT-5.6 Priority rates above 272K", () => {
+    const cost = calculateRequestCost(
+      { input_tokens: 272001 },
+      makePriceData({
+        slug: "openai/gpt-5.6-sol",
+        cache_creation_input_token_cost_priority: 2.5,
+        input_cost_per_token_above_272k_tokens: 5,
+        output_cost_per_token_above_272k_tokens: 50,
+        cache_creation_input_token_cost_above_272k_tokens: 6.25,
+        cache_read_input_token_cost_above_272k_tokens: 0.5,
+      }),
+      1,
+      false,
+      true
+    );
+
+    expect(Number(cost.toString())).toBe(544002);
   });
 
-  test("uses the resolved model name to reject Priority long context when price data has no slug", () => {
-    expect(() =>
-      calculateRequestCost(
-        { input_tokens: 272001 },
-        makePriceData({
-          slug: undefined,
-          cache_creation_input_token_cost_priority: 2.5,
-          input_cost_per_token_above_272k_tokens: 5,
-          output_cost_per_token_above_272k_tokens: 50,
-          cache_creation_input_token_cost_above_272k_tokens: 6.25,
-          cache_read_input_token_cost_above_272k_tokens: 0.5,
-        }),
-        {
-          priorityServiceTierApplied: true,
-          modelName: "gpt-5.6-sol",
-        }
-      )
-    ).toThrowError(expect.objectContaining({ reason: "gpt56_priority_long_context_unsupported" }));
+  test("uses the resolved model name to keep Priority rates above 272K", () => {
+    const cost = calculateRequestCost(
+      { input_tokens: 272001 },
+      makePriceData({
+        slug: undefined,
+        cache_creation_input_token_cost_priority: 2.5,
+        input_cost_per_token_above_272k_tokens: 5,
+        output_cost_per_token_above_272k_tokens: 50,
+        cache_creation_input_token_cost_above_272k_tokens: 6.25,
+        cache_read_input_token_cost_above_272k_tokens: 0.5,
+      }),
+      {
+        priorityServiceTierApplied: true,
+        modelName: "gpt-5.6-sol",
+      }
+    );
+
+    expect(Number(cost.toString())).toBe(544002);
   });
 
   test("uses the resolved model name to reject incomplete Priority rates when price data has no slug", () => {
@@ -111,20 +111,20 @@ describe("calculateRequestCost priority service tier", () => {
     ).toThrowError(expect.objectContaining({ reason: "gpt56_priority_rates_incomplete" }));
   });
 
-  test("propagates the resolved model name through breakdown pricing validation", () => {
-    expect(() =>
-      calculateRequestCostBreakdown(
-        { input_tokens: 272001 },
-        makePriceData({
-          slug: undefined,
-          cache_creation_input_token_cost_priority: 2.5,
-        }),
-        {
-          priorityServiceTierApplied: true,
-          modelName: "gpt-5.6-sol",
-        }
-      )
-    ).toThrowError(expect.objectContaining({ reason: "gpt56_priority_long_context_unsupported" }));
+  test("propagates the resolved model name through breakdown pricing above 272K", () => {
+    const breakdown = calculateRequestCostBreakdown(
+      { input_tokens: 272001 },
+      makePriceData({
+        slug: undefined,
+        cache_creation_input_token_cost_priority: 2.5,
+      }),
+      {
+        priorityServiceTierApplied: true,
+        modelName: "gpt-5.6-sol",
+      }
+    );
+
+    expect(breakdown.input).toBe(544002);
   });
 
   test("uses priority pricing fields when priority service tier is applied", () => {

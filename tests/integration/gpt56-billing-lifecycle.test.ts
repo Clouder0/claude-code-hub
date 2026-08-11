@@ -717,7 +717,7 @@ describe("GPT-5.6 billing lifecycle", () => {
     );
   });
 
-  it("infers cache write when the selected Priority tier is complete without a Standard write rate", async () => {
+  it("uses ordinary input when the selected Priority tier is complete without a Standard write rate", async () => {
     const session = createSession({
       messageId: 40_009,
       providerType: "openai-compatible",
@@ -753,30 +753,30 @@ describe("GPT-5.6 billing lifecycle", () => {
       40_009,
       expect.anything(),
       expect.objectContaining({
-        input: "0",
-        cache_creation_default: "0.1127",
+        input: "0.09016",
+        cache_creation_default: "0",
         output: "0.0003",
-        total: "0.113",
+        total: "0.09046",
         pricing: expect.objectContaining({ tier: "priority" }),
       }),
       expect.objectContaining({
         providerId: 12,
         observedInputTokens: 9_016,
-        inputTokens: 0,
+        inputTokens: 9_016,
         cacheReadInputTokens: 0,
-        cacheCreationInputTokens: 9_016,
+        cacheCreationInputTokens: 0,
         cacheWriteTokensReported: 0,
-        cacheWriteAccounting: "inferred_input_minus_cache_read_v1",
+        cacheWriteAccounting: "none",
       })
     );
     expect(updateMessageRequestDetails).toHaveBeenCalledWith(
       40_009,
       expect.objectContaining({
         observedInputTokens: 9_016,
-        inputTokens: 0,
-        cacheCreationInputTokens: 9_016,
+        inputTokens: 9_016,
+        cacheCreationInputTokens: 0,
         cacheWriteTokensReported: 0,
-        cacheWriteAccounting: "inferred_input_minus_cache_read_v1",
+        cacheWriteAccounting: "none",
       })
     );
   });
@@ -867,7 +867,7 @@ describe("GPT-5.6 billing lifecycle", () => {
     );
   });
 
-  it("persists the Standard long-context pricing snapshot in the durable cost settlement", async () => {
+  it("keeps the Standard pricing snapshot above 272K", async () => {
     const session = createSession({
       messageId: 40_014,
       providerType: "openai-compatible",
@@ -892,7 +892,7 @@ describe("GPT-5.6 billing lifecycle", () => {
       40_014,
       expect.anything(),
       expect.objectContaining({
-        pricing: expect.objectContaining({ tier: "standard_long_context" }),
+        pricing: expect.objectContaining({ tier: "standard" }),
       }),
       expect.objectContaining({
         observedInputTokens: 272_001,
@@ -903,7 +903,7 @@ describe("GPT-5.6 billing lifecycle", () => {
     );
   });
 
-  it("preserves an actual Priority response above 272K while marking settlement unsupported", async () => {
+  it("settles an actual Priority response above 272K with normal Priority rates", async () => {
     const session = createSession({
       messageId: 40_012,
       providerType: "openai-compatible",
@@ -943,10 +943,17 @@ describe("GPT-5.6 billing lifecycle", () => {
     expect(result.body).toContain("response.completed");
     expect(result.body).toContain('"service_tier":"priority"');
     expect(result.body).toContain('"input_tokens":272001');
-    expect(updateMessageRequestCostWithBreakdown).not.toHaveBeenCalled();
-    expect(updateMessageRequestWinnerCost).not.toHaveBeenCalled();
-    expect(updateMessageRequestUnsupportedBillingSettlement).toHaveBeenCalledWith(
+    expect(updateMessageRequestCostWithBreakdown).toHaveBeenCalledWith(
       40_012,
+      expect.anything(),
+      expect.objectContaining({
+        input: "1.22001",
+        cache_read: "0.1",
+        cache_creation_default: "0.625",
+        output: "0.0003",
+        total: "1.94531",
+        pricing: expect.objectContaining({ tier: "priority" }),
+      }),
       expect.objectContaining({
         providerId: 12,
         model: "gpt-5.6-sol",
@@ -954,64 +961,47 @@ describe("GPT-5.6 billing lifecycle", () => {
         inputTokens: 122_001,
         cacheReadInputTokens: 100_000,
         cacheCreationInputTokens: 50_000,
-        specialSettings: expect.arrayContaining([
-          expect.objectContaining({
-            type: "billing_settlement",
-            status: "unsupported",
-            reason: "gpt56_priority_long_context_unsupported",
-          }),
-        ]),
       })
     );
-    expect(RateLimitService.trackCost).not.toHaveBeenCalled();
+    expect(updateMessageRequestUnsupportedBillingSettlement).not.toHaveBeenCalled();
+    expect(RateLimitService.trackCost).toHaveBeenCalledWith(
+      202,
+      12,
+      "gpt56-lifecycle-40012",
+      1.94531,
+      expect.anything()
+    );
     expect(SessionManager.updateSessionUsage).toHaveBeenCalledWith(
       "gpt56-lifecycle-40012",
-      expect.any(Object)
+      expect.objectContaining({ costUsd: "1.94531" })
     );
-    expect(vi.mocked(SessionManager.updateSessionUsage).mock.calls.at(-1)?.[1]).not.toHaveProperty(
-      "costUsd"
-    );
-    expect(vi.mocked(emitProxyLangfuseTrace).mock.calls.at(-1)?.[1]?.costUsd).toBeUndefined();
-    expect(updateMessageRequestDetails).toHaveBeenCalledWith(
-      40_012,
-      expect.objectContaining({
-        observedInputTokens: 272_001,
-        specialSettings: expect.arrayContaining([
-          expect.objectContaining({
-            type: "billing_settlement",
-            status: "unsupported",
-            reason: "gpt56_priority_long_context_unsupported",
-            missingFields: [],
-            pricingContext: {
-              source: "cloud_official",
-              model: "gpt-5.6-sol",
-              provider: "openai",
-              supplement: {
-                id: "openai-gpt56-2026-06-30",
-                source: "https://developers.openai.com/api/docs/pricing",
-                applied_fields: ["input_cost_per_token_priority"],
-                conflicting_fields: [],
-              },
-            },
-          }),
-        ]),
-      })
-    );
+    expect(vi.mocked(emitProxyLangfuseTrace).mock.calls.at(-1)?.[1]?.costUsd).toBe("1.94531");
   });
 
   it("keeps cost side effects closed when durable unsupported audit persistence fails", async () => {
     const session = createSession({
       messageId: 40_013,
       providerType: "openai-compatible",
-      requestMessage: { service_tier: "priority" },
+      requestMessage: { service_tier: "default" },
+    });
+    Object.assign(session, {
+      getResolvedPricingByBillingSource: vi.fn(async () => ({
+        resolvedModelName: "gpt-5.6-sol",
+        resolvedPricingProviderKey: "openai",
+        source: "local_manual",
+        priceData: {
+          ...GPT56_SOL_PRICE,
+          cache_creation_input_token_cost: undefined,
+        },
+      })),
     });
     vi.mocked(updateMessageRequestUnsupportedBillingSettlement).mockRejectedValueOnce(
       new Error("database unavailable")
     );
     const upstreamResponse = createResponsesSse({
-      serviceTier: "priority",
+      serviceTier: "default",
       usage: {
-        input_tokens: 272_001,
+        input_tokens: 9_016,
         input_tokens_details: {
           cached_tokens: 0,
           cache_write_tokens: 0,
@@ -1035,7 +1025,7 @@ describe("GPT-5.6 billing lifecycle", () => {
       "[BillingSettlement] Failed to persist unsupported pricing audit",
       expect.objectContaining({
         messageId: 40_013,
-        reason: "gpt56_priority_long_context_unsupported",
+        reason: "gpt56_standard_rates_incomplete",
         error: "database unavailable",
       })
     );
@@ -1272,7 +1262,7 @@ describe("GPT-5.6 billing lifecycle", () => {
     );
   });
 
-  it("infers the private Codex cold fixture as cache write from input minus zero cache read", async () => {
+  it("keeps the private Codex cold fixture as ordinary input", async () => {
     const session = createSession({
       messageId: 40_004,
       providerType: "codex",
@@ -1296,54 +1286,54 @@ describe("GPT-5.6 billing lifecycle", () => {
       40_004,
       expect.anything(),
       expect.objectContaining({
-        input: "0",
+        input: "0.04508",
         cache_read: "0",
-        cache_creation_default: "0.05635",
+        cache_creation_default: "0",
         output: "0.00015",
-        total: "0.0565",
+        total: "0.04523",
       }),
       expect.objectContaining({
         providerId: 11,
         observedInputTokens: 9_016,
-        inputTokens: 0,
+        inputTokens: 9_016,
         cacheReadInputTokens: 0,
-        cacheCreationInputTokens: 9_016,
+        cacheCreationInputTokens: 0,
         cacheWriteTokensReported: 0,
-        cacheWriteAccounting: "inferred_input_minus_cache_read_v1",
+        cacheWriteAccounting: "none",
       })
     );
     expect(RateLimitService.trackCost).toHaveBeenCalledWith(
       202,
       11,
       "gpt56-lifecycle-40004",
-      0.0565,
+      0.04523,
       expect.anything()
     );
     expect(SessionManager.updateSessionUsage).toHaveBeenCalledWith(
       "gpt56-lifecycle-40004",
       expect.objectContaining({
-        inputTokens: 0,
+        inputTokens: 9_016,
         cacheReadInputTokens: 0,
-        cacheCreationInputTokens: 9_016,
+        cacheCreationInputTokens: 0,
         outputTokens: 5,
-        costUsd: "0.0565",
+        costUsd: "0.04523",
       })
     );
     expect(updateMessageRequestDetails).toHaveBeenCalledWith(
       40_004,
       expect.objectContaining({
         observedInputTokens: 9_016,
-        inputTokens: 0,
+        inputTokens: 9_016,
         cacheReadInputTokens: 0,
-        cacheCreationInputTokens: 9_016,
+        cacheCreationInputTokens: 0,
         outputTokens: 5,
         cacheWriteTokensReported: 0,
-        cacheWriteAccounting: "inferred_input_minus_cache_read_v1",
+        cacheWriteAccounting: "none",
       })
     );
   });
 
-  it("infers the private Codex hot fixture remainder without double-counting the cache hit", async () => {
+  it("keeps the private Codex hot fixture remainder as ordinary input", async () => {
     const session = createSession({
       messageId: 40_005,
       providerType: "codex",
@@ -1367,49 +1357,49 @@ describe("GPT-5.6 billing lifecycle", () => {
       40_005,
       expect.anything(),
       expect.objectContaining({
-        input: "0",
+        input: "0.0054",
         cache_read: "0.003968",
-        cache_creation_default: "0.00675",
+        cache_creation_default: "0",
         output: "0.00015",
-        total: "0.010868",
+        total: "0.009518",
       }),
       expect.objectContaining({
         providerId: 11,
         observedInputTokens: 9_016,
-        inputTokens: 0,
+        inputTokens: 1_080,
         cacheReadInputTokens: 7_936,
-        cacheCreationInputTokens: 1_080,
+        cacheCreationInputTokens: 0,
         cacheWriteTokensReported: 0,
-        cacheWriteAccounting: "inferred_input_minus_cache_read_v1",
+        cacheWriteAccounting: "none",
       })
     );
     expect(RateLimitService.trackCost).toHaveBeenCalledWith(
       202,
       11,
       "gpt56-lifecycle-40005",
-      0.010868,
+      0.009518,
       expect.anything()
     );
     expect(SessionManager.updateSessionUsage).toHaveBeenCalledWith(
       "gpt56-lifecycle-40005",
       expect.objectContaining({
-        inputTokens: 0,
+        inputTokens: 1_080,
         cacheReadInputTokens: 7_936,
-        cacheCreationInputTokens: 1_080,
+        cacheCreationInputTokens: 0,
         outputTokens: 5,
-        costUsd: "0.010868",
+        costUsd: "0.009518",
       })
     );
     expect(updateMessageRequestDetails).toHaveBeenCalledWith(
       40_005,
       expect.objectContaining({
         observedInputTokens: 9_016,
-        inputTokens: 0,
+        inputTokens: 1_080,
         cacheReadInputTokens: 7_936,
-        cacheCreationInputTokens: 1_080,
+        cacheCreationInputTokens: 0,
         outputTokens: 5,
         cacheWriteTokensReported: 0,
-        cacheWriteAccounting: "inferred_input_minus_cache_read_v1",
+        cacheWriteAccounting: "none",
       })
     );
   });
