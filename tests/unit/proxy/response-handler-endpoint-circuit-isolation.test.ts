@@ -14,6 +14,7 @@ import type { ModelPriceData } from "@/types/model-price";
 
 // Track async tasks for draining
 const asyncTasks: Promise<void>[] = [];
+const loggerWarn = vi.hoisted(() => vi.fn());
 
 vi.mock("@/lib/async-task-manager", () => ({
   AsyncTaskManager: {
@@ -31,7 +32,7 @@ vi.mock("@/lib/logger", () => ({
   logger: {
     debug: () => {},
     info: () => {},
-    warn: () => {},
+    warn: loggerWarn,
     error: () => {},
     trace: () => {},
   },
@@ -244,7 +245,11 @@ function createSession(opts?: { sessionId?: string | null }): ProxySession {
   return session;
 }
 
-function setDeferredMeta(session: ProxySession, endpointId: number | null = 42) {
+function setDeferredMeta(
+  session: ProxySession,
+  endpointId: number | null = 42,
+  withStreamGateMarker = false
+) {
   setDeferredStreamingFinalization(session, {
     providerId: 1,
     providerName: "test-provider",
@@ -256,6 +261,18 @@ function setDeferredMeta(session: ProxySession, endpointId: number | null = 42) 
     endpointId,
     endpointUrl: "https://api.test.com",
     upstreamStatusCode: 200,
+    ...(withStreamGateMarker
+      ? {
+          streamGateCommitMarker: {
+            verdict: "content" as const,
+            eventType: "response.output_text.delta",
+            frameIndex: 2,
+            chunkIndex: 2,
+            bufferedBytes: 256,
+            echoExcludedBytes: 64,
+          },
+        }
+      : {}),
   });
 }
 
@@ -377,6 +394,34 @@ describe("Endpoint circuit breaker isolation", () => {
           item.statusCodeInferred === true
       )
     ).toBe(true);
+  });
+
+  it("post-commit fake-200 diagnostics include only the fixed stream-gate marker", async () => {
+    const session = createSession();
+    setDeferredMeta(session, 42, true);
+
+    const response = createFake200StreamResponse("private upstream message");
+    await ProxyResponseHandler.dispatch(session, response);
+    await drainAsyncTasks();
+
+    const diagnostic = loggerWarn.mock.calls.find(
+      ([message]) =>
+        message === "[ResponseHandler] SSE completed but body indicates error (fake 200)"
+    )?.[1];
+    expect(diagnostic).toMatchObject({
+      code: expect.stringContaining("FAKE_200"),
+      detailLength: "private upstream message".length,
+      streamGateCommitMarker: {
+        verdict: "content",
+        eventType: "response.output_text.delta",
+        frameIndex: 2,
+        chunkIndex: 2,
+        bufferedBytes: 256,
+        echoExcludedBytes: 64,
+      },
+    });
+    expect(JSON.stringify(diagnostic)).not.toContain("private upstream message");
+    expect(diagnostic).not.toHaveProperty("rawBody");
   });
 
   it("高并发模式下，fake-200 流式错误仍应记录核心失败，但跳过 session 观测写入", async () => {

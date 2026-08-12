@@ -80,7 +80,10 @@ import {
   ProxyError,
   sanitizeUrl,
 } from "./errors";
-import { logFake200SseDiagnostic } from "./fake-200-observability";
+import {
+  logFake200SseDiagnostic,
+  logResponsesStreamGateDiagnostic,
+} from "./fake-200-observability";
 import {
   detectGeminiFunctionIdRectifierTrigger,
   type GeminiFunctionIdRectifierResult,
@@ -101,7 +104,10 @@ import { ProxyProviderResolver } from "./provider-selector";
 import { finalizeHedgeLoserBilling } from "./response-handler";
 import type { ProxySession } from "./session";
 import { setDeferredStreamingFinalization } from "./stream-finalization";
-import { inspectStreamingResponsePrefix } from "./streaming-response-gate";
+import {
+  consumeStreamingResponseCommitMarker,
+  inspectStreamingResponsePrefix,
+} from "./streaming-response-gate";
 import {
   detectThinkingBudgetRectifierTrigger,
   rectifyThinkingBudget,
@@ -1505,6 +1511,7 @@ export class ProxyForwarder {
           // 解决：Forwarder 只负责尽快把 Response 返回给下游开始透传，
           // 把最终成功/失败结算延迟到 ResponseHandler：等 SSE 正常结束后再基于最终 body 补充检查并更新内部状态。
           if (isSSE) {
+            const streamGateCommitMarker = consumeStreamingResponseCommitMarker(response);
             setDeferredStreamingFinalization(session, {
               providerId: currentProvider.id,
               providerName: currentProvider.name,
@@ -1516,6 +1523,7 @@ export class ProxyForwarder {
               endpointId: activeEndpoint.endpointId,
               endpointUrl: endpointAudit.endpointUrl,
               upstreamStatusCode: response.status,
+              ...(streamGateCommitMarker ? { streamGateCommitMarker } : {}),
             });
 
             logger.info("ProxyForwarder: Streaming response received, deferring finalization", {
@@ -3723,7 +3731,8 @@ export class ProxyForwarder {
 
     const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
     if (contentType.includes("text/event-stream")) {
-      const isCanonicalResponsesRequest = session.requestUrl.pathname === "/v1/responses";
+      const isCanonicalResponsesRequest =
+        session.requestUrl.pathname === "/v1/responses" && provider.providerType === "codex";
       let firstStreamingChunkObserved = false;
       try {
         const inspection = await inspectStreamingResponsePrefix(response, {
@@ -3732,6 +3741,15 @@ export class ProxyForwarder {
             if (firstStreamingChunkObserved) return;
             firstStreamingChunkObserved = true;
             sessionWithTimeout.clearResponseTimeout?.();
+          },
+          onResponsesShadowDiagnostic: (diagnostic) => {
+            logResponsesStreamGateDiagnostic({
+              ...diagnostic,
+              providerId: provider.id,
+              providerName: provider.name,
+              endpointId: endpointAudit?.endpointId ?? null,
+              attemptNumber: attemptNumber ?? null,
+            });
           },
           ...(isCanonicalResponsesRequest && provider.streamingIdleTimeoutMs > 0
             ? {
@@ -3802,6 +3820,34 @@ export class ProxyForwarder {
               (overload.isOverload ? "service_unavailable" : undefined),
             isOverload: overload.isOverload,
             safeClientMessageCandidate: safeClientMessageCandidate ?? undefined,
+          });
+        }
+        if (inspection.kind === "upstream_failure") {
+          logResponsesStreamGateDiagnostic({
+            ...inspection.semanticDiagnostic,
+            providerId: provider.id,
+            providerName: provider.name,
+            endpointId: endpointAudit?.endpointId ?? null,
+            attemptNumber: attemptNumber ?? null,
+          });
+          throw new ProxyError(inspection.code, 502, {
+            body: JSON.stringify({
+              error: {
+                type: "responses_stream_precommit",
+                reason: inspection.reason,
+              },
+            }),
+            providerId: provider.id,
+            providerName: provider.name,
+          });
+        }
+        if (inspection.semanticDiagnostic) {
+          logResponsesStreamGateDiagnostic({
+            ...inspection.semanticDiagnostic,
+            providerId: provider.id,
+            providerName: provider.name,
+            endpointId: endpointAudit?.endpointId ?? null,
+            attemptNumber: attemptNumber ?? null,
           });
         }
         if (inspection.diagnostic) {
@@ -4629,6 +4675,7 @@ export class ProxyForwarder {
         });
       }
 
+      const streamGateCommitMarker = consumeStreamingResponseCommitMarker(attempt.response);
       setDeferredStreamingFinalization(session, {
         providerId: attempt.provider.id,
         providerName: attempt.provider.name,
@@ -4642,6 +4689,7 @@ export class ProxyForwarder {
         upstreamStatusCode: attempt.response.status,
         isHedgeWinner: isActualHedgeWin,
         billHedgeLosers,
+        ...(streamGateCommitMarker ? { streamGateCommitMarker } : {}),
       });
 
       const response = new Response(

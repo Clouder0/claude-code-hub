@@ -1,9 +1,16 @@
 import { describe, expect, it, vi } from "vitest";
-import { inspectStreamingResponsePrefix } from "@/app/v1/_lib/proxy/streaming-response-gate";
+import {
+  consumeStreamingResponseCommitMarker,
+  inspectStreamingResponsePrefix,
+} from "@/app/v1/_lib/proxy/streaming-response-gate";
 
 const encoder = new TextEncoder();
 
-function responseFromChunks(chunks: string[], onCancel?: (reason: unknown) => void): Response {
+function responseFromChunks(
+  chunks: string[],
+  onCancel?: (reason: unknown) => void,
+  extraHeaders: Record<string, string> = {}
+): Response {
   let index = 0;
   return new Response(
     new ReadableStream<Uint8Array>({
@@ -19,7 +26,10 @@ function responseFromChunks(chunks: string[], onCancel?: (reason: unknown) => vo
         onCancel?.(reason);
       },
     }),
-    { status: 200, headers: { "content-type": "text/event-stream" } }
+    {
+      status: 200,
+      headers: { "content-type": "text/event-stream", ...extraHeaders },
+    }
   );
 }
 
@@ -77,7 +87,7 @@ describe("inspectStreamingResponsePrefix", () => {
       'data: {"type":"response.created"}\n\n',
       'data: {"type":"response.in_progress"}\n\n',
       'data: {"type":"response.failed","response":{"error":{"code":"server_is_',
-      `overloaded","type":"service_unavailable_error","message":"${overloadMessage}"}}}\n\n`,
+      `overloaded","type":"service_unavailable_error","message":"${overloadMessage}"},"instructions":"private prompt","output":[{"text":"partial output"}]}}\n\n`,
     ];
 
     const result = await inspectStreamingResponsePrefix(responseFromChunks(chunks, onCancel), {
@@ -87,10 +97,10 @@ describe("inspectStreamingResponsePrefix", () => {
 
     expect(result).toMatchObject({
       kind: "fake_200",
-      code: "FAKE_200_JSON_ERROR_MESSAGE_NON_EMPTY",
+      code: "FAKE_200_JSON_ERROR_NON_EMPTY",
       rawBodyTruncated: true,
       diagnostic: {
-        phase: "responses_pre_output_gate",
+        phase: "responses_semantic_gate",
         observedEventTypes: ["response.created", "response.in_progress", "response.failed"],
         eventCountObserved: 3,
         upstreamErrorCode: "server_is_overloaded",
@@ -99,7 +109,71 @@ describe("inspectStreamingResponsePrefix", () => {
       },
     });
     expect(onFirstUpstreamByte).toHaveBeenCalledTimes(1);
-    expect(onCancel).toHaveBeenCalledWith("fake_200");
+    if (result.kind !== "fake_200") return;
+    expect(JSON.parse(result.rawText)).toMatchObject({
+      error: { code: "server_is_overloaded", type: "service_unavailable_error" },
+    });
+    expect(result.detail).toBeUndefined();
+    expect(result.rawText).not.toContain("private prompt");
+    expect(result.rawText).not.toContain("partial output");
+    expect(result.rawText).not.toContain(overloadMessage);
+    // The source may already be closed by Web Streams pull-ahead; the Forwarder integration
+    // test covers cancellation while the failed upstream remains open.
+  });
+
+  it("preserves overload classification for a large error frame through a bounded envelope", async () => {
+    const body = `data: ${JSON.stringify({
+      type: "response.failed",
+      response: {
+        error: {
+          code: "server_is_overloaded",
+          type: "service_unavailable_error",
+          message: "Our servers are currently overloaded. Please try again later.",
+        },
+      },
+      padding: "x".repeat(70 * 1024),
+    })}\n\n`;
+
+    const result = await inspectStreamingResponsePrefix(responseFromChunks([body]), {
+      enableResponsesLifecycleGate: true,
+    });
+
+    expect(result).toMatchObject({
+      kind: "fake_200",
+      rawBodyTruncated: true,
+      diagnostic: {
+        phase: "responses_semantic_gate",
+        upstreamErrorCode: "server_is_overloaded",
+        upstreamErrorType: "service_unavailable_error",
+      },
+    });
+    if (result.kind !== "fake_200") return;
+    expect(JSON.parse(result.rawText)).toMatchObject({
+      error: { code: "server_is_overloaded", type: "service_unavailable_error" },
+    });
+    expect(result.detail).toBeUndefined();
+    expect(result.rawText.length).toBeLessThan(64 * 1024);
+    expect(result.rawText).not.toContain("x".repeat(1024));
+    expect(result.rawText).not.toContain("Our servers are currently overloaded");
+  });
+
+  it("normalizes an event-header-only structured error into the bounded detector envelope", async () => {
+    const result = await inspectStreamingResponsePrefix(
+      responseFromChunks([
+        'event: response.failed\ndata: {"code":"server_is_overloaded","message":"overloaded"}\n\n',
+      ]),
+      { enableResponsesLifecycleGate: true }
+    );
+
+    expect(result).toMatchObject({
+      kind: "fake_200",
+      rawBodyTruncated: true,
+      diagnostic: { upstreamErrorCode: "server_is_overloaded" },
+    });
+    if (result.kind !== "fake_200") return;
+    expect(JSON.parse(result.rawText)).toMatchObject({
+      error: { code: "server_is_overloaded" },
+    });
   });
 
   it("replays a normal response byte-for-byte", async () => {
@@ -149,7 +223,7 @@ describe("inspectStreamingResponsePrefix", () => {
     expect(await result.response.text()).toBe(body);
   });
 
-  it("passes terminal Responses events without retrying", async () => {
+  it("fails closed when Responses terminates before semantic content", async () => {
     const body = [
       'data: {"type":"response.created"}\n\n',
       'data: {"type":"response.completed","response":{"output":[{"type":"message"}]}}\n\n',
@@ -159,9 +233,11 @@ describe("inspectStreamingResponsePrefix", () => {
       enableResponsesLifecycleGate: true,
     });
 
-    expect(result.kind).toBe("pass");
-    if (result.kind !== "pass") throw new Error("expected pass");
-    expect(await result.response.text()).toBe(body);
+    expect(result).toMatchObject({
+      kind: "upstream_failure",
+      reason: "empty_stream",
+      diagnostic: { phase: "responses_semantic_gate" },
+    });
   });
 
   it("waits past comment-only events for the first data event", async () => {
@@ -196,24 +272,241 @@ describe("inspectStreamingResponsePrefix", () => {
     expect(await result.response.text()).toBe(body);
   });
 
-  it("fails open with a diagnostic when held Responses lifecycle events reach the cap", async () => {
+  it("fails closed with a diagnostic when the Responses gate reaches its byte cap", async () => {
     const body = `data: {"type":"response.created","padding":"${"x".repeat(96)}"}\n\n`;
     const result = await inspectStreamingResponsePrefix(responseFromChunks([body]), {
       enableResponsesLifecycleGate: true,
-      maxBytes: 32,
+      responsesGateCaps: {
+        prebufferEventCap: 64,
+        prebufferByteCap: 32,
+        requestEchoByteCap: 32,
+      },
+    });
+
+    expect(result).toMatchObject({
+      kind: "upstream_failure",
+      reason: "byte_overflow",
+      diagnostic: {
+        phase: "responses_semantic_gate",
+        prefixCapBytes: 64,
+      },
+    });
+  });
+
+  it("keeps the old release behavior in off mode", async () => {
+    const body = [
+      'data: {"type":"response.created"}\n\n',
+      'data: {"type":"response.output_item.added","item":{"type":"function_call","name":"f"}}\n\n',
+      'data: {"type":"response.failed","response":{"error":{"code":"server_is_overloaded"}}}\n\n',
+    ].join("");
+    const result = await inspectStreamingResponsePrefix(responseFromChunks([body]), {
+      enableResponsesLifecycleGate: true,
+      responsesGateMode: "off",
+    });
+
+    expect(result.kind).toBe("pass");
+    if (result.kind !== "pass") return;
+    expect(await result.response.text()).toBe(body);
+    expect(result.commitMarker).toBeUndefined();
+  });
+
+  it("reports the old/new divergence without failover in shadow mode", async () => {
+    const onCancel = vi.fn();
+    const onShadowDiagnostic = vi.fn();
+    const body = [
+      'data: {"type":"response.created"}\n\n',
+      'data: {"type":"response.output_item.added","item":{"type":"function_call","name":"f"}}\n\n',
+      'data: {"type":"response.failed","response":{"error":{"code":"server_is_overloaded"}}}\n\n',
+    ].join("");
+    const result = await inspectStreamingResponsePrefix(responseFromChunks([body], onCancel), {
+      enableResponsesLifecycleGate: true,
+      responsesGateMode: "shadow",
+      onResponsesShadowDiagnostic: onShadowDiagnostic,
     });
 
     expect(result).toMatchObject({
       kind: "pass",
-      diagnostic: {
-        phase: "prefix_cap_fail_open",
-        prefixCapBytes: 32,
-        observedEventTypes: [],
-        eventCountObserved: 0,
+      commitMarker: {
+        verdict: "shadow_pass",
+        eventType: "response.output_item.added",
+        frameIndex: 2,
       },
     });
-    if (result.kind !== "pass") throw new Error("expected pass");
+    if (result.kind !== "pass") return;
     expect(await result.response.text()).toBe(body);
+    expect(onShadowDiagnostic).toHaveBeenCalledWith(
+      expect.objectContaining({
+        mode: "shadow",
+        outcome: "gate_error",
+        divergentFromLegacy: true,
+        marker: expect.objectContaining({
+          verdict: "shadow_pass",
+          eventType: "response.output_item.added",
+          frameIndex: 2,
+        }),
+      })
+    );
+    expect(onCancel).not.toHaveBeenCalled();
+  });
+
+  it("bounds an unknown legacy event type in the shadow commit marker", async () => {
+    const eventType = `response.future.${"x".repeat(256)}`;
+    const body = `data: ${JSON.stringify({ type: eventType, metadata: { trace: "x" } })}\n\n`;
+    const result = await inspectStreamingResponsePrefix(responseFromChunks([body]), {
+      enableResponsesLifecycleGate: true,
+      responsesGateMode: "shadow",
+    });
+
+    expect(result.kind).toBe("pass");
+    if (result.kind !== "pass") return;
+    expect(result.commitMarker?.eventType).toHaveLength(128);
+    expect(result.commitMarker?.eventType).toBe(eventType.slice(0, 128));
+    await result.response.body?.cancel("test_complete");
+  });
+
+  it("keeps a fragmented large request echo exempt in the shadow observer", async () => {
+    const onShadowDiagnostic = vi.fn();
+    const echo = `data: ${JSON.stringify({
+      type: "response.created",
+      response: { instructions: "x".repeat(4096), error: null },
+    })}\n\n`;
+    const chunks = [
+      echo.slice(0, 900),
+      echo.slice(900),
+      'data: {"type":"response.output_item.added","item":{"type":"function_call","name":"f"}}\n\n',
+      'data: {"type":"response.failed","response":{"error":{"code":"server_is_overloaded"}}}\n\n',
+    ];
+    const result = await inspectStreamingResponsePrefix(responseFromChunks(chunks), {
+      enableResponsesLifecycleGate: true,
+      responsesGateMode: "shadow",
+      responsesGateCaps: {
+        prebufferEventCap: 16,
+        prebufferByteCap: 1024,
+        requestEchoByteCap: 8192,
+      },
+      onResponsesShadowDiagnostic: onShadowDiagnostic,
+    });
+
+    expect(result.kind).toBe("pass");
+    if (result.kind !== "pass") return;
+    expect(await result.response.text()).toBe(chunks.join(""));
+    expect(onShadowDiagnostic).toHaveBeenCalledWith(
+      expect.objectContaining({
+        outcome: "gate_error",
+        echoExcludedBytes: expect.any(Number),
+      })
+    );
+    expect(onShadowDiagnostic.mock.calls[0]?.[0].echoExcludedBytes).toBeGreaterThan(1024);
+  });
+
+  it("makes the shadow observer report the same combined transport-chunk overflow", async () => {
+    const onShadowDiagnostic = vi.fn();
+    const body = [
+      'data: {"type":"response.created"}\n\n',
+      'data: {"type":"response.output_item.added","item":{"type":"function_call","name":"f"}}\n\n',
+      `data: ${JSON.stringify({
+        type: "response.output_text.delta",
+        delta: "x".repeat(256),
+      })}\n\n`,
+    ].join("");
+    const result = await inspectStreamingResponsePrefix(responseFromChunks([body]), {
+      enableResponsesLifecycleGate: true,
+      responsesGateMode: "shadow",
+      responsesGateCaps: {
+        prebufferEventCap: 16,
+        prebufferByteCap: 64,
+        requestEchoByteCap: 64,
+      },
+      onResponsesShadowDiagnostic: onShadowDiagnostic,
+    });
+
+    expect(result.kind).toBe("pass");
+    if (result.kind !== "pass") return;
+    expect(await result.response.text()).toBe(body);
+    expect(onShadowDiagnostic).toHaveBeenCalledWith(
+      expect.objectContaining({ outcome: "byte_overflow" })
+    );
+  });
+
+  it("releases the legacy prefix in shadow mode without waiting for a later semantic decision", async () => {
+    const onShadowDiagnostic = vi.fn();
+    const response = new Response(
+      new ReadableStream<Uint8Array>({
+        start(streamController) {
+          streamController.enqueue(
+            encoder.encode(
+              [
+                'data: {"type":"response.created"}\n\n',
+                'data: {"type":"response.output_item.added","item":{"type":"function_call","name":"f"}}\n\n',
+              ].join("")
+            )
+          );
+        },
+      }),
+      { status: 200, headers: { "content-type": "text/event-stream" } }
+    );
+
+    const result = await inspectStreamingResponsePrefix(response, {
+      enableResponsesLifecycleGate: true,
+      responsesGateMode: "shadow",
+      onResponsesShadowDiagnostic: onShadowDiagnostic,
+    });
+
+    expect(result).toMatchObject({
+      kind: "pass",
+      commitMarker: { eventType: "response.output_item.added", frameIndex: 2 },
+    });
+    expect(onShadowDiagnostic).not.toHaveBeenCalled();
+    if (result.kind !== "pass" || !result.response.body) return;
+    await result.response.body.cancel("test_complete");
+  });
+
+  it("associates a fixed-shape marker only with the committed response", async () => {
+    const secretPayload = "must-not-appear-in-marker";
+    const result = await inspectStreamingResponsePrefix(
+      responseFromChunks([
+        'data: {"type":"response.created"}\n\n',
+        `data: {"type":"response.output_text.delta","delta":"${secretPayload}"}\n\n`,
+      ]),
+      { enableResponsesLifecycleGate: true }
+    );
+    expect(result.kind).toBe("pass");
+    if (result.kind !== "pass") return;
+
+    const marker = consumeStreamingResponseCommitMarker(result.response);
+    expect(marker).toEqual({
+      verdict: "content",
+      eventType: "response.output_text.delta",
+      frameIndex: 2,
+      chunkIndex: 2,
+      bufferedBytes: expect.any(Number),
+      echoExcludedBytes: expect.any(Number),
+    });
+    expect(JSON.stringify(marker)).not.toContain(secretPayload);
+    expect(consumeStreamingResponseCommitMarker(result.response)).toBeNull();
+  });
+
+  it("applies identical precommit semantics to WebSocket-adapter SSE responses", async () => {
+    const result = await inspectStreamingResponsePrefix(
+      responseFromChunks(
+        [
+          'data: {"type":"response.created"}\n\n',
+          'data: {"type":"response.output_item.added","item":{"type":"function_call","name":"f"}}\n\n',
+          'data: {"type":"response.failed","response":{"error":{"code":"server_is_overloaded"}}}\n\n',
+        ],
+        undefined,
+        { "x-cch-upstream-transport": "websocket" }
+      ),
+      { enableResponsesLifecycleGate: true }
+    );
+
+    expect(result).toMatchObject({
+      kind: "fake_200",
+      diagnostic: {
+        phase: "responses_semantic_gate",
+        observedEventTypes: ["response.created", "response.output_item.added", "response.failed"],
+      },
+    });
   });
 
   it("owns the idle timeout only while holding Responses lifecycle events", async () => {

@@ -1,4 +1,18 @@
 import { detectUpstreamErrorFromSseOrJsonText } from "@/lib/utils/upstream-error-detection";
+import {
+  type ResponsesStreamCommitMarker,
+  type ResponsesStreamGateCaps,
+  type ResponsesStreamGateFailureReason,
+  type ResponsesStreamGateMode,
+  type ResponsesStreamGateResult,
+  resolveResponsesStreamGateCaps,
+  resolveResponsesStreamGateMode,
+  runResponsesStreamContentGate,
+} from "./stream-gate/responses-content-gate";
+import {
+  createResponsesStreamShadowObserver,
+  type ResponsesStreamShadowDiagnostic,
+} from "./stream-gate/responses-shadow-observer";
 
 export const DEFAULT_STREAMING_RESPONSE_PREFIX_LIMIT_BYTES = 32 * 1024;
 
@@ -12,7 +26,11 @@ const RESPONSES_PRE_OUTPUT_EVENT_TYPES = new Set([
 ]);
 
 export type StreamingResponsePrefixDiagnostic = {
-  phase: "responses_pre_output_gate" | "streaming_prefix_gate" | "prefix_cap_fail_open";
+  phase:
+    | "responses_pre_output_gate"
+    | "responses_semantic_gate"
+    | "streaming_prefix_gate"
+    | "prefix_cap_fail_open";
   observedBytes: number;
   prefixCapBytes: number;
   rawBodyTruncated: boolean;
@@ -26,11 +44,25 @@ export type StreamingResponsePrefixDiagnostic = {
   upstreamErrorMessageLength?: number;
 };
 
+export type StreamingResponseSemanticDiagnostic = {
+  mode: "shadow" | "enforce";
+  outcome: "content" | ResponsesStreamGateFailureReason;
+  divergentFromLegacy: boolean;
+  framesSeen: number;
+  bufferedBytes: number;
+  echoExcludedBytes: number;
+  observedEventTypes: readonly string[];
+  eventTypesTruncated: boolean;
+  marker?: ResponsesStreamCommitMarker;
+};
+
 export type StreamingResponsePrefixInspection =
   | {
       kind: "pass";
       response: Response;
       diagnostic?: StreamingResponsePrefixDiagnostic;
+      commitMarker?: ResponsesStreamCommitMarker;
+      semanticDiagnostic?: StreamingResponseSemanticDiagnostic;
     }
   | {
       kind: "fake_200";
@@ -39,22 +71,33 @@ export type StreamingResponsePrefixInspection =
       rawText: string;
       rawBodyTruncated: boolean;
       diagnostic: StreamingResponsePrefixDiagnostic;
+    }
+  | {
+      kind: "upstream_failure";
+      code: string;
+      reason: Exclude<ResponsesStreamGateFailureReason, "read_error">;
+      diagnostic: StreamingResponsePrefixDiagnostic;
+      semanticDiagnostic: StreamingResponseSemanticDiagnostic;
     };
 
 type InspectStreamingResponsePrefixOptions = {
   maxBytes?: number;
   /** Enable the multi-event hold only for the canonical OpenAI Responses SSE protocol. */
   enableResponsesLifecycleGate?: boolean;
+  responsesGateMode?: ResponsesStreamGateMode;
+  responsesGateCaps?: ResponsesStreamGateCaps;
   /** Called exactly once when a nonempty upstream body chunk first reaches this gate. */
   onFirstUpstreamByte?: () => void;
   /** The gate owns this watchdog only while it holds pre-output lifecycle events. */
   streamingIdleTimeoutMs?: number;
   onStreamingIdleTimeout?: () => void;
+  /** Receives bounded shadow-mode divergences after legacy bytes have already been released. */
+  onResponsesShadowDiagnostic?: (diagnostic: ResponsesStreamShadowDiagnostic) => void;
 };
 
 type PrefixDecision =
   | { kind: "need_more" }
-  | { kind: "pass" }
+  | { kind: "pass"; eventType: string | null }
   | ({
       kind: "fake_200";
       code: string;
@@ -70,6 +113,7 @@ type UpstreamErrorDiagnostic = {
 type ParsedSseEvent = {
   eventName?: string;
   eventType?: string;
+  dataText: string;
   data: unknown;
 };
 
@@ -77,6 +121,8 @@ type DiagnosticState = {
   observedEventTypes: string[];
   eventCountObserved: number;
   eventTypesTruncated: boolean;
+  lastEventType: string | null;
+  echoExcludedBytes: number;
 };
 
 function truncateDiagnosticString(value: string): string {
@@ -126,6 +172,7 @@ function parseCompleteSseEvent(eventText: string): ParsedSseEvent | null {
   return {
     eventName,
     eventType: dataType || eventName,
+    dataText,
     data,
   };
 }
@@ -134,11 +181,12 @@ function extractDiagnosticError(data: unknown, eventName?: string): UpstreamErro
   if (!isPlainRecord(data)) return {};
 
   const response = isPlainRecord(data.response) ? data.response : null;
+  const topLevelErrorCandidate =
+    typeof data.code === "string" || typeof data.message === "string" ? data : undefined;
+  const isResponseFailure = data.type === "response.failed" || eventName === "response.failed";
   const errorValue =
     data.error ??
-    (data.type === "response.failed" || eventName === "response.failed"
-      ? response?.error
-      : undefined) ??
+    (isResponseFailure ? (response?.error ?? topLevelErrorCandidate) : undefined) ??
     (data.type === "error" || eventName === "error" ? data : undefined);
 
   if (typeof errorValue === "string") {
@@ -162,6 +210,7 @@ function extractDiagnosticError(data: unknown, eventName?: string): UpstreamErro
 
 function addObservedEventType(diagnostics: DiagnosticState, eventType?: string): void {
   diagnostics.eventCountObserved += 1;
+  diagnostics.lastEventType = eventType || null;
   if (diagnostics.observedEventTypes.length >= MAX_DIAGNOSTIC_EVENT_TYPES) {
     diagnostics.eventTypesTruncated = true;
     return;
@@ -176,19 +225,24 @@ function inspectCompleteJsonPayload(text: string, eof: boolean): PrefixDecision 
   }
   if (!trimmed.startsWith("{")) return null;
 
+  let parsed: unknown;
   try {
-    JSON.parse(trimmed);
+    parsed = JSON.parse(trimmed) as unknown;
   } catch {
-    return eof ? { kind: "pass" } : { kind: "need_more" };
+    return eof ? { kind: "pass", eventType: null } : { kind: "need_more" };
   }
 
   const detected = detectUpstreamErrorFromSseOrJsonText(trimmed);
-  if (!detected.isError) return { kind: "pass" };
+  if (!detected.isError) {
+    const eventType =
+      isPlainRecord(parsed) && typeof parsed.type === "string" ? parsed.type.trim() || null : null;
+    return { kind: "pass", eventType };
+  }
   return {
     kind: "fake_200",
     code: detected.code,
     detail: detected.detail,
-    ...extractDiagnosticError(JSON.parse(trimmed) as unknown),
+    ...extractDiagnosticError(parsed),
   };
 }
 
@@ -201,6 +255,9 @@ function inspectCompleteSseEvent(
   if (!event) return null;
 
   addObservedEventType(diagnostics, event.eventType);
+  if (RESPONSES_PRE_OUTPUT_EVENT_TYPES.has(event.eventType ?? "")) {
+    diagnostics.echoExcludedBytes += Buffer.byteLength(event.dataText, "utf8");
+  }
   const detected = detectUpstreamErrorFromSseOrJsonText(eventText);
   if (detected.isError) {
     return {
@@ -211,10 +268,12 @@ function inspectCompleteSseEvent(
     };
   }
 
-  if (!enableResponsesLifecycleGate) return { kind: "pass" };
+  if (!enableResponsesLifecycleGate) {
+    return { kind: "pass", eventType: event.eventType ?? null };
+  }
   return RESPONSES_PRE_OUTPUT_EVENT_TYPES.has(event.eventType ?? "")
     ? { kind: "need_more" }
-    : { kind: "pass" };
+    : { kind: "pass", eventType: event.eventType ?? null };
 }
 
 function buildDiagnostic(
@@ -280,7 +339,258 @@ function replayResponse(
   });
 }
 
+function observeResponseWithoutHolding(
+  response: Response,
+  observer: ReturnType<typeof createResponsesStreamShadowObserver>
+): Response {
+  if (!response.body) return response;
+  const reader = response.body.getReader();
+  const body = new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      try {
+        const next = await reader.read();
+        if (next.done) {
+          observer.finish();
+          controller.close();
+          return;
+        }
+        controller.enqueue(next.value);
+        observer.observe(next.value);
+      } catch (error) {
+        observer.fail();
+        controller.error(error);
+      }
+    },
+    async cancel(reason) {
+      await reader.cancel(reason);
+    },
+  });
+
+  return new Response(body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: response.headers,
+  });
+}
+
+const responseCommitMarkers = new WeakMap<Response, ResponsesStreamCommitMarker>();
+
+function attachResponseCommitMarker(
+  response: Response,
+  marker: ResponsesStreamCommitMarker
+): Response {
+  responseCommitMarkers.set(response, marker);
+  return response;
+}
+
+export function consumeStreamingResponseCommitMarker(
+  response: Response
+): ResponsesStreamCommitMarker | null {
+  const marker = responseCommitMarkers.get(response) ?? null;
+  if (marker) responseCommitMarkers.delete(response);
+  return marker;
+}
+
+function semanticDiagnostic(
+  gate: ResponsesStreamGateResult,
+  mode: "shadow" | "enforce",
+  outcome: StreamingResponseSemanticDiagnostic["outcome"],
+  marker?: ResponsesStreamCommitMarker
+): StreamingResponseSemanticDiagnostic {
+  return {
+    mode,
+    outcome,
+    divergentFromLegacy: gate.committed
+      ? gate.legacyGateAlreadyCommitted
+      : gate.reason !== "read_error" &&
+        (gate.legacyGateAlreadyCommitted || gate.reason !== "gate_error"),
+    framesSeen: gate.diagnostic.framesSeen,
+    bufferedBytes: gate.diagnostic.bufferedBytes,
+    echoExcludedBytes: gate.diagnostic.echoExcludedBytes,
+    observedEventTypes: gate.diagnostic.observedEventTypes,
+    eventTypesTruncated: gate.diagnostic.eventTypesTruncated,
+    ...(marker ? { marker } : {}),
+  };
+}
+
+function semanticPrefixDiagnostic(
+  gate: Exclude<ResponsesStreamGateResult, { committed: true }>,
+  caps: ResponsesStreamGateCaps,
+  detectorCode: string,
+  rawBodyTruncated: boolean,
+  error?: UpstreamErrorDiagnostic
+): StreamingResponsePrefixDiagnostic {
+  return {
+    phase: "responses_semantic_gate",
+    observedBytes: gate.diagnostic.bufferedBytes,
+    prefixCapBytes: caps.prebufferByteCap + caps.requestEchoByteCap,
+    rawBodyTruncated,
+    streamEndedDuringInspection: gate.readerDone,
+    observedEventTypes: gate.diagnostic.observedEventTypes,
+    eventCountObserved: gate.diagnostic.framesSeen,
+    eventTypesTruncated: gate.diagnostic.eventTypesTruncated,
+    detectorCode: truncateDiagnosticString(detectorCode),
+    ...error,
+  };
+}
+
+function extractSemanticErrorDiagnostic(text: string, eventType: string | null) {
+  if (!text) return {};
+  try {
+    return extractDiagnosticError(JSON.parse(text) as unknown, eventType ?? undefined);
+  } catch {
+    return {};
+  }
+}
+
+function buildBoundedSemanticErrorEnvelope(diagnostic: UpstreamErrorDiagnostic): string {
+  const error: Record<string, string | boolean> = {};
+  if (diagnostic.upstreamErrorCode) error.code = diagnostic.upstreamErrorCode;
+  if (diagnostic.upstreamErrorType) error.type = diagnostic.upstreamErrorType;
+  if (Object.keys(error).length === 0) error.present = true;
+  return JSON.stringify({ error });
+}
+
+async function inspectResponsesSemanticPrefix(
+  response: Response,
+  options: InspectStreamingResponsePrefixOptions
+): Promise<StreamingResponsePrefixInspection> {
+  if (!response.body) return { kind: "pass", response };
+
+  const reader = response.body.getReader();
+  const gateCaps = options.responsesGateCaps ?? resolveResponsesStreamGateCaps();
+  const idleTimeoutMs = options.streamingIdleTimeoutMs ?? 0;
+  let idleTimeoutId: NodeJS.Timeout | null = null;
+  const clearIdleTimeout = () => {
+    if (!idleTimeoutId) return;
+    clearTimeout(idleTimeoutId);
+    idleTimeoutId = null;
+  };
+  const refreshIdleTimeout = () => {
+    if (idleTimeoutMs <= 0 || !options.onStreamingIdleTimeout) return;
+    clearIdleTimeout();
+    idleTimeoutId = setTimeout(options.onStreamingIdleTimeout, idleTimeoutMs);
+  };
+
+  let gate: ResponsesStreamGateResult;
+  try {
+    gate = await runResponsesStreamContentGate(reader, {
+      ...gateCaps,
+      onFirstByte: options.onFirstUpstreamByte,
+      onChunk: refreshIdleTimeout,
+    });
+  } finally {
+    clearIdleTimeout();
+  }
+
+  if (!gate.committed && gate.reason === "read_error") {
+    throw gate.cause ?? new Error("upstream stream read failed during Responses precommit gate");
+  }
+
+  if (gate.committed) {
+    const committedResponse = attachResponseCommitMarker(
+      replayResponse(response, reader, gate.prefixChunks),
+      gate.commitMarker
+    );
+    return {
+      kind: "pass",
+      response: committedResponse,
+      commitMarker: gate.commitMarker,
+    };
+  }
+
+  const frameData = gate.frameData ?? "";
+  const errorDiagnostic = extractSemanticErrorDiagnostic(frameData, gate.eventType);
+  const boundedErrorEnvelope =
+    gate.reason === "gate_error" ? buildBoundedSemanticErrorEnvelope(errorDiagnostic) : "";
+  const envelopeDetection =
+    gate.reason === "gate_error"
+      ? detectUpstreamErrorFromSseOrJsonText(boundedErrorEnvelope)
+      : ({ isError: false } as const);
+  const detected = envelopeDetection;
+  // Never let a structured Responses failure frame cross into the generic
+  // ProxyError path. Even a small frame may echo instructions or partial
+  // output. The bounded envelope deliberately excludes the free-form error
+  // message because ProxyError.body is persisted in the provider decision
+  // chain; protocol code/type are sufficient for overload classification.
+  const inspectionText = gate.reason === "gate_error" ? boundedErrorEnvelope : "";
+  const rawBodyTruncated = gate.reason === "gate_error";
+  const detectorCode = detected.isError
+    ? detected.code
+    : `STREAM_GATE_${gate.reason.toUpperCase()}`;
+  const diagnostic = semanticPrefixDiagnostic(
+    gate,
+    gateCaps,
+    detectorCode,
+    rawBodyTruncated,
+    errorDiagnostic
+  );
+
+  if (gate.reason === "gate_error" && detected.isError) {
+    await reader.cancel("fake_200").catch(() => undefined);
+    return {
+      kind: "fake_200",
+      code: detected.code,
+      detail: detected.detail,
+      rawText: inspectionText,
+      rawBodyTruncated,
+      diagnostic,
+    };
+  }
+  await reader.cancel("stream_gate_precommit").catch(() => undefined);
+  return {
+    kind: "upstream_failure",
+    code: detectorCode,
+    reason: gate.reason === "read_error" ? "decode_error" : gate.reason,
+    diagnostic,
+    semanticDiagnostic: semanticDiagnostic(gate, "enforce", gate.reason),
+  };
+}
+
+async function inspectResponsesShadowPrefix(
+  response: Response,
+  options: InspectStreamingResponsePrefixOptions
+): Promise<StreamingResponsePrefixInspection> {
+  const legacy = await inspectLegacyStreamingResponsePrefix(response, {
+    ...options,
+    responsesGateMode: "shadow",
+  });
+  if (legacy.kind !== "pass" || !legacy.commitMarker || !legacy.response.body) return legacy;
+
+  const observer = createResponsesStreamShadowObserver({
+    caps: options.responsesGateCaps ?? resolveResponsesStreamGateCaps(),
+    legacyCommitMarker: legacy.commitMarker,
+    onDiagnostic: options.onResponsesShadowDiagnostic,
+  });
+  const observedResponse = attachResponseCommitMarker(
+    observeResponseWithoutHolding(legacy.response, observer),
+    legacy.commitMarker
+  );
+  return {
+    ...legacy,
+    response: observedResponse,
+  };
+}
+
 export async function inspectStreamingResponsePrefix(
+  response: Response,
+  options: InspectStreamingResponsePrefixOptions = {}
+): Promise<StreamingResponsePrefixInspection> {
+  if (!options.enableResponsesLifecycleGate) {
+    return inspectLegacyStreamingResponsePrefix(response, options);
+  }
+
+  const mode = options.responsesGateMode ?? resolveResponsesStreamGateMode();
+  if (mode === "off") {
+    return inspectLegacyStreamingResponsePrefix(response, options);
+  }
+  if (mode === "shadow") {
+    return inspectResponsesShadowPrefix(response, options);
+  }
+  return inspectResponsesSemanticPrefix(response, options);
+}
+
+async function inspectLegacyStreamingResponsePrefix(
   response: Response,
   options: InspectStreamingResponsePrefixOptions = {}
 ): Promise<StreamingResponsePrefixInspection> {
@@ -299,8 +609,11 @@ export async function inspectStreamingResponsePrefix(
     observedEventTypes: [],
     eventCountObserved: 0,
     eventTypesTruncated: false,
+    lastEventType: null,
+    echoExcludedBytes: 0,
   };
   let bufferedBytes = 0;
+  let chunkIndex = 0;
   let sseEventStart = 0;
   let firstUpstreamByteObserved = false;
   let idleTimeoutId: NodeJS.Timeout | null = null;
@@ -328,11 +641,28 @@ export async function inspectStreamingResponsePrefix(
     ? "responses_pre_output_gate"
     : "streaming_prefix_gate";
 
-  const makePass = (diagnostic?: StreamingResponsePrefixDiagnostic) => ({
-    kind: "pass" as const,
-    response: replayResponse(response, reader, prefixChunks),
-    ...(diagnostic ? { diagnostic } : {}),
-  });
+  const makePass = (
+    diagnostic?: StreamingResponsePrefixDiagnostic,
+    eventType: string | null = diagnostics.lastEventType
+  ): Extract<StreamingResponsePrefixInspection, { kind: "pass" }> => {
+    const marker: ResponsesStreamCommitMarker | undefined =
+      options.enableResponsesLifecycleGate && options.responsesGateMode === "shadow"
+        ? {
+            verdict: "shadow_pass",
+            eventType: eventType ? truncateDiagnosticString(eventType) : null,
+            frameIndex: diagnostics.eventCountObserved,
+            chunkIndex,
+            bufferedBytes,
+            echoExcludedBytes: diagnostics.echoExcludedBytes,
+          }
+        : undefined;
+    return {
+      kind: "pass",
+      response: replayResponse(response, reader, prefixChunks),
+      ...(diagnostic ? { diagnostic } : {}),
+      ...(marker ? { commitMarker: marker } : {}),
+    };
+  };
 
   try {
     while (true) {
@@ -356,7 +686,7 @@ export async function inspectStreamingResponsePrefix(
             }),
           };
         }
-        if (jsonDecision?.kind === "pass") return makePass();
+        if (jsonDecision?.kind === "pass") return makePass(undefined, jsonDecision.eventType);
 
         const remaining = rawText.slice(sseEventStart);
         const finalSseDecision = inspectCompleteSseEvent(
@@ -388,6 +718,7 @@ export async function inspectStreamingResponsePrefix(
       const chunk = next.value.slice();
       prefixChunks.push(chunk);
       bufferedBytes += chunk.byteLength;
+      chunkIndex += 1;
 
       const inspectedBytes = concatChunks(prefixChunks, Math.min(bufferedBytes, maxBytes));
       const rawText = new TextDecoder().decode(inspectedBytes);
@@ -409,7 +740,7 @@ export async function inspectStreamingResponsePrefix(
           }),
         };
       }
-      if (jsonDecision?.kind === "pass") return makePass();
+      if (jsonDecision?.kind === "pass") return makePass(undefined, jsonDecision.eventType);
 
       let decision: PrefixDecision = { kind: "need_more" };
       while (true) {
@@ -444,7 +775,7 @@ export async function inspectStreamingResponsePrefix(
           }),
         };
       }
-      if (decision.kind === "pass") return makePass();
+      if (decision.kind === "pass") return makePass(undefined, decision.eventType);
       if (bufferedBytes >= maxBytes) {
         return makePass(
           buildDiagnostic(diagnostics, {

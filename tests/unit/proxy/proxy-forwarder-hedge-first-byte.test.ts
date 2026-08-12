@@ -121,6 +121,8 @@ import {
 import { ProxyForwarder } from "@/app/v1/_lib/proxy/forwarder";
 import { ModelRedirector } from "@/app/v1/_lib/proxy/model-redirector";
 import { ProxySession } from "@/app/v1/_lib/proxy/session";
+import { peekDeferredStreamingFinalization } from "@/app/v1/_lib/proxy/stream-finalization";
+import { inspectStreamingResponsePrefix } from "@/app/v1/_lib/proxy/streaming-response-gate";
 import { logger } from "@/lib/logger";
 import type { Provider } from "@/types/provider";
 
@@ -309,6 +311,41 @@ function createDelayedFailure(params: {
       reject(params.error);
     }, params.delayMs);
   });
+}
+
+function createTimedSseResponse(
+  chunks: Array<{ delayMs: number; text: string }>,
+  onCancel?: (reason: unknown) => void
+): Response {
+  const encoder = new TextEncoder();
+  const timers: Array<ReturnType<typeof setTimeout>> = [];
+  let closed = false;
+  return new Response(
+    new ReadableStream<Uint8Array>({
+      start(controller) {
+        let elapsed = 0;
+        for (const [index, chunk] of chunks.entries()) {
+          elapsed += chunk.delayMs;
+          timers.push(
+            setTimeout(() => {
+              if (closed) return;
+              controller.enqueue(encoder.encode(chunk.text));
+              if (index === chunks.length - 1) {
+                closed = true;
+                controller.close();
+              }
+            }, elapsed)
+          );
+        }
+      },
+      cancel(reason) {
+        closed = true;
+        for (const timer of timers) clearTimeout(timer);
+        onCancel?.(reason);
+      },
+    }),
+    { status: 200, headers: { "content-type": "text/event-stream" } }
+  );
 }
 
 function withThinkingBlocks(session: ProxySession): void {
@@ -925,6 +962,135 @@ describe("ProxyForwarder - first-byte hedge scheduling", () => {
         statusCode: 200,
       });
       expect(responseSnapshotMeta.headers.get("x-upstream")).toBe("winner");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("Responses structural bytes cannot win a hedge before semantic content", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.restoreAllMocks();
+      const provider1 = createProvider({
+        id: 1,
+        name: "metadata-first",
+        providerType: "codex",
+        firstByteTimeoutStreamingMs: 50,
+      });
+      const provider2 = createProvider({
+        id: 2,
+        name: "content-winner",
+        providerType: "codex",
+        firstByteTimeoutStreamingMs: 50,
+      });
+      const session = createSession();
+      session.requestUrl = new URL("https://example.com/v1/responses");
+      session.endpointPolicy = resolveEndpointPolicy("/v1/responses");
+      session.originalFormat = "response";
+      session.request.model = "gpt-5.6";
+      session.request.message = { model: "gpt-5.6", input: "hello", stream: true };
+      setProviderWithSessionRef(session, provider1);
+      mocks.pickRandomProviderWithExclusion.mockResolvedValueOnce(provider2);
+
+      const failedCancel = vi.fn();
+      const failedController = new AbortController();
+      const winnerController = new AbortController();
+      const doForward = vi.spyOn(
+        ProxyForwarder as unknown as {
+          doForward: (...args: unknown[]) => Promise<Response>;
+        },
+        "doForward"
+      );
+      const inspectAttempt = async (response: Response, provider: Provider): Promise<Response> => {
+        const inspection = await inspectStreamingResponsePrefix(response, {
+          enableResponsesLifecycleGate: true,
+          responsesGateMode: "enforce",
+          responsesGateCaps: {
+            prebufferEventCap: 64,
+            prebufferByteCap: 512 * 1024,
+            requestEchoByteCap: 4 * 1024 * 1024,
+          },
+        });
+        if (inspection.kind === "pass") return inspection.response;
+
+        throw new UpstreamProxyError(inspection.code, inspection.kind === "fake_200" ? 503 : 502, {
+          body:
+            inspection.kind === "fake_200"
+              ? inspection.rawText
+              : JSON.stringify({ reason: inspection.reason }),
+          providerId: provider.id,
+          providerName: provider.name,
+          ...(inspection.kind === "fake_200" ? { isOverload: true } : {}),
+        });
+      };
+
+      doForward
+        .mockImplementationOnce(async (attemptSession) => {
+          const runtime = attemptSession as ProxySession & AttemptRuntime;
+          runtime.responseController = failedController;
+          runtime.clearResponseTimeout = vi.fn();
+          return inspectAttempt(
+            createTimedSseResponse(
+              [
+                { delayMs: 0, text: 'data: {"type":"response.created"}\n\n' },
+                {
+                  delayMs: 5,
+                  text: 'data: {"type":"response.output_item.added","item":{"type":"function_call","name":"read_file"}}\n\n',
+                },
+                {
+                  delayMs: 200,
+                  text: 'data: {"type":"response.failed","response":{"error":{"code":"server_is_overloaded"}}}\n\n',
+                },
+                {
+                  delayMs: 1000,
+                  text: 'data: {"type":"response.done"}\n\n',
+                },
+              ],
+              failedCancel
+            ),
+            provider1
+          );
+        })
+        .mockImplementationOnce(async (attemptSession) => {
+          const runtime = attemptSession as ProxySession & AttemptRuntime;
+          runtime.responseController = winnerController;
+          runtime.clearResponseTimeout = vi.fn();
+          return inspectAttempt(
+            createTimedSseResponse([
+              { delayMs: 5, text: 'data: {"type":"response.created"}\n\n' },
+              {
+                delayMs: 5,
+                text: 'data: {"type":"response.output_text.delta","delta":"winner"}\n\n',
+              },
+              {
+                delayMs: 5,
+                text: 'data: {"type":"response.completed","response":{"output":[]}}\n\n',
+              },
+            ]),
+            provider2
+          );
+        });
+
+      const responsePromise = ProxyForwarder.send(session);
+      await vi.advanceTimersByTimeAsync(50);
+      expect(doForward).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(20);
+
+      const response = await responsePromise;
+      const body = await response.text();
+      expect(body).toContain('"delta":"winner"');
+      expect(body).not.toContain("response.output_item.added");
+      expect(body).not.toContain("server_is_overloaded");
+      expect(session.provider?.id).toBe(provider2.id);
+      expect(winnerController.signal.aborted).toBe(false);
+      expect(failedCancel).not.toHaveBeenCalled();
+      expect(peekDeferredStreamingFinalization(session)?.streamGateCommitMarker).toMatchObject({
+        verdict: "content",
+        eventType: "response.output_text.delta",
+      });
+
+      await vi.advanceTimersByTimeAsync(250);
+      expect(failedCancel).toHaveBeenCalled();
     } finally {
       vi.useRealTimers();
     }

@@ -416,6 +416,10 @@ export async function tryResponsesWebsocketUpstream(options: {
       ws = new (WsCtor as unknown as new (url: string, opts?: unknown) => WebSocketType)(wssUrl, {
         headers,
         handshakeTimeout: HANDSHAKE_TIMEOUT_MS,
+        // Keep one WebSocket message within the same hard budget as the
+        // adapter queue. The queue check alone cannot bound a message handed
+        // directly to a waiting SSE reader.
+        maxPayload: MAX_BUFFERED_QUEUE_BYTES,
       });
     } catch (err) {
       return {

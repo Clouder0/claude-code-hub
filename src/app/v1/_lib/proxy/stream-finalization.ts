@@ -1,4 +1,5 @@
 import type { ProxySession } from "./session";
+import type { ResponsesStreamCommitMarker } from "./stream-gate/responses-content-gate";
 
 /**
  * 流式响应（SSE）在“收到响应头”时无法确定成功与否：
@@ -35,6 +36,8 @@ export type DeferredStreamingFinalization = {
    * coexists with asynchronously accumulated loser costs without clobbering.
    */
   billHedgeLosers?: boolean;
+  /** Fixed-shape marker for the semantic frame that made downstream commitment irreversible. */
+  streamGateCommitMarker?: ResponsesStreamCommitMarker;
 };
 
 const deferredMeta = new WeakMap<ProxySession, DeferredStreamingFinalization>();

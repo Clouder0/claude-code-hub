@@ -88,6 +88,7 @@ import { ProxyForwarder } from "@/app/v1/_lib/proxy/forwarder";
 import { ProxyError } from "@/app/v1/_lib/proxy/errors";
 import { resetFake200SseDiagnosticLogRateLimitForTests } from "@/app/v1/_lib/proxy/fake-200-observability";
 import { ProxySession } from "@/app/v1/_lib/proxy/session";
+import { peekDeferredStreamingFinalization } from "@/app/v1/_lib/proxy/stream-finalization";
 import type { Provider } from "@/types/provider";
 
 const encoder = new TextEncoder();
@@ -306,14 +307,17 @@ describe("ProxyForwarder - fake 200 HTML body", () => {
 
     const failedAttemptCancelled = vi.fn();
     const overloadMessage = "Our servers are currently overloaded. Please try again later.";
+    const requestEcho = "x".repeat(600 * 1024);
     const fake200Body = [
-      'data: {"type":"response.created"}\n\n',
+      `data: {"type":"response.created","response":{"instructions":"${requestEcho}","error":null}}\n\n`,
       'data: {"type":"response.in_progress"}\n\n',
+      'data: {"type":"response.output_item.added","item":{"type":"function_call","id":"call_1","name":"read_file","status":"in_progress"}}\n\n',
       'data: {"type":"response.failed","response":{"error":{"code":"server_is_overloaded",',
       `"type":"service_unavailable_error","message":"${overloadMessage}"}}}\n\n`,
     ].join("");
     const successfulBody = [
       'event: response.created\ndata: {"type":"response.created"}\n\n',
+      'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"ok"}\n\n',
       'event: response.completed\ndata: {"type":"response.completed"}\n\n',
     ].join("");
 
@@ -350,21 +354,33 @@ describe("ProxyForwarder - fake 200 HTML body", () => {
     );
     const overloadFailure = mocks.recordFailure.mock.calls[0]?.[1] as ProxyError;
     expect(overloadFailure.upstreamError).toMatchObject({
-      rawBody: fake200Body,
+      rawBody: expect.stringContaining('"code":"server_is_overloaded"'),
       rawBodyTruncated: true,
       statusCodeInferred: true,
       statusCodeInferenceMatcherId: "service_unavailable",
-      safeClientMessageCandidate: "Our servers are currently overloaded. Please try again later.",
     });
+    expect(overloadFailure.upstreamError?.body).toBe("");
+    expect(overloadFailure.upstreamError?.safeClientMessageCandidate).toBeUndefined();
+    expect(overloadFailure.upstreamError?.rawBody).not.toContain(requestEcho.slice(0, 256));
+    expect(overloadFailure.upstreamError?.rawBody).not.toContain(overloadMessage);
     expect(failedAttemptCancelled).toHaveBeenCalledWith("fake_200");
     expect(session.provider?.id).toBe(provider2.id);
+    const deferred = peekDeferredStreamingFinalization(session);
+    expect(deferred?.streamGateCommitMarker).toMatchObject({
+      verdict: "content",
+      eventType: "response.output_text.delta",
+      frameIndex: 2,
+    });
+    expect(JSON.stringify(deferred?.streamGateCommitMarker)).not.toContain(
+      requestEcho.slice(0, 256)
+    );
     const fake200Diagnostic = mocks.loggerWarn.mock.calls.find(
       ([message]) =>
         message === "ProxyForwarder: Fake-200 SSE detected before downstream commitment"
     )?.[1];
     expect(fake200Diagnostic).toMatchObject({
       event: "proxy.upstream_fake_200",
-      phase: "responses_pre_output_gate",
+      phase: "responses_semantic_gate",
       highConcurrencyMode: true,
       providerId: provider1.id,
       endpointId: null,
@@ -372,8 +388,13 @@ describe("ProxyForwarder - fake 200 HTML body", () => {
       upstreamStatusCode: 200,
       downstreamCommitted: false,
       protocol: {
-        observedEventTypes: ["response.created", "response.in_progress", "response.failed"],
-        detectorCode: "FAKE_200_JSON_ERROR_MESSAGE_NON_EMPTY",
+        observedEventTypes: [
+          "response.created",
+          "response.in_progress",
+          "response.output_item.added",
+          "response.failed",
+        ],
+        detectorCode: "FAKE_200_JSON_ERROR_NON_EMPTY",
         overloadMatcherId: "error_code_server_is_overloaded",
         inferredStatusCode: 503,
         upstreamErrorCode: "server_is_overloaded",
@@ -382,7 +403,10 @@ describe("ProxyForwarder - fake 200 HTML body", () => {
       },
     });
     expect(JSON.stringify(fake200Diagnostic)).not.toContain(overloadMessage);
+    expect(JSON.stringify(fake200Diagnostic)).not.toContain(requestEcho.slice(0, 256));
     expect(JSON.stringify(fake200Diagnostic)).not.toContain('"rawText"');
+    expect(JSON.stringify(session.getProviderChain())).not.toContain(overloadMessage);
+    expect(JSON.stringify(mocks.loggerWarn.mock.calls)).not.toContain(overloadMessage);
 
     const runtime = session as ProxySession & {
       clearResponseTimeout?: () => void;
@@ -390,6 +414,54 @@ describe("ProxyForwarder - fake 200 HTML body", () => {
     };
     runtime.clearResponseTimeout?.();
     runtime.releaseAgent?.();
+  });
+
+  test("/v1/responses 内容提交后的 response.failed 不透明切换供应商", async () => {
+    const provider1 = createProvider({
+      id: 1,
+      name: "content-winner",
+      providerType: "codex",
+      maxRetryAttempts: 1,
+      firstByteTimeoutStreamingMs: 0,
+    });
+    const provider2 = createProvider({
+      id: 2,
+      name: "must-not-run",
+      providerType: "codex",
+      maxRetryAttempts: 1,
+      firstByteTimeoutStreamingMs: 0,
+    });
+    const session = createSession();
+    session.requestUrl = new URL("https://example.com/v1/responses");
+    session.endpointPolicy = resolveEndpointPolicy("/v1/responses");
+    session.originalFormat = "openai";
+    session.request.model = "gpt-5.6";
+    session.request.message = { model: "gpt-5.6", input: "hello", stream: true };
+    session.setProvider(provider1);
+    mocks.pickRandomProviderWithExclusion.mockResolvedValueOnce(provider2);
+
+    const body = [
+      'data: {"type":"response.created"}\n\n',
+      'data: {"type":"response.output_text.delta","delta":"visible"}\n\n',
+      'data: {"type":"response.failed","response":{"error":{"code":"server_is_overloaded"}}}\n\n',
+    ].join("");
+    const fetchWithoutAutoDecode = vi.spyOn(ProxyForwarder as never, "fetchWithoutAutoDecode");
+    fetchWithoutAutoDecode.mockResolvedValueOnce(
+      new Response(body, {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      })
+    );
+
+    const response = await ProxyForwarder.send(session);
+    expect(await response.text()).toBe(body);
+    expect(fetchWithoutAutoDecode).toHaveBeenCalledTimes(1);
+    expect(mocks.pickRandomProviderWithExclusion).not.toHaveBeenCalled();
+    expect(mocks.recordFailure).not.toHaveBeenCalled();
+    expect(peekDeferredStreamingFinalization(session)?.streamGateCommitMarker).toMatchObject({
+      verdict: "content",
+      eventType: "response.output_text.delta",
+    });
   });
 
   test("/v1/responses lifecycle bytes clear first-byte timeout before a later fake-200", async () => {
@@ -580,7 +652,7 @@ describe("ProxyForwarder - fake 200 HTML body", () => {
     expect(error.upstreamError).toMatchObject({
       body: "",
       isOverload: true,
-      safeClientMessageCandidate: "Our servers are currently overloaded. Please try again later.",
+      safeClientMessageCandidate: undefined,
     });
     expect(fetchWithoutAutoDecode).toHaveBeenCalledTimes(2);
     expect(cancelledAttempts).toEqual(["fake_200", "fake_200"]);

@@ -1,6 +1,7 @@
 import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
 import { WebSocketServer } from "ws";
+import { inspectStreamingResponsePrefix } from "@/app/v1/_lib/proxy/streaming-response-gate";
 import type { Provider } from "@/types/provider";
 import {
   clearResponsesWsSessionsForTests,
@@ -130,6 +131,54 @@ describe("tryResponsesWebsocketUpstream", () => {
     expect(body).toContain('"type":"response.completed"');
   });
 
+  it("keeps a real WS structural prefix precommit until a later overload failure", async () => {
+    server = await startMockServer((socket) => {
+      socket.on("message", () => {
+        socket.send(JSON.stringify({ type: "response.created", response: { id: "resp_1" } }));
+        socket.send(
+          JSON.stringify({
+            type: "response.output_item.added",
+            item: { type: "function_call", id: "call_1", name: "read_file" },
+          })
+        );
+        socket.send(
+          JSON.stringify({
+            type: "response.failed",
+            response: {
+              id: "resp_1",
+              error: { code: "server_is_overloaded", message: "overloaded" },
+            },
+          })
+        );
+      });
+    });
+
+    const result = await tryResponsesWebsocketUpstream({
+      provider: codexProvider(),
+      upstreamUrl: `http://127.0.0.1:${server.port}/v1/responses`,
+      upstreamHeaders: new Headers({ authorization: "Bearer sk-mock" }),
+      body: { model: "gpt-5.5", input: [{ role: "user", content: "hi" }] },
+    });
+
+    expect("response" in result).toBe(true);
+    if (!("response" in result)) return;
+    expect(result.response.headers.get("x-cch-upstream-transport")).toBe("websocket");
+
+    const inspection = await inspectStreamingResponsePrefix(result.response, {
+      enableResponsesLifecycleGate: true,
+      responsesGateMode: "enforce",
+    });
+
+    expect(inspection).toMatchObject({
+      kind: "fake_200",
+      diagnostic: {
+        phase: "responses_semantic_gate",
+        upstreamErrorCode: "server_is_overloaded",
+        observedEventTypes: ["response.created", "response.output_item.added", "response.failed"],
+      },
+    });
+  });
+
   it("returns failure when upstream rejects the WS upgrade", async () => {
     // Create a plain http server that returns 404 on /v1/responses to simulate
     // providers that don't speak WS on that path.
@@ -177,6 +226,29 @@ describe("tryResponsesWebsocketUpstream", () => {
       result.reason === "ws_closed_before_first_event" ||
         result.reason === "ws_error_pre_first_event"
     ).toBe(true);
+  });
+
+  it("rejects one upstream WS message larger than the adapter queue budget", async () => {
+    server = await startMockServer((socket) => {
+      socket.on("message", () => {
+        socket.send("x".repeat(8 * 1024 * 1024 + 1));
+      });
+    });
+
+    const result = await tryResponsesWebsocketUpstream({
+      provider: codexProvider(),
+      upstreamUrl: `http://127.0.0.1:${server.port}/v1/responses`,
+      upstreamHeaders: new Headers({ authorization: "Bearer sk-mock" }),
+      body: { model: "gpt-5.5", input: "hi" },
+    });
+
+    expect(result).toMatchObject({
+      failed: true,
+      reason: "ws_error_pre_first_event",
+      cacheableAsUnsupported: false,
+    });
+    if (!("failed" in result)) return;
+    expect(result.message).toContain("Max payload size exceeded");
   });
 
   it("strips stream and background transport-only fields from the forwarded frame", async () => {

@@ -160,6 +160,22 @@ export const EnvSchema = z.object({
   // 超时后主动断开该输家连接，仅用已收到的内容尝试计费（通常计不出 -> 跳过）。
   HEDGE_LOSER_DRAIN_TIMEOUT_MS: z.coerce.number().int().min(1000).default(120_000),
 
+  // OpenAI Responses 流式语义门控。仅用于 /v1/responses -> Codex provider。
+  STREAM_GATE_MODE: z.enum(["off", "shadow", "enforce"]).default("enforce"),
+  STREAM_GATE_PREBUFFER_EVENT_CAP: z.coerce.number().int().min(1).max(4096).default(64),
+  STREAM_GATE_PREBUFFER_BYTE_CAP: z.coerce
+    .number()
+    .int()
+    .min(32 * 1024)
+    .max(16 * 1024 * 1024)
+    .default(512 * 1024),
+  STREAM_GATE_REQUEST_ECHO_BYTE_CAP: z.coerce
+    .number()
+    .int()
+    .min(64 * 1024)
+    .max(64 * 1024 * 1024)
+    .default(4 * 1024 * 1024),
+
   DASHBOARD_LOGS_POLL_INTERVAL_MS: z.coerce.number().int().min(250).max(60000).default(5000),
 
   // Langfuse Observability (optional, auto-enabled when keys are set)

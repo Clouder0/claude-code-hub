@@ -2,17 +2,20 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   warn: vi.fn(),
+  info: vi.fn(),
 }));
 
 vi.mock("@/lib/logger", () => ({
   logger: {
     warn: mocks.warn,
+    info: mocks.info,
   },
 }));
 
 import {
   getFake200SseDiagnosticLogRateLimitBucketCountForTests,
   logFake200SseDiagnostic,
+  logResponsesStreamGateDiagnostic,
   resetFake200SseDiagnosticLogRateLimitForTests,
 } from "@/app/v1/_lib/proxy/fake-200-observability";
 
@@ -105,5 +108,53 @@ describe("fake-200 SSE observability", () => {
     }
 
     expect(getFake200SseDiagnosticLogRateLimitBucketCountForTests()).toBe(256);
+  });
+
+  it("rate-limits shadow divergences and logs only fixed-shape commit metadata", () => {
+    const secret = "prompt-and-model-output-must-not-be-logged";
+    const oversizedEventType = `response.future.${"x".repeat(256)}`;
+    const diagnostic: Parameters<typeof logResponsesStreamGateDiagnostic>[0] = {
+      mode: "shadow",
+      outcome: "gate_error",
+      divergentFromLegacy: true,
+      providerId: 1,
+      providerName: "capacity-a",
+      endpointId: null,
+      attemptNumber: 1,
+      framesSeen: 3,
+      bufferedBytes: 4096,
+      echoExcludedBytes: 2048,
+      observedEventTypes: ["response.created", "response.output_item.added", "response.failed"],
+      eventTypesTruncated: false,
+      marker: {
+        verdict: "shadow_pass",
+        eventType: oversizedEventType,
+        frameIndex: 3,
+        chunkIndex: 3,
+        bufferedBytes: 4096,
+        echoExcludedBytes: 2048,
+      },
+    };
+
+    for (let index = 0; index < 4; index += 1) {
+      logResponsesStreamGateDiagnostic(diagnostic);
+    }
+
+    expect(mocks.info).toHaveBeenCalledTimes(3);
+    const record = mocks.info.mock.calls[0]?.[1];
+    expect(record).toMatchObject({
+      event: "proxy.responses_stream_gate",
+      mode: "shadow",
+      outcome: "gate_error",
+      marker: {
+        verdict: "shadow_pass",
+        eventType: oversizedEventType.slice(0, 128),
+        frameIndex: 3,
+      },
+    });
+    expect(record.marker.eventType).toHaveLength(128);
+    expect(JSON.stringify(record)).not.toContain(secret);
+    expect(record).not.toHaveProperty("rawText");
+    expect(record).not.toHaveProperty("rawBody");
   });
 });

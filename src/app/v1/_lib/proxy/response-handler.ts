@@ -1015,6 +1015,7 @@ async function finalizeDeferredStreamingFinalizationIfNeeded(
   const providerIdForPersistence = meta?.providerId ?? provider?.id ?? null;
   const isHedgeWinner = meta?.isHedgeWinner === true;
   const billHedgeLosers = meta?.billHedgeLosers === true;
+  const streamGateCommitMarker = meta?.streamGateCommitMarker;
 
   // 仅在“上游 HTTP=200 且流自然结束”时做“假 200”检测：
   // - 非 200：HTTP 已经表明失败（无需额外启发式）
@@ -1162,6 +1163,16 @@ async function finalizeDeferredStreamingFinalizationIfNeeded(
   if (!streamEndedNormally && !clientAbortCompleteSuccess) {
     await clearSessionBinding();
 
+    if (!clientAborted && streamGateCommitMarker) {
+      logger.warn("[ResponseHandler] Stream failed after semantic content commitment", {
+        providerId: meta.providerId,
+        providerName: meta.providerName,
+        upstreamStatusCode: meta.upstreamStatusCode,
+        abortReason: abortReason ?? "STREAM_ABORTED",
+        streamGateCommitMarker,
+      });
+    }
+
     if (!clientAborted && session.getEndpointPolicy().allowCircuitBreakerAccounting) {
       try {
         // 动态导入：避免 proxy 模块与熔断器模块之间潜在的循环依赖。
@@ -1211,7 +1222,8 @@ async function finalizeDeferredStreamingFinalizationIfNeeded(
       statusCodeInferred,
       statusCodeInferenceMatcherId: statusCodeInferenceMatcherId ?? null,
       code: detected.code,
-      detail: detected.detail ?? null,
+      detailLength: detected.detail?.length ?? 0,
+      ...(streamGateCommitMarker ? { streamGateCommitMarker } : {}),
     });
 
     const chainReason = effectiveStatusCode === 404 ? "resource_not_found" : "retry_failed";
