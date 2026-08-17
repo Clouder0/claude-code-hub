@@ -16,9 +16,11 @@ import type { Provider, ProviderType } from "@/types/provider";
 import type { SpecialSetting } from "@/types/special-settings";
 import type { BillingModelSource, CodexPriorityBillingSource } from "@/types/system-config";
 import type { User } from "@/types/user";
-import { isCountTokensEndpointPath } from "./endpoint-paths";
+import { isCountTokensEndpointPath, V1_ENDPOINT_PATHS } from "./endpoint-paths";
 import { type EndpointPolicy, resolveEndpointPolicy } from "./endpoint-policy";
 import { ProxyError } from "./errors";
+import { isRemoteCompactionV2Request } from "./remote-compaction";
+import { ERROR_CODES, getErrorMessageServer } from "@/lib/utils/error-messages";
 import type { ClientFormat } from "./format-mapper";
 import {
   buildOpenAIImageLogicalBody,
@@ -143,6 +145,7 @@ export class ProxySession {
   originalFormat: ClientFormat = "claude";
   providerType: ProviderType | null = null;
 
+  private readonly managedEndpoint: string;
   private readonly endpointPolicy: EndpointPolicy;
 
   // 模型重定向追踪：保存原始模型名（重定向前）
@@ -246,7 +249,8 @@ export class ProxySession {
     this.messageContext = null;
     this.sessionId = null;
     this.providerChain = [];
-    this.endpointPolicy = resolveSessionEndpointPolicy(init.requestUrl);
+    this.managedEndpoint = resolveSessionManagedEndpoint(init.requestUrl, init.request.message);
+    this.endpointPolicy = resolveEndpointPolicy(this.managedEndpoint);
   }
 
   static async fromContext(
@@ -816,6 +820,33 @@ export class ProxySession {
   }
 
   /**
+   * 获取管理语义的 endpoint。
+   * Remote Compaction v2 保留真实 /v1/responses wire path，但复用 v1 compact 的策略、日志和计费分类。
+   */
+  getManagedEndpoint(): string {
+    return this.managedEndpoint ?? this.getEndpoint() ?? "/";
+  }
+
+  /**
+   * 在请求 message 被原地规范化后，同步 raw wire body 与审计日志。
+   * 标准数组请求不会调用此方法，因此原始请求字节仍保持不变。
+   */
+  async syncRequestBodyFromMessage(): Promise<void> {
+    const serialized = JSON.stringify(this.request.message);
+    if (serialized === undefined) {
+      const { getLocale } = await import("next-intl/server");
+      const message = await getErrorMessageServer(
+        await getLocale(),
+        ERROR_CODES.INVALID_NORMALIZED_BODY
+      );
+      throw new ProxyError(message, 400);
+    }
+
+    this.request.buffer = new TextEncoder().encode(serialized).buffer;
+    this.request.log = JSON.stringify(optimizeRequestMessage(this.request.message), null, 2);
+  }
+
+  /**
    * 获取请求的 API endpoint（来自 URL.pathname）
    * 处理边界：若 URL 不存在则返回 null
    */
@@ -1176,15 +1207,20 @@ function optimizeRequestMessage(message: Record<string, unknown>): Record<string
   return optimized;
 }
 
-function resolveSessionEndpointPolicy(requestUrl: URL): EndpointPolicy {
+function resolveSessionManagedEndpoint(
+  requestUrl: URL,
+  requestMessage: Record<string, unknown>
+): string {
   try {
     const pathname = requestUrl.pathname;
     if (typeof pathname === "string" && pathname.length > 0) {
-      return resolveEndpointPolicy(pathname);
+      return isRemoteCompactionV2Request(pathname, requestMessage)
+        ? V1_ENDPOINT_PATHS.RESPONSES_COMPACT
+        : pathname;
     }
   } catch {}
 
-  return resolveEndpointPolicy("/");
+  return "/";
 }
 
 export function extractModelFromPath(pathname: string): string | null {

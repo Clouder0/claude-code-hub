@@ -172,6 +172,7 @@ function createLoserSession(
       },
     },
     getEndpoint: () => "/v1/responses",
+    getManagedEndpoint: () => "/v1/responses",
     getOriginalModel() {
       return this.request.model;
     },

@@ -3,6 +3,7 @@ import { getCachedSystemSettings } from "@/lib/config";
 import { logger } from "@/lib/logger";
 import { ProxyStatusTracker } from "@/lib/proxy-status-tracker";
 import { SessionTracker } from "@/lib/session-tracker";
+import { isRawPassthroughEndpointPolicy } from "./proxy/endpoint-policy";
 import { ProxyErrorHandler } from "./proxy/error-handler";
 import { attachSessionIdToErrorResponse } from "./proxy/error-session-id";
 import { ProxyError } from "./proxy/errors";
@@ -121,7 +122,7 @@ export async function handleProxyRequest(c: Context): Promise<Response> {
     // Reuse the system settings already loaded above (with its fallback path)
     // instead of re-reading the cache. A transient cache miss must not turn an
     // otherwise-routable request into an error response.
-    if (cachedSystemSettings) {
+    if (cachedSystemSettings && !isRawPassthroughEndpointPolicy(session.getEndpointPolicy())) {
       const fakeStreamingResponse = await tryFakeStreamingPath(session, cachedSystemSettings);
       if (fakeStreamingResponse) {
         return await attachSessionIdToErrorResponse(session.sessionId, fakeStreamingResponse);
