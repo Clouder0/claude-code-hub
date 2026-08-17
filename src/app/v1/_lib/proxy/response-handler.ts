@@ -5140,6 +5140,12 @@ async function trackCostToRedis(
     // 追踪到 Redis（使用 session.sessionId）
     await RateLimitService.trackCost(key.id, provider.id, trackingSession.sessionId, costFloat, {
       userId: user.id,
+      key5hUsd: key.limit5hUsd,
+      keyDailyUsd: key.limitDailyUsd,
+      keyWeeklyUsd: key.limitWeeklyUsd,
+      keyMonthlyUsd: key.limitMonthlyUsd,
+      provider5hUsd: provider.limit5hUsd,
+      user5hUsd: user.limit5hUsd,
       key5hResetMode: key.limit5hResetMode,
       keyResetTime: key.dailyResetTime,
       keyResetMode: key.dailyResetMode,

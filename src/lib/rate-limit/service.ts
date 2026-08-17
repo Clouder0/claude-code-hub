@@ -928,6 +928,14 @@ export class RateLimitService {
     cost: number,
     options?: {
       userId?: number;
+      /** 已配置的 5h 限额（limit_5h_usd）；显式 null/0 = 未配置限额，跳过对应维度的 5h 跟踪 */
+      key5hUsd?: number | null;
+      provider5hUsd?: number | null;
+      user5hUsd?: number | null;
+      /** 已配置的 key 维度日/周/月限额；显式 null/0 = 未配置，跳过对应 key 计数器写入 */
+      keyDailyUsd?: number | null;
+      keyWeeklyUsd?: number | null;
+      keyMonthlyUsd?: number | null;
       key5hResetMode?: DailyResetMode;
       keyResetTime?: string;
       keyResetMode?: DailyResetMode;
@@ -944,6 +952,12 @@ export class RateLimitService {
     if (!RateLimitService.redis || cost <= 0) return;
 
     try {
+      // 限额未配置（显式 null 或 0）时不做任何窗口跟踪：写入侧无人读取，
+      // 是全量扫描 Lua 热点的根源。只有显式配置了限额的实体才需要记账。
+      // 缺省（undefined）保持旧行为，避免未传配置的调用方被静默关闭跟踪。
+      const isConfiguredLimit = (usd: number | null | undefined): boolean =>
+        usd === undefined || (usd !== null && usd > 0);
+
       const keyDailyReset = RateLimitService.resolveDailyReset(options?.keyResetTime);
       const providerDailyReset = RateLimitService.resolveDailyReset(options?.providerResetTime);
       const key5hMode = options?.key5hResetMode ?? "rolling";
@@ -975,46 +989,51 @@ export class RateLimitService {
       const ttlWeekly = await getTTLForPeriod("weekly");
       const ttlMonthly = await getTTLForPeriod("monthly");
 
-      // 1. 5h 窗口：rolling 使用 ZSET，fixed 仅在首个成功记账时创建 TTL 窗口
-      if (key5hMode === "rolling") {
-        await RateLimitService.redis.eval(
-          TRACK_COST_5H_ROLLING_WINDOW,
-          1, // KEYS count
-          RateLimitService.get5hCostKey("key", keyId, "rolling"), // KEYS[1]
-          cost.toString(), // ARGV[1]: cost
-          now.toString(), // ARGV[2]: now
-          window5h.toString(), // ARGV[3]: window
-          requestId, // ARGV[4]: request_id (optional fallback)
-          billingEventId // ARGV[5]: billing_event_id (optional, preferred)
-        );
-      } else {
-        await RateLimitService.trackFixedCostWindow(
-          RateLimitService.get5hCostKey("key", keyId, "fixed"),
-          cost,
-          5 * 3600
-        );
+      // 1. 5h 窗口：仅当实体配置了 5h 限额（limit_5h_usd > 0）时才跟踪；
+      //    rolling 使用 ZSET，fixed 仅在首个成功记账时创建 TTL 窗口
+      if (isConfiguredLimit(options?.key5hUsd)) {
+        if (key5hMode === "rolling") {
+          await RateLimitService.redis.eval(
+            TRACK_COST_5H_ROLLING_WINDOW,
+            1, // KEYS count
+            RateLimitService.get5hCostKey("key", keyId, "rolling"), // KEYS[1]
+            cost.toString(), // ARGV[1]: cost
+            now.toString(), // ARGV[2]: now
+            window5h.toString(), // ARGV[3]: window
+            requestId, // ARGV[4]: request_id (optional fallback)
+            billingEventId // ARGV[5]: billing_event_id (optional, preferred)
+          );
+        } else {
+          await RateLimitService.trackFixedCostWindow(
+            RateLimitService.get5hCostKey("key", keyId, "fixed"),
+            cost,
+            5 * 3600
+          );
+        }
       }
 
-      if (provider5hMode === "rolling") {
-        await RateLimitService.redis.eval(
-          TRACK_COST_5H_ROLLING_WINDOW,
-          1,
-          RateLimitService.get5hCostKey("provider", providerId, "rolling"),
-          cost.toString(),
-          now.toString(),
-          window5h.toString(),
-          requestId,
-          billingEventId
-        );
-      } else {
-        await RateLimitService.trackFixedCostWindow(
-          RateLimitService.get5hCostKey("provider", providerId, "fixed"),
-          cost,
-          5 * 3600
-        );
+      if (isConfiguredLimit(options?.provider5hUsd)) {
+        if (provider5hMode === "rolling") {
+          await RateLimitService.redis.eval(
+            TRACK_COST_5H_ROLLING_WINDOW,
+            1,
+            RateLimitService.get5hCostKey("provider", providerId, "rolling"),
+            cost.toString(),
+            now.toString(),
+            window5h.toString(),
+            requestId,
+            billingEventId
+          );
+        } else {
+          await RateLimitService.trackFixedCostWindow(
+            RateLimitService.get5hCostKey("provider", providerId, "fixed"),
+            cost,
+            5 * 3600
+          );
+        }
       }
 
-      if (options?.userId != null) {
+      if (options?.userId != null && isConfiguredLimit(options?.user5hUsd)) {
         if (user5hMode === "rolling") {
           await RateLimitService.redis.eval(
             TRACK_COST_5H_ROLLING_WINDOW,
@@ -1035,8 +1054,8 @@ export class RateLimitService {
         }
       }
 
-      // 2. daily 滚动窗口：使用 Lua 脚本（ZSET）
-      if (keyDailyMode === "rolling") {
+      // 2. daily 滚动窗口：使用 Lua 脚本（ZSET），仅当 key 配置了日限额时写入
+      if (keyDailyMode === "rolling" && isConfiguredLimit(options?.keyDailyUsd)) {
         await RateLimitService.redis.eval(
           TRACK_COST_DAILY_ROLLING_WINDOW,
           1,
@@ -1065,18 +1084,22 @@ export class RateLimitService {
       // 3. daily fixed/周/月固定窗口：使用 STRING + 动态 TTL
       const pipeline = RateLimitService.redis.pipeline();
 
-      // Key 的 daily fixed/周/月消费
-      if (keyDailyMode === "fixed") {
+      // Key 的 daily fixed/周/月消费：仅当对应限额已配置时写入（key 维度全站未配置限额时全部跳过）
+      if (keyDailyMode === "fixed" && isConfiguredLimit(options?.keyDailyUsd)) {
         const keyDailyKey = `key:${keyId}:cost_daily_${keyDailyReset.suffix}`;
         pipeline.incrbyfloat(keyDailyKey, cost);
         pipeline.expire(keyDailyKey, ttlDailyKey);
       }
 
-      pipeline.incrbyfloat(`key:${keyId}:cost_weekly`, cost);
-      pipeline.expire(`key:${keyId}:cost_weekly`, ttlWeekly);
+      if (isConfiguredLimit(options?.keyWeeklyUsd)) {
+        pipeline.incrbyfloat(`key:${keyId}:cost_weekly`, cost);
+        pipeline.expire(`key:${keyId}:cost_weekly`, ttlWeekly);
+      }
 
-      pipeline.incrbyfloat(`key:${keyId}:cost_monthly`, cost);
-      pipeline.expire(`key:${keyId}:cost_monthly`, ttlMonthly);
+      if (isConfiguredLimit(options?.keyMonthlyUsd)) {
+        pipeline.incrbyfloat(`key:${keyId}:cost_monthly`, cost);
+        pipeline.expire(`key:${keyId}:cost_monthly`, ttlMonthly);
+      }
 
       // Provider 的 daily fixed/周/月消费
       if (providerDailyMode === "fixed") {
