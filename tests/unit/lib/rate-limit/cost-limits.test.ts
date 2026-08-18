@@ -206,7 +206,7 @@ describe("RateLimitService - cost limits and quota checks", () => {
     const result = await RateLimitService.checkTotalCostLimit(7, "user", 10);
     expect(result.allowed).toBe(true);
     expect(result.current).toBe(5);
-    expect(redisClient.setex).toHaveBeenCalledWith("total_cost:user:7", 300, "5");
+    expect(redisClient.setex).toHaveBeenCalledWith("total_cost:user:7", 86400, "5");
   });
 
   it("checkTotalCostLimit：Provider Redis miss 时应 fallback DB 并写回缓存（cache key 应包含 resetAt）", async () => {

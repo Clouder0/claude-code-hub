@@ -5146,6 +5146,8 @@ async function trackCostToRedis(
       keyMonthlyUsd: key.limitMonthlyUsd,
       provider5hUsd: provider.limit5hUsd,
       user5hUsd: user.limit5hUsd,
+      userTotalUsd: user.limitTotalUsd,
+      userCostResetAt: user.costResetAt ?? null,
       key5hResetMode: key.limit5hResetMode,
       keyResetTime: key.dailyResetTime,
       keyResetMode: key.dailyResetMode,

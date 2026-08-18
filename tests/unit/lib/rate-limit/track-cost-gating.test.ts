@@ -207,4 +207,56 @@ describe("RateLimitService.trackCost - limit configuration gating", () => {
       expect(writes.some((key) => String(key).startsWith("key:1:cost_daily_"))).toBe(true);
     });
   });
+
+  describe("user total cost counter (write-side maintenance)", () => {
+    it("increments total_cost:user:<id> when a user total limit is configured", async () => {
+      const { RateLimitService } = await import("@/lib/rate-limit");
+
+      await RateLimitService.trackCost(1, 2, "sess", 10, {
+        userId: 3,
+        userTotalUsd: 500,
+        requestId: 1,
+        createdAtMs: baseTime,
+      });
+
+      const writes = pipelineCommands.filter(([op]) => op === "incrbyfloat");
+      expect(writes.map(([, key]) => key)).toContain("total_cost:user:3");
+      const expires = pipelineCommands.filter(([op]) => op === "expire");
+      expect(expires.map(([, key]) => key)).toContain("total_cost:user:3");
+    });
+
+    it("skips the total counter when the user total limit is null/0", async () => {
+      const { RateLimitService } = await import("@/lib/rate-limit");
+
+      await RateLimitService.trackCost(1, 2, "sess", 10, {
+        userId: 3,
+        userTotalUsd: null,
+        requestId: 1,
+        createdAtMs: baseTime,
+      });
+
+      const writes = pipelineCommands
+        .filter(([op]) => op === "incrbyfloat")
+        .map(([, key]) => key);
+      expect(writes).not.toContain("total_cost:user:3");
+    });
+
+    it("uses the costResetAt suffix matching checkTotalCostLimit's cache key", async () => {
+      const { RateLimitService } = await import("@/lib/rate-limit");
+      const resetAt = new Date(baseTime - 60_000);
+
+      await RateLimitService.trackCost(1, 2, "sess", 10, {
+        userId: 3,
+        userTotalUsd: 500,
+        userCostResetAt: resetAt,
+        requestId: 1,
+        createdAtMs: baseTime,
+      });
+
+      const writes = pipelineCommands
+        .filter(([op]) => op === "incrbyfloat")
+        .map(([, key]) => key);
+      expect(writes).toContain(`total_cost:user:3:${resetAt.getTime()}`);
+    });
+  });
 });

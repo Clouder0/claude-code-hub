@@ -460,7 +460,9 @@ export class RateLimitService {
         const resetAtMs = resetAtSuffix ? Number(resetAtSuffix.slice(1)) : null;
         return buildProviderTotalCostKey(entityId, resetAtMs);
       })();
-      const cacheTtl = 300; // 5 minutes
+      // 用户维度由写侧（trackCost）增量维护，读侧值始终新鲜，TTL 仅为无消费用户的兜底；
+      // key/provider 无写侧维护，保持短 TTL 以免将来配置后出现长时间的新鲜度退化。
+      const cacheTtl = entityType === "user" ? 24 * 60 * 60 : 300;
 
       // 尝试从 Redis 缓存获取
       const redis = RateLimitService.redis;
@@ -936,6 +938,10 @@ export class RateLimitService {
       keyDailyUsd?: number | null;
       keyWeeklyUsd?: number | null;
       keyMonthlyUsd?: number | null;
+      /** 已配置的用户总限额（limit_total_usd）；显式 null/0 = 未配置，跳过总消费计数器写入 */
+      userTotalUsd?: number | null;
+      /** 用户软重置时间（cost_reset_at）；与 checkTotalCostLimit 的缓存键后缀保持一致 */
+      userCostResetAt?: Date | null;
       key5hResetMode?: DailyResetMode;
       keyResetTime?: string;
       keyResetMode?: DailyResetMode;
@@ -1113,6 +1119,25 @@ export class RateLimitService {
 
       pipeline.incrbyfloat(`provider:${providerId}:cost_monthly`, cost);
       pipeline.expire(`provider:${providerId}:cost_monthly`, ttlMonthly);
+
+      // 用户总消费计数器：键名与 checkTotalCostLimit 的缓存键完全一致（含 costResetAt 后缀）。
+      // 每笔计费事件增量累加，使读侧缓存永远新鲜——否则有总限额的用户每 5 分钟触发一次
+      // 全历史 SUM(usage_ledger)，是白天数据库热点的最大来源。
+      if (
+        options?.userId != null &&
+        options?.userTotalUsd != null &&
+        options.userTotalUsd > 0
+      ) {
+        const resetAtSuffix =
+          options?.userCostResetAt instanceof Date &&
+          !Number.isNaN(options.userCostResetAt.getTime())
+            ? `:${options.userCostResetAt.getTime()}`
+            : "";
+        const userTotalCostKey = `total_cost:user:${options.userId}${resetAtSuffix}`;
+        pipeline.incrbyfloat(userTotalCostKey, cost);
+        // 24h 兜底 TTL：写侧每笔消费刷新，无消费用户 24h 后自然过期（届时冷读一次 DB 重建）
+        pipeline.expire(userTotalCostKey, 24 * 60 * 60);
+      }
 
       await pipeline.exec();
 
