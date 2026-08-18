@@ -302,8 +302,9 @@ export async function getLeaderboardWithCache(
       return JSON.parse(cached) as LeaderboardData;
     }
 
-    // 2. 缓存未命中，尝试获取计算锁（SET NX EX 10 秒）
-    const locked = await redis.set(lockKey, "1", "EX", 10, "NX");
+    // 2. 缓存未命中，尝试获取计算锁（SET NX EX 600 秒；TTL 覆盖分钟级查询时长，
+    //    避免并发轮询在锁过期后重复执行同一聚合查询）
+    const locked = await redis.set(lockKey, "1", "EX", 600, "NX");
 
     if (locked === "OK") {
       // 获得锁，查询数据库
@@ -311,8 +312,8 @@ export async function getLeaderboardWithCache(
 
       const data = await queryDatabase(period, scope, dateRange, filters);
 
-      // 写入缓存（60 秒 TTL）
-      await redis.setex(cacheKey, 60, JSON.stringify(data));
+      // 写入缓存（600 秒 TTL；聚合查询耗时可达分钟级，短 TTL 会让缓存永远失效）
+      await redis.setex(cacheKey, 600, JSON.stringify(data));
 
       // 释放锁
       await redis.del(lockKey);

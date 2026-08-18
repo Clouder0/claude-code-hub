@@ -164,7 +164,7 @@ describe("getStatisticsWithCache", () => {
     expect(getKeyStatisticsFromDB).not.toHaveBeenCalled();
   });
 
-  it("stores result with 30s TTL", async () => {
+  it("stores result with 10min TTL", async () => {
     const redis = createRedisMock();
     const rows = createUserStats();
     redis.get.mockResolvedValueOnce(null);
@@ -181,7 +181,7 @@ describe("getStatisticsWithCache", () => {
 
     expect(redis.setex).toHaveBeenCalledWith(
       "statistics:today:users:global:tz:UTC",
-      30,
+      600,
       JSON.stringify(rows)
     );
   });
@@ -218,7 +218,7 @@ describe("getStatisticsWithCache", () => {
         "statistics:today:users:global:tz:UTC:lock",
         "1",
         "EX",
-        5,
+        600,
         "NX"
       );
       expect(getUserStatisticsFromDB).not.toHaveBeenCalled();

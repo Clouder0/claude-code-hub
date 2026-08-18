@@ -81,7 +81,7 @@ describe("getOverviewWithCache", () => {
     expect(getOverviewMetricsWithComparison).not.toHaveBeenCalled();
   });
 
-  it("calls DB on cache miss, stores in Redis with 10s TTL", async () => {
+  it("calls DB on cache miss, stores in Redis with 10min TTL", async () => {
     const data = createOverviewData();
     const redis = createRedisMock();
     redis.get.mockResolvedValueOnce(null);
@@ -98,8 +98,8 @@ describe("getOverviewWithCache", () => {
 
     expect(result).toEqual(data);
     expect(getOverviewMetricsWithComparison).toHaveBeenCalledWith(42);
-    expect(redis.set).toHaveBeenCalledWith("overview:user:42:tz:UTC:lock", "1", "EX", 5, "NX");
-    expect(redis.setex).toHaveBeenCalledWith("overview:user:42:tz:UTC", 10, JSON.stringify(data));
+    expect(redis.set).toHaveBeenCalledWith("overview:user:42:tz:UTC:lock", "1", "EX", 600, "NX");
+    expect(redis.setex).toHaveBeenCalledWith("overview:user:42:tz:UTC", 600, JSON.stringify(data));
     expect(redis.del).toHaveBeenCalledWith("overview:user:42:tz:UTC:lock");
   });
 
@@ -148,7 +148,7 @@ describe("getOverviewWithCache", () => {
       const result = await pending;
 
       expect(result).toEqual(data);
-      expect(redis.set).toHaveBeenCalledWith("overview:user:99:tz:UTC:lock", "1", "EX", 5, "NX");
+      expect(redis.set).toHaveBeenCalledWith("overview:user:99:tz:UTC:lock", "1", "EX", 600, "NX");
       expect(redis.get).toHaveBeenNthCalledWith(1, "overview:user:99:tz:UTC");
       expect(redis.get).toHaveBeenNthCalledWith(2, "overview:user:99:tz:UTC");
       expect(getOverviewMetricsWithComparison).toHaveBeenCalledWith(99);
@@ -179,13 +179,13 @@ describe("getOverviewWithCache", () => {
     expect(redis.setex).toHaveBeenNthCalledWith(
       1,
       "overview:global:tz:UTC",
-      10,
+      600,
       JSON.stringify(data)
     );
     expect(redis.setex).toHaveBeenNthCalledWith(
       2,
       "overview:user:42:tz:UTC",
-      10,
+      600,
       JSON.stringify(data)
     );
   });

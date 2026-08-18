@@ -10,8 +10,10 @@ import type { DatabaseKeyStatRow, DatabaseStatRow, TimeRange } from "@/types/sta
 import { getRedisClient } from "./client";
 import { scanPattern } from "./scan-helper";
 
-const CACHE_TTL = 30;
-const LOCK_TTL = 5;
+// 统计聚合查询耗时可达分钟级；TTL 必须显著大于查询时长（旧 30s TTL 导致缓存
+// 永远在查询完成前过期，每次轮询都打库）。锁 TTL 同样覆盖查询时长，避免并发重复查询。
+const CACHE_TTL = 600; // 10 minutes
+const LOCK_TTL = 600; // 10 minutes
 
 type MixedStatisticsResult = {
   ownKeys: DatabaseKeyStatRow[];

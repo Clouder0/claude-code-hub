@@ -12,7 +12,7 @@ import { formatCurrency } from "@/lib/utils/currency";
 import { ActiveSessionsList } from "./active-sessions-list";
 import { MetricCard } from "./metric-card";
 
-const REFRESH_INTERVAL = 5000; // 5秒刷新一次
+const REFRESH_INTERVAL = 60_000; // 60 秒刷新一次（服务端缓存 10 分钟，无需 5s 轮询）
 
 async function fetchOverviewData(): Promise<OverviewData> {
   const result = await getOverviewData();

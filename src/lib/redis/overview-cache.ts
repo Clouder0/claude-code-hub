@@ -8,8 +8,11 @@ import { buildOverviewCacheKey } from "@/types/dashboard-cache";
 import { getRedisClient } from "./client";
 import { scanPattern } from "./scan-helper";
 
-const CACHE_TTL = 10;
-const LOCK_TTL = 5;
+// 面板聚合查询在 9.3GB usage_ledger 上耗时可达分钟级；TTL 必须显著大于查询时长，
+// 否则缓存永远在查询完成前过期（10s TTL 的旧设计导致每次轮询都打库）。
+// 锁 TTL 同样必须覆盖查询时长，否则并发轮询会在锁过期后重复执行同一查询。
+const CACHE_TTL = 600; // 10 minutes
+const LOCK_TTL = 600; // 10 minutes
 const LOCK_WAIT_MS = 100;
 
 function buildCacheKey(userId: number | undefined, timezone: string): string {

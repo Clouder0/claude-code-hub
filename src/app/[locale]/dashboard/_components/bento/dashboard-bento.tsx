@@ -128,11 +128,12 @@ export function DashboardBento({
   const [timeRange, setTimeRange] = useState<TimeRange>(DEFAULT_TIME_RANGE);
 
   // Overview metrics (available to all users, but shows different data based on permissions)
+  // 服务端缓存 10 分钟，客户端 60s 轮询即可（数据是"今日累计"聚合，无需更高频）
   const { data: overview } = useQuery<OverviewData>({
     queryKey: ["overview-data"],
     queryFn: fetchOverviewData,
-    refetchInterval: 15_000,
-    staleTime: 10_000,
+    refetchInterval: 60_000,
+    staleTime: 60_000,
     initialData: initialOverview,
   });
 
@@ -148,19 +149,19 @@ export function DashboardBento({
     queryKey: ["statistics", timeRange],
     queryFn: () => fetchStatistics(timeRange),
     initialData: timeRange === DEFAULT_TIME_RANGE ? initialStatistics : undefined,
-    staleTime: 30_000,
+    staleTime: 300_000,
     placeholderData: keepPreviousData,
     retry: 3,
   });
 
-  // Leaderboards
+  // Leaderboards（服务端缓存 10 分钟，客户端 5 分钟 staleTime 即可）
   const { data: userLeaderboard = [], isLoading: userLeaderboardLoading } = useQuery<
     LeaderboardData[]
   >({
     queryKey: ["leaderboard", "user"],
     queryFn: () => fetchLeaderboard("user"),
     enabled: true,
-    staleTime: 60_000,
+    staleTime: 300_000,
   });
 
   const { data: providerLeaderboard = [], isLoading: providerLeaderboardLoading } = useQuery<
@@ -169,7 +170,7 @@ export function DashboardBento({
     queryKey: ["leaderboard", "provider"],
     queryFn: () => fetchLeaderboard("provider"),
     enabled: isAdmin,
-    staleTime: 60_000,
+    staleTime: 300_000,
   });
 
   const { data: modelLeaderboard = [], isLoading: modelLeaderboardLoading } = useQuery<
@@ -178,7 +179,7 @@ export function DashboardBento({
     queryKey: ["leaderboard", "model"],
     queryFn: () => fetchLeaderboard("model"),
     enabled: isAdmin,
-    staleTime: 60_000,
+    staleTime: 300_000,
   });
 
   const metrics = overview || {

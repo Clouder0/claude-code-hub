@@ -15,7 +15,7 @@ interface StatisticsWrapperProps {
   currencyCode?: CurrencyCode;
 }
 
-const STATISTICS_REFRESH_INTERVAL = 5000; // 5秒刷新一次
+const STATISTICS_REFRESH_INTERVAL = 60_000; // 60 秒刷新一次（服务端缓存 10 分钟，无需 5s 轮询）
 
 /**
  * 统计组件包装器

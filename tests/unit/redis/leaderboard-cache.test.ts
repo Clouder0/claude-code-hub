@@ -103,7 +103,7 @@ describe("getLeaderboardWithCache", () => {
     );
     expect(redis.setex).toHaveBeenCalledWith(
       "leaderboard:userCacheHitRate:daily:2026-04-13:tz:UTC:USD:includeModelStats:tags:team-a,vip:groups:group-1",
-      60,
+      600,
       JSON.stringify(rows)
     );
   });
@@ -129,7 +129,7 @@ describe("getLeaderboardWithCache", () => {
 
     expect(redis.setex).toHaveBeenCalledWith(
       "leaderboard:userCacheHitRate:daily:2026-04-14:tz:Asia/Shanghai:USD",
-      60,
+      600,
       JSON.stringify(rows)
     );
   });
