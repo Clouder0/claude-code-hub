@@ -39,7 +39,12 @@ import {
 import { COST_SCALE, Decimal } from "@/lib/utils/currency";
 import { isNonBillingEndpoint } from "@/lib/utils/performance-formatter";
 import { hasValidPriceData } from "@/lib/utils/price-data";
-import { isSSEText, parseSSEData } from "@/lib/utils/sse";
+import {
+  isSSEText,
+  type ParsedSSEEvent,
+  parseSSEData,
+  parseSSEDataForFinalization,
+} from "@/lib/utils/sse";
 import {
   detectUpstreamErrorFromSseOrJsonText,
   inferUpstreamErrorStatusCodeFromText,
@@ -532,7 +537,16 @@ function getRequestedCodexServiceTier(
   return typeof request.service_tier === "string" ? request.service_tier : null;
 }
 
-export function parseServiceTierFromResponseText(responseText: string): string | null {
+/**
+ * 解析响应文本中的 service_tier。
+ *
+ * `preparsedSseEvents` 语义与 parseUsageFromResponseText 相同：传入时跳过全文
+ * JSON.parse 尝试与 isSSEText 嗅探，直接消费共享事件。
+ */
+export function parseServiceTierFromResponseText(
+  responseText: string,
+  preparsedSseEvents?: ParsedSSEEvent[]
+): string | null {
   let lastSeenServiceTier: string | null = null;
 
   const applyValue = (value: unknown) => {
@@ -541,25 +555,27 @@ export function parseServiceTierFromResponseText(responseText: string): string |
     }
   };
 
-  try {
-    const parsedValue = JSON.parse(responseText);
-    if (parsedValue && typeof parsedValue === "object" && !Array.isArray(parsedValue)) {
-      const parsed = parsedValue as Record<string, unknown>;
-      applyValue(parsed.service_tier);
-      if (parsed.response && typeof parsed.response === "object") {
-        applyValue((parsed.response as Record<string, unknown>).service_tier);
+  if (!preparsedSseEvents) {
+    try {
+      const parsedValue = JSON.parse(responseText);
+      if (parsedValue && typeof parsedValue === "object" && !Array.isArray(parsedValue)) {
+        const parsed = parsedValue as Record<string, unknown>;
+        applyValue(parsed.service_tier);
+        if (parsed.response && typeof parsed.response === "object") {
+          applyValue((parsed.response as Record<string, unknown>).service_tier);
+        }
       }
+    } catch {
+      // ignore, fallback to SSE parsing below
     }
-  } catch {
-    // ignore, fallback to SSE parsing below
   }
 
   if (lastSeenServiceTier) {
     return lastSeenServiceTier;
   }
 
-  if (isSSEText(responseText)) {
-    const events = parseSSEData(responseText);
+  if (preparsedSseEvents || isSSEText(responseText)) {
+    const events = preparsedSseEvents ?? parseSSEData(responseText);
     for (const event of events) {
       if (!event.data || typeof event.data !== "object") continue;
       const data = event.data as Record<string, unknown>;
@@ -1006,11 +1022,12 @@ async function finalizeDeferredStreamingFinalizationIfNeeded(
   upstreamStatusCode: number,
   streamEndedNormally: boolean,
   clientAborted: boolean,
-  abortReason?: string
+  abortReason?: string,
+  preparsedSseEvents?: ParsedSSEEvent[]
 ): Promise<FinalizeDeferredStreamingResult> {
   const meta = consumeDeferredStreamingFinalization(session);
   const provider = session.provider;
-  const securitySignals = detectCyberSecuritySignalsFromText(allContent);
+  const securitySignals = detectCyberSecuritySignalsFromText(allContent, preparsedSseEvents);
   const isCyberPolicy = securitySignals.includes("cyber_policy");
   if (isCyberPolicy) {
     await containCyberPolicy(session);
@@ -1068,7 +1085,11 @@ async function finalizeDeferredStreamingFinalizationIfNeeded(
       return false;
     }
 
-    const { usageMetrics } = parseUsageFromResponseText(allContent, provider?.providerType);
+    const { usageMetrics } = parseUsageFromResponseText(
+      allContent,
+      provider?.providerType,
+      preparsedSseEvents
+    );
     clientAbortGateUsage = { usageMetrics, providerType: provider?.providerType };
     return hasPositiveBillableTokens(usageMetrics);
   })();
@@ -2493,13 +2514,17 @@ export class ProxyResponseHandler {
 
             // 使用共享的统计处理方法
             const duration = Date.now() - session.startTime;
+            const finalizationSseEvents = isSSEText(allContent)
+              ? parseSSEDataForFinalization(allContent)
+              : undefined;
             const finalized = await finalizeDeferredStreamingFinalizationIfNeeded(
               session,
               allContent,
               statusCode,
               streamEndedNormally,
               clientAborted,
-              abortReason
+              abortReason,
+              finalizationSseEvents
             );
             const finalizedUsage = await finalizeRequestStats(
               session,
@@ -2508,7 +2533,8 @@ export class ProxyResponseHandler {
               duration,
               finalized.errorMessage ?? undefined,
               finalized.providerIdForPersistence ?? undefined,
-              true // Gemini 流式透传(NDJSON 无 data:/event: 前缀,必须显式告知)
+              true, // Gemini 流式透传(NDJSON 无 data:/event: 前缀,必须显式告知)
+              finalizationSseEvents
             );
 
             emitProxyLangfuseTrace(session, {
@@ -2556,6 +2582,9 @@ export class ProxyResponseHandler {
               clearIdleTimer();
               const allContent = flushAndJoin();
               const duration = Date.now() - session.startTime;
+              const finalizationSseEvents = isSSEText(allContent)
+                ? parseSSEDataForFinalization(allContent)
+                : undefined;
 
               const finalized = await finalizeDeferredStreamingFinalizationIfNeeded(
                 session,
@@ -2563,7 +2592,8 @@ export class ProxyResponseHandler {
                 statusCode,
                 false,
                 clientAborted,
-                abortReason
+                abortReason,
+                finalizationSseEvents
               );
 
               await finalizeRequestStats(
@@ -2573,7 +2603,8 @@ export class ProxyResponseHandler {
                 duration,
                 finalized.errorMessage ?? abortReason,
                 finalized.providerIdForPersistence ?? undefined,
-                true // 流式透传错误兜底也是流式上下文
+                true, // 流式透传错误兜底也是流式上下文
+                finalizationSseEvents
               );
             } catch (finalizeError) {
               await persistRequestFailure({
@@ -2900,13 +2931,19 @@ export class ProxyResponseHandler {
         clientAborted: boolean,
         abortReason?: string
       ): Promise<void> => {
+        // 流结束时对 allContent 的全部检测（cyber/usage/tier/cache-key）共享一次
+        // marker 门控解析，替代各自独立的全量 parseSSEData。
+        const finalizationSseEvents = isSSEText(allContent)
+          ? parseSSEDataForFinalization(allContent)
+          : undefined;
         const finalized = await finalizeDeferredStreamingFinalizationIfNeeded(
           session,
           allContent,
           statusCode,
           streamEndedNormally,
           clientAborted,
-          abortReason
+          abortReason,
+          finalizationSseEvents
         );
         const effectiveStatusCode = finalized.effectiveStatusCode;
         const streamErrorMessage = finalized.errorMessage;
@@ -2970,10 +3007,13 @@ export class ProxyResponseHandler {
         const usageResult =
           finalized.clientAbortGateUsage?.providerType === provider.providerType
             ? { usageMetrics: finalized.clientAbortGateUsage.usageMetrics }
-            : parseUsageFromResponseText(allContent, provider.providerType);
+            : parseUsageFromResponseText(allContent, provider.providerType, finalizationSseEvents);
         usageForCost = usageResult.usageMetrics;
 
-        const actualServiceTier = parseServiceTierFromResponseText(allContent);
+        const actualServiceTier = parseServiceTierFromResponseText(
+          allContent,
+          finalizationSseEvents
+        );
         const priorityBillingDecision = await resolvePriorityBillingDecision(
           session,
           actualServiceTier
@@ -3001,7 +3041,7 @@ export class ProxyResponseHandler {
         // Codex: Extract prompt_cache_key from SSE events and update session binding
         if (provider.providerType === "codex" && session.sessionId && provider.id) {
           try {
-            const sseEvents = parseSSEData(allContent);
+            const sseEvents = finalizationSseEvents ?? parseSSEData(allContent);
             for (const event of sseEvents) {
               if (typeof event.data === "object" && event.data) {
                 const promptCacheKey = SessionManager.extractCodexPromptCacheKey(
@@ -3828,9 +3868,17 @@ export function extractUsageMetrics(value: unknown): UsageMetrics | null {
   return hasAny ? result : null;
 }
 
+/**
+ * 解析响应文本中的 usage。
+ *
+ * `preparsedSseEvents`：调用方已用 parseSSEDataForFinalization 建立的共享 SSE 事件
+ * （仅 SSE 文本可传入）。传入时跳过对全文的 JSON.parse 尝试与 isSSEText 嗅探，
+ * 直接消费共享事件；不传则行为与历史版本一致。
+ */
 export function parseUsageFromResponseText(
   responseText: string,
-  providerType: string | null | undefined
+  providerType: string | null | undefined,
+  preparsedSseEvents?: ParsedSSEEvent[]
 ): {
   usageRecord: Record<string, unknown> | null;
   usageMetrics: UsageMetrics | null;
@@ -3862,59 +3910,63 @@ export function parseUsageFromResponseText(
     });
   };
 
-  try {
-    const parsedValue = JSON.parse(responseText);
+  // 非流式 JSON 分支。调用方传入共享 SSE 事件时，文本已确认是 SSE，跳过全文
+  // JSON.parse 尝试（对 SSE 文本该尝试必然失败）。
+  if (!preparsedSseEvents) {
+    try {
+      const parsedValue = JSON.parse(responseText);
 
-    if (parsedValue && typeof parsedValue === "object" && !Array.isArray(parsedValue)) {
-      const parsed = parsedValue as Record<string, unknown>;
+      if (parsedValue && typeof parsedValue === "object" && !Array.isArray(parsedValue)) {
+        const parsed = parsedValue as Record<string, unknown>;
 
-      // A completed Responses event can be wrapped in `{ response: { usage } }` while the
-      // wrapper still carries an earlier placeholder usage. The terminal nested response wins.
-      if (parsed.response && typeof parsed.response === "object") {
-        const responseObj = parsed.response as Record<string, unknown>;
-        applyUsageValue(responseObj.usage, "json.response.usage");
-        applyUsageValue(responseObj.usageMetadata, "json.response.usageMetadata");
+        // A completed Responses event can be wrapped in `{ response: { usage } }` while the
+        // wrapper still carries an earlier placeholder usage. The terminal nested response wins.
+        if (parsed.response && typeof parsed.response === "object") {
+          const responseObj = parsed.response as Record<string, unknown>;
+          applyUsageValue(responseObj.usage, "json.response.usage");
+          applyUsageValue(responseObj.usageMetadata, "json.response.usageMetadata");
+        }
+
+        // Standard usage fields
+        applyUsageValue(parsed.usage, "json.root.usage");
+
+        // Gemini usageMetadata (direct)
+        applyUsageValue(parsed.usageMetadata, "json.root.usageMetadata");
+
+        if (Array.isArray(parsed.output)) {
+          for (const item of parsed.output as Array<Record<string, unknown>>) {
+            if (!item || typeof item !== "object") {
+              continue;
+            }
+            applyUsageValue(item.usage, "json.output");
+          }
+        }
       }
 
-      // Standard usage fields
-      applyUsageValue(parsed.usage, "json.root.usage");
-
-      // Gemini usageMetadata (direct)
-      applyUsageValue(parsed.usageMetadata, "json.root.usageMetadata");
-
-      if (Array.isArray(parsed.output)) {
-        for (const item of parsed.output as Array<Record<string, unknown>>) {
+      if (!usageMetrics && Array.isArray(parsedValue)) {
+        for (const item of parsedValue) {
           if (!item || typeof item !== "object") {
             continue;
           }
-          applyUsageValue(item.usage, "json.output");
+
+          const record = item as Record<string, unknown>;
+          applyUsageValue(record.usage, "json.array");
+
+          if (record.data && typeof record.data === "object") {
+            applyUsageValue((record.data as Record<string, unknown>).usage, "json.array.data");
+          }
         }
       }
+    } catch {
+      // Fallback to SSE parsing when body is not valid JSON
     }
-
-    if (!usageMetrics && Array.isArray(parsedValue)) {
-      for (const item of parsedValue) {
-        if (!item || typeof item !== "object") {
-          continue;
-        }
-
-        const record = item as Record<string, unknown>;
-        applyUsageValue(record.usage, "json.array");
-
-        if (record.data && typeof record.data === "object") {
-          applyUsageValue((record.data as Record<string, unknown>).usage, "json.array.data");
-        }
-      }
-    }
-  } catch {
-    // Fallback to SSE parsing when body is not valid JSON
   }
 
   // SSE 解析：支持两种格式
   // 1. 标准 SSE (event: + data:) - Claude/OpenAI
   // 2. 纯 data: 格式 - Gemini
-  if (!usageMetrics && isSSEText(responseText)) {
-    const events = parseSSEData(responseText);
+  if (!usageMetrics && (preparsedSseEvents || isSSEText(responseText))) {
+    const events = preparsedSseEvents ?? parseSSEData(responseText);
     const usesOpenAISubsetUsage = providerType === "codex" || providerType === "openai-compatible";
 
     // Claude SSE 特殊处理：
@@ -4871,7 +4923,9 @@ export async function finalizeRequestStats(
    *   导致 extractActualResponseModelForProvider 走 non-stream JSON.parse 失败
    * - 如果不传则回退为 isSSEText 嗅探(仅兼容保留)
    */
-  isStreaming?: boolean
+  isStreaming?: boolean,
+  /** 调用方已建立的共享 SSE 事件（见 parseUsageFromResponseText）。 */
+  preparsedSseEvents?: ParsedSSEEvent[]
 ): Promise<UsageMetrics | null> {
   const { messageContext, provider } = session;
   if (!provider || !messageContext) {
@@ -4885,8 +4939,12 @@ export async function finalizeRequestStats(
   // the binding/chain) so the winner cost write uses the loser-sum-aware mode and does not
   // clobber concurrently-billed loser increments.
   const winnerLoserAware = peekDeferredStreamingFinalization(session)?.billHedgeLosers === true;
-  const { usageMetrics } = parseUsageFromResponseText(responseText, provider.providerType);
-  const actualServiceTier = parseServiceTierFromResponseText(responseText);
+  const { usageMetrics } = parseUsageFromResponseText(
+    responseText,
+    provider.providerType,
+    preparsedSseEvents
+  );
+  const actualServiceTier = parseServiceTierFromResponseText(responseText, preparsedSseEvents);
   const priorityBillingDecision = await resolvePriorityBillingDecision(session, actualServiceTier);
   if (!isNonBillingUsageEndpoint(session)) {
     ensureServiceTierResultSpecialSetting(session, priorityBillingDecision);

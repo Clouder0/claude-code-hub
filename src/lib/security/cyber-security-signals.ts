@@ -1,4 +1,4 @@
-import { parseSSEData } from "@/lib/utils/sse";
+import { type ParsedSSEEvent, parseSSEData } from "@/lib/utils/sse";
 
 export const CYBER_SECURITY_EVENT_TYPES = ["cyber_policy", "cyber_safety_check"] as const;
 
@@ -59,14 +59,25 @@ function parseTopLevelJson(text: string): unknown {
   }
 }
 
-export function detectCyberSecuritySignalsFromText(text: string): CyberSecurityEventType[] {
+/**
+ * 从响应体文本检测 cyber 信号。
+ *
+ * `preparsedEvents`：流式 finalization 路径已用 parseSSEDataForFinalization 解析过的
+ * 共享事件（string data 事件已被证明不可能携带信号，跳过是安全的）；不传则内部全量
+ * 解析，行为与历史版本一致。
+ */
+export function detectCyberSecuritySignalsFromText(
+  text: string,
+  preparsedEvents?: ParsedSSEEvent[]
+): CyberSecurityEventType[] {
   const signals = new Set<CyberSecurityEventType>();
   const topLevel = parseTopLevelJson(text);
   for (const signal of detectCyberSecuritySignals(topLevel)) {
     signals.add(signal);
   }
 
-  for (const event of parseSSEData(text)) {
+  const events = preparsedEvents ?? parseSSEData(text);
+  for (const event of events) {
     for (const signal of detectCyberSecuritySignals(event.data, event.event)) {
       signals.add(signal);
     }
