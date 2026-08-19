@@ -360,11 +360,14 @@ export async function register() {
           )
           .catch((err) => {
             const pgErr = err as { code?: unknown; detail?: unknown; hint?: unknown } | null;
+            const cause = (err as { cause?: unknown } | null)?.cause;
             logger.warn("[Instrumentation] Ledger backfill failed (non-fatal)", {
               error: err instanceof Error ? err.message : String(err),
               code: pgErr?.code,
               detail: typeof pgErr?.detail === "string" ? pgErr.detail.slice(0, 500) : undefined,
               hint: pgErr?.hint,
+              causeMessage: cause instanceof Error ? cause.message : String(cause),
+              causeCode: (cause as { code?: unknown } | null)?.code,
             });
           });
       }
@@ -522,11 +525,17 @@ export async function register() {
             )
             .catch((err) => {
               const pgErr = err as { code?: unknown; detail?: unknown; hint?: unknown } | null;
+              const cause = (err as { cause?: unknown } | null)?.cause;
               logger.warn("[Instrumentation] Ledger backfill failed (non-fatal)", {
                 error: err instanceof Error ? err.message : String(err),
                 code: pgErr?.code,
                 detail: typeof pgErr?.detail === "string" ? pgErr.detail.slice(0, 500) : undefined,
                 hint: pgErr?.hint,
+                causeMessage: cause instanceof Error ? cause.message : String(cause),
+                causeCode: (cause as { code?: unknown } | null)?.code,
+                causeDetail: typeof (cause as { detail?: unknown } | null)?.detail === "string"
+                  ? ((cause as { detail: string }).detail satisfies string).slice(0, 500)
+                  : undefined,
               });
             });
         }

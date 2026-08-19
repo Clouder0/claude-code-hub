@@ -54,10 +54,13 @@ export async function backfillUsageLedger(
     } catch (error) {
       lastError = error;
       if (attempt < maxAttempts) {
+        const cause = (error as { cause?: unknown } | null)?.cause;
         logger.warn("Ledger backfill transaction failed, retrying", {
           mode,
           attempt,
-          error: error instanceof Error ? error.message : String(error),
+          error: error instanceof Error ? error.message.slice(0, 200) : String(error),
+          causeMessage: cause instanceof Error ? cause.message : String(cause),
+          causeCode: (cause as { code?: unknown } | null)?.code,
         });
         await new Promise((resolve) => setTimeout(resolve, 1500 * attempt));
       }
