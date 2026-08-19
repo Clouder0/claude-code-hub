@@ -6,6 +6,7 @@ const mocks = vi.hoisted(() => ({
   redisStatus: "ready",
   dbExecute: vi.fn(),
   insertSecurityEvent: vi.fn(async () => {}),
+  invalidateCachedUser: vi.fn(async () => {}),
   warn: vi.fn(),
   error: vi.fn(),
 }));
@@ -23,6 +24,10 @@ vi.mock("@/drizzle/db", () => ({
 
 vi.mock("@/repository/security-events", () => ({
   insertSecurityEvent: mocks.insertSecurityEvent,
+}));
+
+vi.mock("@/lib/security/api-key-auth-cache", () => ({
+  invalidateCachedUser: mocks.invalidateCachedUser,
 }));
 
 vi.mock("@/lib/logger", () => ({
@@ -85,9 +90,11 @@ describe("cyber containment", () => {
   });
 
   describe("user strike disable", () => {
-    it("disables the user when the threshold is reached", async () => {
+    it("disables the user when the threshold is reached and invalidates the auth cache", async () => {
       mocks.dbExecute.mockResolvedValueOnce([{ id: 7 }]);
+      mocks.invalidateCachedUser.mockResolvedValueOnce(undefined);
       await expect(maybeDisableUserForCyberPolicy(7)).resolves.toBe(true);
+      expect(mocks.invalidateCachedUser).toHaveBeenCalledWith(7);
       expect(mocks.warn).toHaveBeenCalledWith(
         "[CyberContainment] User auto-disabled after cyber policy strikes",
         { userId: 7, threshold: CYBER_POLICY_DISABLE_THRESHOLD }
@@ -97,6 +104,7 @@ describe("cyber containment", () => {
     it("leaves the user enabled below the threshold", async () => {
       mocks.dbExecute.mockResolvedValueOnce([]);
       await expect(maybeDisableUserForCyberPolicy(7)).resolves.toBe(false);
+      expect(mocks.invalidateCachedUser).not.toHaveBeenCalled();
       expect(mocks.warn).not.toHaveBeenCalled();
     });
 

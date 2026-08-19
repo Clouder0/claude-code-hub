@@ -2,6 +2,7 @@ import { sql } from "drizzle-orm";
 import { db } from "@/drizzle/db";
 import { logger } from "@/lib/logger";
 import { getRedisClient } from "@/lib/redis";
+import { invalidateCachedUser } from "./api-key-auth-cache";
 import { recordSecurityEventBestEffort } from "./security-event-recorder";
 
 // 确认 cyber_policy 后的 session 封锁时长
@@ -78,6 +79,9 @@ export async function maybeDisableUserForCyberPolicy(userId: number): Promise<bo
     `);
     const disabled = Array.from(result).length > 0;
     if (disabled) {
+      // 清除 API key 鉴权缓存里的用户快照，否则禁用会延迟到缓存 TTL 才生效
+      // （生产 TTL 60s，期间该用户仍能通过鉴权继续打上游）。
+      await invalidateCachedUser(userId);
       logger.warn("[CyberContainment] User auto-disabled after cyber policy strikes", {
         userId,
         threshold: CYBER_POLICY_DISABLE_THRESHOLD,
