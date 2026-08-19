@@ -181,6 +181,26 @@ RETURNS integer AS $$
   );
 $$ LANGUAGE sql IMMUTABLE;
 
+CREATE OR REPLACE FUNCTION fn_set_message_request_success_rate_outcome()
+RETURNS trigger AS $$
+BEGIN
+  -- 在写入时一次性计算 outcome 存入 success_rate_outcome 列，
+  -- 供可用性聚合直接读取（index-only），避免查询期逐行调用 plpgsql 函数。
+  NEW.success_rate_outcome := fn_compute_message_request_success_rate_outcome(
+    NEW.blocked_by,
+    NEW.status_code,
+    NEW.error_message,
+    NEW.provider_chain
+  );
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_set_message_request_success_rate_outcome ON message_request;
+CREATE TRIGGER trg_set_message_request_success_rate_outcome
+  BEFORE INSERT OR UPDATE ON message_request
+  FOR EACH ROW EXECUTE FUNCTION fn_set_message_request_success_rate_outcome();
+
 CREATE OR REPLACE FUNCTION fn_upsert_usage_ledger()
 RETURNS TRIGGER AS $$
 DECLARE

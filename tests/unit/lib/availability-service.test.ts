@@ -329,8 +329,9 @@ describe("availability-service", () => {
     expect(queryText).toContain("percentile_cont(0.95)");
     expect(queryText).toContain("row_number() over");
     expect(queryText).toContain(`"successrateoutcome" in ('success', 'failure')`);
-    // 终态记录的 success/failure/excluded 分类仍由 outcome 函数完成。
-    expect(queryText).toContain("fn_compute_message_request_success_rate_outcome");
+    // 终态记录的 success/failure/excluded 分类由写入时触发器维护的
+    // success_rate_outcome 列提供（配合覆盖索引实现 index-only scan）。
+    expect(queryText).toContain('"successrateoutcome"');
     expect(queryText).toContain('avg("durationms") filter');
   });
 
@@ -574,7 +575,7 @@ describe("availability-service", () => {
     // status_code IS NOT NULL 把 statusCode=null 的中间持久化记录直接排除在聚合外，
     // 它们根本不会进入 outcome 分类阶段，所以不会被算成 failure。
     expectStatusCodeOnlyFinalizedBoundary(finalizedRequestsSql);
-    expect(queryText).toContain("fn_compute_message_request_success_rate_outcome");
+    expect(queryText).toContain('"successrateoutcome"');
     expect(queryText).toContain(`"successrateoutcome" = 'failure'`);
   });
 

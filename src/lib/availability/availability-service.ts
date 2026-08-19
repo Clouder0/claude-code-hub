@@ -376,12 +376,10 @@ export async function queryProviderAvailability(
       SELECT
         ${messageRequest.providerId} AS "providerId",
         ${messageRequest.createdAt} AS "createdAt",
-        ${buildRequestOutcomeSql(
-          messageRequest.blockedBy,
-          messageRequest.statusCode,
-          messageRequest.errorMessage,
-          messageRequest.providerChain
-        )} AS ${FINALIZED_REQUEST_OUTCOME_SQL},
+        -- 读写入时由触发器维护的 success_rate_outcome 列（配合覆盖索引实现 index-only
+        -- scan，避免 18GB 表的逐行回堆 + 逐行 plpgsql 函数调用）。列由
+        -- fn_set_message_request_success_rate_outcome BEFORE 触发器保证非空。
+        ${messageRequest.successRateOutcome} AS ${FINALIZED_REQUEST_OUTCOME_SQL},
         ${messageRequest.durationMs} AS "durationMs",
         to_timestamp(
           floor(extract(epoch from ${messageRequest.createdAt}) / ${bucketSizeSeconds}) * ${bucketSizeSeconds}

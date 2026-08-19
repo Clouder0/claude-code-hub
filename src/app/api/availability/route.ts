@@ -19,8 +19,8 @@ import {
   MAX_BUCKET_SIZE_MINUTES,
   MAX_BUCKETS_HARD_LIMIT,
   MIN_BUCKET_SIZE_MINUTES,
-  queryProviderAvailability,
 } from "@/lib/availability";
+import { getAvailabilityWithCache } from "@/lib/redis/availability-cache";
 
 function parseBooleanQueryParam(value: string, fieldName: string): boolean {
   if (value === "true") return true;
@@ -161,7 +161,7 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    const result = await queryProviderAvailability(options);
+    const result = await getAvailabilityWithCache(options);
 
     return NextResponse.json(result);
   } catch (error) {

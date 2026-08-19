@@ -1,0 +1,1 @@
+ALTER TABLE "message_request" ADD COLUMN "success_rate_outcome" varchar(16);

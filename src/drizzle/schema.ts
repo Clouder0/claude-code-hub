@@ -491,6 +491,10 @@ export const messageRequest = pgTable('message_request', {
   // HTTP 状态码
   statusCode: integer('status_code'),
 
+  // 写入时由 fn_set_message_request_success_rate_outcome 触发器计算的可用性分类
+  // （success/failure/excluded/NULL=未终态）；可用性聚合直接读取该列（index-only）。
+  successRateOutcome: varchar('success_rate_outcome', { length: 16 }),
+
   // Codex 支持：API 类型（'response' 或 'openai'）
   apiType: varchar('api_type', { length: 20 }),
 
