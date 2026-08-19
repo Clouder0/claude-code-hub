@@ -14,6 +14,7 @@ import { scanPattern } from "./scan-helper";
 // 永远在查询完成前过期，每次轮询都打库）。锁 TTL 同样覆盖查询时长，避免并发重复查询。
 const CACHE_TTL = 600; // 10 minutes
 const LOCK_TTL = 600; // 10 minutes
+const LAST_TTL = 30 * 60; // 旧快照保留 30 分钟，仅在刷新窗口内被读取
 
 type MixedStatisticsResult = {
   ownKeys: DatabaseKeyStatRow[];
@@ -46,12 +47,15 @@ async function queryDatabase(
 }
 
 /**
- * Statistics data with Redis caching (30s TTL).
+ * Statistics data with Redis caching (10min TTL + stale-while-revalidate).
  *
  * Strategy:
  * 1. Read from Redis cache first
  * 2. On cache miss, acquire distributed lock to prevent thundering herd
- * 3. Requests that fail to acquire lock wait and retry (up to 5s)
+ * 3. Requests that fail to acquire lock wait briefly and retry; still missing
+ *    means the refresh is slow -- serve the `:last` snapshot instead of
+ *    fanning out a direct query (which multiplies load exactly when the DB
+ *    is slowest)
  * 4. Fail-open: Redis unavailable -> direct DB query
  */
 export async function getStatisticsWithCache(
@@ -72,6 +76,7 @@ export async function getStatisticsWithCache(
   }
 
   const cacheKey = buildStatisticsCacheKey(timeRange, mode, userId, timezone);
+  const lastKey = `${cacheKey}:last`;
   const lockKey = `${cacheKey}:lock`;
 
   let locked = false;
@@ -96,6 +101,7 @@ export async function getStatisticsWithCache(
 
       try {
         await redis.setex(cacheKey, CACHE_TTL, JSON.stringify(data));
+        await redis.setex(lastKey, LAST_TTL, JSON.stringify(data));
       } catch (writeErr) {
         logger.warn("[StatisticsCache] Failed to write cache", { cacheKey, error: writeErr });
       }
@@ -128,8 +134,15 @@ export async function getStatisticsWithCache(
       }
     }
 
-    // Retry timeout - fallback to direct DB
-    logger.warn("[StatisticsCache] Retry timeout, fallback to direct query", { timeRange, mode });
+    // 等待超时：返回旧快照（若有）而不是降级直查——查询越慢越不能放大并发。
+    const last = await redis.get(lastKey);
+    if (last) {
+      logger.warn("[StatisticsCache] Retry timeout, serving last snapshot", { timeRange, mode });
+      return JSON.parse(last) as StatisticsCacheData;
+    }
+
+    // 纯冷启动（无缓存也无快照）：直接查询
+    logger.warn("[StatisticsCache] Cold cache, fallback to direct query", { timeRange, mode });
     return await queryDatabase(timeRange, mode, timezone, userId);
   } catch (error) {
     logger.error("[StatisticsCache] Redis error, fallback to direct query", {

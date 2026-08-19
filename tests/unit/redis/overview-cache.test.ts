@@ -176,6 +176,7 @@ describe("getOverviewWithCache", () => {
 
     expect(redis.get).toHaveBeenNthCalledWith(1, "overview:global:tz:UTC");
     expect(redis.get).toHaveBeenNthCalledWith(2, "overview:user:42:tz:UTC");
+    // 每次计算写两份：fresh（600s）+ :last 旧快照（30min，刷新窗口内兜底）
     expect(redis.setex).toHaveBeenNthCalledWith(
       1,
       "overview:global:tz:UTC",
@@ -184,8 +185,20 @@ describe("getOverviewWithCache", () => {
     );
     expect(redis.setex).toHaveBeenNthCalledWith(
       2,
+      "overview:global:tz:UTC:last",
+      1800,
+      JSON.stringify(data)
+    );
+    expect(redis.setex).toHaveBeenNthCalledWith(
+      3,
       "overview:user:42:tz:UTC",
       600,
+      JSON.stringify(data)
+    );
+    expect(redis.setex).toHaveBeenNthCalledWith(
+      4,
+      "overview:user:42:tz:UTC:last",
+      1800,
       JSON.stringify(data)
     );
   });

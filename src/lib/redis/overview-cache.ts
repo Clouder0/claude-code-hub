@@ -14,6 +14,7 @@ import { scanPattern } from "./scan-helper";
 const CACHE_TTL = 600; // 10 minutes
 const LOCK_TTL = 600; // 10 minutes
 const LOCK_WAIT_MS = 100;
+const LAST_TTL = 30 * 60; // 旧快照保留 30 分钟，仅在刷新窗口内被读取
 
 function buildCacheKey(userId: number | undefined, timezone: string): string {
   return userId !== undefined
@@ -22,9 +23,10 @@ function buildCacheKey(userId: number | undefined, timezone: string): string {
 }
 
 /**
- * Get overview metrics with Redis caching (10s TTL).
+ * Get overview metrics with Redis caching (10min TTL + stale-while-revalidate).
  * Fail-open: Redis unavailable -> direct DB query.
- * Thundering herd protection via lock key.
+ * Thundering herd protection via lock key; waiters serve the `:last` snapshot
+ * instead of fanning out direct queries when the refresh is slow.
  */
 export async function getOverviewWithCache(
   userId?: number
@@ -32,6 +34,7 @@ export async function getOverviewWithCache(
   const redis = getRedisClient();
   const timezone = await resolveSystemTimezone();
   const cacheKey = buildCacheKey(userId, timezone);
+  const lastKey = `${cacheKey}:last`;
   const lockKey = `${cacheKey}:lock`;
 
   if (!redis) {
@@ -57,7 +60,10 @@ export async function getOverviewWithCache(
       await new Promise((resolve) => setTimeout(resolve, LOCK_WAIT_MS));
       const retried = await redis.get(cacheKey);
       if (retried) return JSON.parse(retried) as OverviewMetricsWithComparison;
-      // Still nothing -- fallback to direct query
+      // Still nothing -- serve the last snapshot if present (stale-while-revalidate)
+      const last = await redis.get(lastKey);
+      if (last) return JSON.parse(last) as OverviewMetricsWithComparison;
+      // Cold cache with no snapshot -- direct query
       return await getOverviewMetricsWithComparison(userId);
     }
 
@@ -67,6 +73,7 @@ export async function getOverviewWithCache(
     // 4. Store in cache with TTL (best-effort)
     try {
       await redis.setex(cacheKey, CACHE_TTL, JSON.stringify(data));
+      await redis.setex(lastKey, LAST_TTL, JSON.stringify(data));
     } catch (writeErr) {
       logger.warn("[OverviewCache] Failed to write cache", { cacheKey, error: writeErr });
     }

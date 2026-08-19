@@ -260,7 +260,9 @@ function sleep(ms: number): Promise<void> {
  * 策略：
  * 1. 优先从 Redis 读取缓存（60 秒 TTL）
  * 2. 缓存未命中时，使用分布式锁避免并发查询
- * 3. 未获得锁的请求等待并重试（最多 5 秒）
+ * 3. 未获得锁的请求短暂等待重试；仍未命中则返回 `:last` 旧快照
+ *    （stale-while-revalidate，对齐 availability-cache；聚合查询耗时分钟级，
+ *    降级直查会在查询最慢的时刻制造雪崩——2026-08-20 诊断结论）
  * 4. Redis 不可用时降级到直接查询
  *
  * @param period - 排行榜周期（daily / weekly / monthly / allTime / custom）
@@ -269,6 +271,8 @@ function sleep(ms: number): Promise<void> {
  * @param dateRange - 自定义日期范围（仅当 period 为 custom 时需要）
  * @returns 排行榜数据
  */
+const LEADERBOARD_LAST_TTL = 30 * 60; // 旧快照保留 30 分钟，仅在刷新窗口内被读取
+
 export async function getLeaderboardWithCache(
   period: LeaderboardPeriod,
   currencyDisplay: string,
@@ -292,6 +296,7 @@ export async function getLeaderboardWithCache(
   // Resolve timezone once per request
   const timezone = await resolveSystemTimezone();
   const cacheKey = buildCacheKey(period, currencyDisplay, timezone, scope, dateRange, filters);
+  const lastKey = `${cacheKey}:last`;
   const lockKey = `${cacheKey}:lock`;
 
   try {
@@ -310,25 +315,28 @@ export async function getLeaderboardWithCache(
       // 获得锁，查询数据库
       logger.debug("[LeaderboardCache] Acquired lock, computing", { period, scope, lockKey });
 
-      const data = await queryDatabase(period, scope, dateRange, filters);
+      try {
+        const data = await queryDatabase(period, scope, dateRange, filters);
 
-      // 写入缓存（600 秒 TTL；聚合查询耗时可达分钟级，短 TTL 会让缓存永远失效）
-      await redis.setex(cacheKey, 600, JSON.stringify(data));
+        // 写入缓存（600 秒 TTL；聚合查询耗时可达分钟级，短 TTL 会让缓存永远失效）
+        await redis.setex(cacheKey, 600, JSON.stringify(data));
+        // 旧快照：供刷新窗口内的等待方瞬时返回
+        await redis.setex(lastKey, LEADERBOARD_LAST_TTL, JSON.stringify(data));
 
-      // 释放锁
-      await redis.del(lockKey);
+        logger.info("[LeaderboardCache] Cache updated", {
+          period,
+          scope,
+          dateRange,
+          filters,
+          recordCount: data.length,
+          cacheKey,
+        });
 
-      logger.info("[LeaderboardCache] Cache updated", {
-        period,
-        scope,
-        dateRange,
-        filters,
-        recordCount: data.length,
-        cacheKey,
-        ttl: 60,
-      });
-
-      return data;
+        return data;
+      } finally {
+        // 释放锁（计算抛错也不让锁泄漏到 TTL）
+        await redis.del(lockKey);
+      }
     } else {
       // 未获得锁，等待并重试（最多 50 次 × 100ms = 5 秒）
       logger.debug("[LeaderboardCache] Lock held by another request, retrying", { period, scope });
@@ -346,8 +354,15 @@ export async function getLeaderboardWithCache(
         }
       }
 
-      // 超时降级：直接查数据库
-      logger.warn("[LeaderboardCache] Retry timeout, fallback to direct query", { period, scope });
+      // 等待超时：返回旧快照（若有）而不是降级直查——查询越慢越不能放大并发。
+      const last = await redis.get(lastKey);
+      if (last) {
+        logger.warn("[LeaderboardCache] Retry timeout, serving last snapshot", { period, scope });
+        return JSON.parse(last) as LeaderboardData;
+      }
+
+      // 纯冷启动（无缓存也无快照）：直接查数据库
+      logger.warn("[LeaderboardCache] Cold cache, fallback to direct query", { period, scope });
       return await queryDatabase(period, scope, dateRange, filters);
     }
   } catch (error) {
