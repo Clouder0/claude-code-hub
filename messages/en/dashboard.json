@@ -257,7 +257,7 @@
         "responseModelLabel": "Actual Response Model",
         "mismatchTooltip": "The upstream provider returned a different model than the one requested. Billing is still based on the requested model.",
         "secondaryLineAriaLabel": "Actual response model: {model}",
-        "arrowPrefix": "\u21b3",
+        "arrowPrefix": "↳",
         "noSignatureBadge": "No thinking signature",
         "noSignatureTooltip": "Thinking was enabled but no thinking signature was returned in the stream; the actual response model falls back to the plain model field from message_start."
       },
@@ -2326,13 +2326,14 @@
     "actions": {
       "view": "View requests",
       "disable": "Disable user",
-      "disabled": "Disabled",
       "confirmTitle": "Disable this user?",
       "confirmDescription": "Future requests from {user} will be rejected by CCH.",
       "cancel": "Cancel",
       "confirm": "Disable",
       "success": "Disabled {user}",
-      "failed": "Failed to disable user"
+      "failed": "Failed to disable user",
+      "enable": "Enable user",
+      "enableSuccess": "Enabled {user}"
     },
     "pagination": {
       "previous": "Previous",

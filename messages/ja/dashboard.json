@@ -2255,13 +2255,14 @@
     "actions": {
       "view": "リクエストを表示",
       "disable": "ユーザーを無効化",
-      "disabled": "無効",
       "confirmTitle": "このユーザーを無効化しますか？",
       "confirmDescription": "CCH は {user} からの以後のリクエストを拒否します。",
       "cancel": "キャンセル",
       "confirm": "無効化",
       "success": "{user} を無効化しました",
-      "failed": "ユーザーの無効化に失敗しました"
+      "failed": "ユーザーの無効化に失敗しました",
+      "enable": "ユーザーを有効化",
+      "enableSuccess": "{user} を有効化しました"
     },
     "pagination": {
       "previous": "前へ",

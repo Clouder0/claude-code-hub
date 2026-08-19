@@ -47,12 +47,34 @@ async function renderAndConfirm() {
   const container = document.createElement("div");
   document.body.appendChild(container);
   const root = createRoot(container);
-  act(() => root.render(<DisableUserButton userId={7} userName="operator" disabled={false} />));
+  act(() =>
+    root.render(<DisableUserButton userId={7} userName="operator" userEnabled self={false} />)
+  );
   const confirm = Array.from(container.querySelectorAll("button")).find(
     (button) => button.textContent === "actions.confirm"
   );
   await act(async () => {
     confirm?.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  act(() => root.unmount());
+  container.remove();
+}
+
+async function renderAndEnable() {
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  act(() =>
+    root.render(
+      <DisableUserButton userId={7} userName="operator" userEnabled={false} self={false} />
+    )
+  );
+  const enable = Array.from(container.querySelectorAll("button")).find(
+    (button) => button.textContent === "actions.enable"
+  );
+  await act(async () => {
+    enable?.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
     await new Promise((resolve) => setTimeout(resolve, 0));
   });
   act(() => root.unmount());
@@ -80,5 +102,26 @@ describe("DisableUserButton", () => {
     expect(mocks.error).toHaveBeenCalledWith("permission denied");
     expect(mocks.success).not.toHaveBeenCalled();
     expect(mocks.refresh).not.toHaveBeenCalled();
+  });
+
+  it("re-enables a disabled user directly and refreshes", async () => {
+    mocks.toggleUserEnabled.mockResolvedValue({ ok: true });
+    await renderAndEnable();
+    expect(mocks.toggleUserEnabled).toHaveBeenCalledWith(7, true);
+    expect(mocks.success).toHaveBeenCalledWith("actions.enableSuccess:operator");
+    expect(mocks.refresh).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not offer disable for the current admin's own account", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => root.render(<DisableUserButton userId={7} userName="operator" userEnabled self />));
+    const disable = Array.from(container.querySelectorAll("button")).find(
+      (button) => button.textContent === "actions.disable"
+    );
+    expect(disable?.hasAttribute("disabled")).toBe(true);
+    act(() => root.unmount());
+    container.remove();
   });
 });

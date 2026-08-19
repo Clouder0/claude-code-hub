@@ -2278,13 +2278,14 @@
     "actions": {
       "view": "查看请求",
       "disable": "停用用户",
-      "disabled": "已停用",
       "confirmTitle": "停用此用户？",
       "confirmDescription": "CCH 将拒绝来自 {user} 的后续请求。",
       "cancel": "取消",
       "confirm": "停用",
       "success": "已停用 {user}",
-      "failed": "停用用户失败"
+      "failed": "停用用户失败",
+      "enable": "启用用户",
+      "enableSuccess": "已启用 {user}"
     },
     "pagination": {
       "previous": "上一页",

@@ -106,7 +106,8 @@ export default async function SecurityEventsPage({
                         <DisableUserButton
                           userId={user.userId}
                           userName={user.userName}
-                          disabled={!user.userEnabled || user.userId === session.user.id}
+                          userEnabled={user.userEnabled}
+                          self={user.userId === session.user.id}
                         />
                       </div>
                     </TableCell>
@@ -167,7 +168,9 @@ export default async function SecurityEventsPage({
                       <TableCell>
                         <Button asChild size="sm" variant="ghost">
                           <Link href={requestHref}>
-                            {event.messageRequestId != null ? `#${event.messageRequestId}` : t("unknown")}
+                            {event.messageRequestId != null
+                              ? `#${event.messageRequestId}`
+                              : t("unknown")}
                             <ExternalLink />
                           </Link>
                         </Button>

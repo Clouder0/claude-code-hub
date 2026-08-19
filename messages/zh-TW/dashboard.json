@@ -2263,13 +2263,14 @@
     "actions": {
       "view": "查看請求",
       "disable": "停用使用者",
-      "disabled": "已停用",
       "confirmTitle": "停用此使用者？",
       "confirmDescription": "CCH 將拒絕來自 {user} 的後續請求。",
       "cancel": "取消",
       "confirm": "停用",
       "success": "已停用 {user}",
-      "failed": "停用使用者失敗"
+      "failed": "停用使用者失敗",
+      "enable": "啟用使用者",
+      "enableSuccess": "已啟用 {user}"
     },
     "pagination": {
       "previous": "上一頁",

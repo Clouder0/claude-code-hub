@@ -94,22 +94,22 @@ export async function maybeDisableUserForCyberPolicy(userId: number): Promise<bo
 }
 
 /**
- * 确认 cyber_policy 后的完整遏制：记录事件（尽力而为）→ 封锁 session → 达到阈值则禁用用户。
+ * 确认 cyber_policy 后的完整遏制：封锁 session（最快、最关键）→ 记录事件（尽力而为）→ 达到阈值则禁用用户。
  * 事件持久化失败不影响封锁与禁用；任何一步失败都只记录日志，不改变代理控制流。
  */
 export async function containCyberPolicy(session: {
   sessionId: string | null;
   messageContext: { id: number; user: { id: number } } | null;
 }): Promise<void> {
+  if (session.sessionId) {
+    await blockSessionForCyberPolicy(session.sessionId);
+  }
+
   await recordSecurityEventBestEffort(
     session.messageContext?.user?.id,
     session.messageContext?.id,
     "cyber_policy"
   );
-
-  if (session.sessionId) {
-    await blockSessionForCyberPolicy(session.sessionId);
-  }
 
   const userId = session.messageContext?.user?.id;
   if (userId != null) {
