@@ -846,6 +846,7 @@
     "usageLogs": "使用記錄",
     "leaderboard": "排行",
     "availability": "可用性監控",
+    "securityEvents": "安全事件",
     "myQuota": "我的額度",
     "quotasManagement": "額度管理",
     "userManagement": "使用者管理",
@@ -2222,5 +2223,57 @@
     },
     "alreadySet": "已設定",
     "confirmAdd": "新增"
+  },
+  "securityEvents": {
+    "title": "安全事件",
+    "description": "上游回報的結構化網路安全政策攔截與額外安全檢查。",
+    "unknown": "未知",
+    "users": {
+      "title": "受影響使用者",
+      "description": "分別統計最近 30 天的事件；額外檢查不代表確認違規。",
+      "empty": "最近 30 天沒有受影響使用者。"
+    },
+    "events": {
+      "title": "最近事件",
+      "description": "可歸因到具體請求的上游安全事件。",
+      "empty": "尚未記錄安全事件。"
+    },
+    "columns": {
+      "user": "使用者",
+      "policyBlocks": "政策攔截",
+      "safetyChecks": "額外檢查",
+      "lastEvent": "最近事件",
+      "status": "狀態",
+      "actions": "操作",
+      "time": "時間",
+      "type": "訊號",
+      "key": "金鑰",
+      "session": "工作階段",
+      "provider": "供應商",
+      "request": "請求"
+    },
+    "types": {
+      "cyberPolicy": "政策攔截",
+      "safetyCheck": "額外檢查"
+    },
+    "status": {
+      "enabled": "已啟用",
+      "disabled": "已停用"
+    },
+    "actions": {
+      "view": "查看請求",
+      "disable": "停用使用者",
+      "disabled": "已停用",
+      "confirmTitle": "停用此使用者？",
+      "confirmDescription": "CCH 將拒絕來自 {user} 的後續請求。",
+      "cancel": "取消",
+      "confirm": "停用",
+      "success": "已停用 {user}",
+      "failed": "停用使用者失敗"
+    },
+    "pagination": {
+      "previous": "上一頁",
+      "next": "下一頁"
+    }
   }
 }

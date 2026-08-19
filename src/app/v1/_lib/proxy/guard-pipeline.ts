@@ -1,3 +1,4 @@
+import { isSessionCyberBlocked } from "@/lib/security/cyber-containment";
 import { ProxyAuthenticator } from "./auth-guard";
 import { ProxyClientGuard } from "./client-guard";
 import type { EndpointPolicy } from "./endpoint-policy";
@@ -7,6 +8,7 @@ import { ProxyProviderRequestFilter } from "./provider-request-filter";
 import { ProxyProviderResolver } from "./provider-selector";
 import { ProxyRateLimitGuard } from "./rate-limit-guard";
 import { ProxyRequestFilter } from "./request-filter";
+import { ProxyResponses } from "./responses";
 import { ProxySensitiveWordGuard } from "./sensitive-word-guard";
 import type { ProxySession } from "./session";
 import { ProxySessionGuard } from "./session-guard";
@@ -33,6 +35,7 @@ export type GuardStepKey =
   | "version"
   | "probe"
   | "session"
+  | "cyberBlock"
   | "warmup"
   | "requestFilter"
   | "sensitive"
@@ -91,6 +94,23 @@ const Steps: Record<GuardStepKey, GuardStep> = {
     name: "session",
     async execute(session) {
       await ProxySessionGuard.ensure(session);
+      return null;
+    },
+  },
+  cyberBlock: {
+    name: "cyberBlock",
+    async execute(session) {
+      if (!session.sessionId) return null;
+      if (await isSessionCyberBlocked(session.sessionId)) {
+        return ProxyResponses.buildError(
+          400,
+          "该会话因触发上游安全策略已被拦截。",
+          "invalid_request_error",
+          undefined,
+          undefined,
+          { code: "cyber_policy" }
+        );
+      }
       return null;
     },
   },
@@ -207,6 +227,7 @@ export const CHAT_PIPELINE: GuardConfig = {
     "version",
     "probe",
     "session",
+    "cyberBlock",
     "warmup",
     "requestFilter",
     "rateLimit",
@@ -221,7 +242,17 @@ export const RAW_PASSTHROUGH_PIPELINE: GuardConfig = {
 };
 
 export const RAW_SAFE_SESSION_PIPELINE: GuardConfig = {
-  steps: ["auth", "client", "model", "version", "probe", "session", "provider", "messageContext"],
+  steps: [
+    "auth",
+    "client",
+    "model",
+    "version",
+    "probe",
+    "session",
+    "cyberBlock",
+    "provider",
+    "messageContext",
+  ],
 };
 
 export const COUNT_TOKENS_PIPELINE: GuardConfig = RAW_SAFE_SESSION_PIPELINE;

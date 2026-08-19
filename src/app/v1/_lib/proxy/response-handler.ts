@@ -17,6 +17,9 @@ import { requestCloudPriceTableSync } from "@/lib/price-sync/cloud-price-updater
 import { ProxyStatusTracker } from "@/lib/proxy-status-tracker";
 import { RateLimitService } from "@/lib/rate-limit";
 import { deleteLiveChain } from "@/lib/redis/live-chain-store";
+import { containCyberPolicy } from "@/lib/security/cyber-containment";
+import { detectCyberSecuritySignalsFromText } from "@/lib/security/cyber-security-signals";
+import { recordSecurityEventBestEffort } from "@/lib/security/security-event-recorder";
 import { SessionManager } from "@/lib/session-manager";
 import { SessionTracker } from "@/lib/session-tracker";
 import { CODEX_1M_CONTEXT_TOKEN_THRESHOLD } from "@/lib/special-attributes";
@@ -1009,6 +1012,18 @@ async function finalizeDeferredStreamingFinalizationIfNeeded(
 ): Promise<FinalizeDeferredStreamingResult> {
   const meta = consumeDeferredStreamingFinalization(session);
   const provider = session.provider;
+  const securitySignals = detectCyberSecuritySignalsFromText(allContent);
+  const isCyberPolicy = securitySignals.includes("cyber_policy");
+  if (isCyberPolicy) {
+    await containCyberPolicy(session);
+  }
+  if (securitySignals.includes("cyber_safety_check")) {
+    await recordSecurityEventBestEffort(
+      session.messageContext?.user?.id,
+      session.messageContext?.id,
+      "cyber_safety_check"
+    );
+  }
   const clearSessionBinding = async () => {
     if (!session.sessionId) return;
     await SessionManager.clearSessionProvider(session.sessionId);
@@ -1067,15 +1082,23 @@ async function finalizeDeferredStreamingFinalizationIfNeeded(
   let statusCodeInferred = false;
   let statusCodeInferenceMatcherId: string | undefined;
   if (detected.isError) {
-    const inferred = inferUpstreamErrorStatusCodeFromText(allContent);
-    if (inferred) {
+    const inferred = isCyberPolicy ? null : inferUpstreamErrorStatusCodeFromText(allContent);
+    if (isCyberPolicy) {
+      effectiveStatusCode = 400;
+      statusCodeInferred = true;
+      statusCodeInferenceMatcherId = "cyber_policy";
+    } else if (inferred) {
       effectiveStatusCode = inferred.statusCode;
       statusCodeInferred = true;
       statusCodeInferenceMatcherId = inferred.matcherId;
     } else {
       effectiveStatusCode = 502;
     }
-    errorMessage = detected.detail ? `${detected.code}: ${detected.detail}` : detected.code;
+    errorMessage = isCyberPolicy
+      ? "cyber_policy"
+      : detected.detail
+        ? `${detected.code}: ${detected.detail}`
+        : detected.code;
   } else if (clientAbortCompleteSuccess) {
     effectiveStatusCode = upstreamStatusCode;
     errorMessage = null;
@@ -1098,7 +1121,7 @@ async function finalizeDeferredStreamingFinalizationIfNeeded(
 
   const shouldClearSessionBindingOnFailure =
     (!streamEndedNormally && !clientAbortCompleteSuccess) ||
-    detected.isError ||
+    (detected.isError && !isCyberPolicy) ||
     (upstreamStatusCode >= 400 && errorMessage !== null);
 
   if ((!meta || !provider) && shouldClearSessionBindingOnFailure) {
@@ -1203,6 +1226,33 @@ async function finalizeDeferredStreamingFinalizationIfNeeded(
   }
 
   if (detected.isError) {
+    if (isCyberPolicy) {
+      logger.warn("[ResponseHandler] SSE completed with cyber policy rejection", {
+        providerId: meta.providerId,
+        providerName: meta.providerName,
+        upstreamStatusCode: meta.upstreamStatusCode,
+        effectiveStatusCode,
+      });
+      session.addProviderToChain(providerForChain, {
+        endpointId: meta.endpointId,
+        endpointUrl: meta.endpointUrl,
+        reason: "client_error_non_retryable",
+        attemptNumber: meta.attemptNumber,
+        statusCode: effectiveStatusCode,
+        statusCodeInferred,
+        errorMessage: "cyber_policy",
+      });
+
+      return {
+        effectiveStatusCode,
+        errorMessage,
+        providerIdForPersistence,
+        isHedgeWinner,
+        billHedgeLosers,
+        clientAbortGateUsage,
+      };
+    }
+
     await clearSessionBinding();
 
     logger.warn("[ResponseHandler] SSE completed but body indicates error (fake 200)", {

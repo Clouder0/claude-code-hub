@@ -14,6 +14,7 @@ vi.mock("next-intl/server", () => ({
       login: "Login",
       myQuota: "My Quota",
       providers: "Providers",
+      securityEvents: "Security Events",
       quotasManagement: "Quotas",
       systemSettings: "Settings",
       usageLogs: "Usage Logs",
@@ -71,12 +72,12 @@ vi.mock("./user-menu", () => ({
   ),
 }));
 
-function buildSession(canLoginWebUi: boolean): AuthSession {
+function buildSession(canLoginWebUi: boolean, role: "user" | "admin" = "user"): AuthSession {
   return {
     user: {
       id: 1,
       name: "Ada Lovelace",
-      role: "user",
+      role,
     },
     key: {
       id: 10,
@@ -107,5 +108,14 @@ describe("DashboardHeader", () => {
     expect(html).toContain('href="/dashboard/logs"');
     expect(html).toContain('href="/dashboard/my-quota"');
     expect(html).toContain('href="/usage-doc"');
+    expect(html).not.toContain('href="/dashboard/security-events"');
+  });
+
+  it("shows security events only to administrators", async () => {
+    const html = renderToString(
+      await DashboardHeader({ session: buildSession(true, "admin"), locale: "en" })
+    );
+
+    expect(html).toContain('href="/dashboard/security-events"');
   });
 });
