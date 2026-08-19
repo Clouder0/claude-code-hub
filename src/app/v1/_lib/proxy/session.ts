@@ -2,6 +2,7 @@ import type { Context } from "hono";
 import { logger } from "@/lib/logger";
 import { writeLiveChain } from "@/lib/redis/live-chain-store";
 import { clientRequestsContext1m as clientRequestsContext1mHelper } from "@/lib/special-attributes";
+import { ERROR_CODES, getErrorMessageServer } from "@/lib/utils/error-messages";
 import {
   type ResolvedPricing,
   resolvePricingForModelRecords,
@@ -19,8 +20,6 @@ import type { User } from "@/types/user";
 import { isCountTokensEndpointPath, V1_ENDPOINT_PATHS } from "./endpoint-paths";
 import { type EndpointPolicy, resolveEndpointPolicy } from "./endpoint-policy";
 import { ProxyError } from "./errors";
-import { isRemoteCompactionV2Request } from "./remote-compaction";
-import { ERROR_CODES, getErrorMessageServer } from "@/lib/utils/error-messages";
 import type { ClientFormat } from "./format-mapper";
 import {
   buildOpenAIImageLogicalBody,
@@ -31,6 +30,7 @@ import {
   type OpenAIImageRequestMetadata,
   parseOpenAIImageMultipartMetadata,
 } from "./openai-image-compat";
+import { isRemoteCompactionV2Request } from "./remote-compaction";
 import { decodeRequestBody, parseContentEncoding } from "./request-body-codec";
 import {
   buildHighConcurrencyCodexRequestSummary,
@@ -131,6 +131,35 @@ export class ProxySession {
   // assignments made by retries/tests so billing never reuses a snapshot from another attempt.
   private forwardedRequestMessageSource: string | null = null;
   private forwardedRequestMessage: Record<string, unknown> | null = null;
+
+  /**
+   * Record the forwarded body together with the object it was serialized from.
+   * Billing reads via getForwardedRequestMessage() then hit the cached object instead of
+   * re-parsing a multi-MB string. Callers must not mutate `message` afterwards (the
+   * forwarder serializes immediately before this call and never touches it again).
+   */
+  setForwardedRequestBody(bodyString: string, message: Record<string, unknown>): void {
+    this.forwardedRequestBody = bodyString;
+    this.forwardedRequestMessageSource = bodyString;
+    this.forwardedRequestMessage = message;
+  }
+
+  /**
+   * Drop the forwarded body and its cached decode (hedge shadow sessions must not
+   * inherit the tracking session's pair, and should release the retained tree).
+   */
+  clearForwardedRequestBody(): void {
+    this.forwardedRequestBody = null;
+    this.forwardedRequestMessageSource = null;
+    this.forwardedRequestMessage = null;
+  }
+
+  /** Carry the forwarded body and its cached decode across hedge winner sync. */
+  copyForwardedRequestBodyFrom(source: ProxySession): void {
+    this.forwardedRequestBody = source.forwardedRequestBody;
+    this.forwardedRequestMessageSource = source.forwardedRequestMessageSource;
+    this.forwardedRequestMessage = source.forwardedRequestMessage;
+  }
 
   // Session ID（用于会话粘性和并发限流）
   sessionId: string | null;

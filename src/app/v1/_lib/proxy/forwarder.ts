@@ -2574,7 +2574,7 @@ export class ProxyForwarder {
 
         const bodyString = JSON.stringify(bodyToSerialize);
         requestBody = bodyString;
-        session.forwardedRequestBody = bodyString;
+        session.setForwardedRequestBody(bodyString, bodyToSerialize);
       } else {
         // No body: still need streaming detection, auth, URL, headers
         const geminiPathname = session.requestUrl.pathname || "";
@@ -2974,14 +2974,11 @@ export class ProxyForwarder {
 
           const bodyString = JSON.stringify(messageToSend);
           requestBody = bodyString;
-          session.forwardedRequestBody = bodyString;
+          session.setForwardedRequestBody(bodyString, messageToSend);
 
-          try {
-            const parsed = JSON.parse(bodyString);
-            isStreaming = parsed.stream === true;
-          } catch {
-            isStreaming = false;
-          }
+          // messageToSend 就是 bodyString 的序列化来源；直接读取 stream 字段，
+          // 避免对多 MB 请求体做一次只为读布尔值的 JSON.parse（该解析位于 TTFB 路径）。
+          isStreaming = messageToSend.stream === true;
 
           if (process.env.NODE_ENV === "development") {
             logger.trace("ProxyForwarder: Forwarding request", {
@@ -5087,7 +5084,8 @@ export class ProxyForwarder {
     shadowState.providersSnapshot = sourceState.providersSnapshot;
     shadow.setCacheTtlResolved(session.getCacheTtlResolved());
     shadow.setContext1mApplied(session.getContext1mApplied());
-    shadow.forwardedRequestBody = null;
+    // 浅拷贝会带上 tracking session 的缓存解析树；成对清掉，避免影子持有大对象。
+    shadow.clearForwardedRequestBody();
     // Keep stable request identity for metadata/cache-affinity shaping, but prevent each racing
     // attempt from independently persisting debug/session state. The tracking session owns writes.
     shadow.shouldPersistSessionDebugArtifacts = () => false;
@@ -5108,7 +5106,7 @@ export class ProxyForwarder {
       source.request.imageRequestMetadata
     );
     target.requestUrl = new URL(source.requestUrl.toString());
-    target.forwardedRequestBody = source.forwardedRequestBody;
+    target.copyForwardedRequestBodyFrom(source);
     target.setCacheTtlResolved(source.getCacheTtlResolved());
     target.setContext1mApplied(source.getContext1mApplied());
 
