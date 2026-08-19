@@ -200,12 +200,9 @@ describe("Warmup 请求：不计入任何聚合统计", () => {
     expect(normalizedQuerySql).toContain("blocked_by");
     expect(normalizedQuerySql).toContain("is null");
 
-    const ledgerLowerBoundIndex = normalizedQuerySql.indexOf("ledger.created_at >=");
-    const loserExpansionIndex = normalizedQuerySql.indexOf("raw_loser_candidates");
-    expect(ledgerLowerBoundIndex).toBeGreaterThan(-1);
-    expect(normalizedQuerySql.slice(ledgerLowerBoundIndex, loserExpansionIndex)).toContain(
-      "last7_start"
-    );
-    expect(ledgerLowerBoundIndex).toBeLessThan(loserExpansionIndex);
+    // 今日窗口：provider_stats 只聚合今日计费事件（原实现物化近 7 天再过滤）
+    expect(normalizedQuerySql).toContain("today_start");
+    // 近 7 日窗口：latest_call 的 LATERAL 索引点查使用 last7_start 下界
+    expect(normalizedQuerySql).toContain("last7_start");
   });
 });

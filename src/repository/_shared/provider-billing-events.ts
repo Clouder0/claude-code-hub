@@ -28,7 +28,7 @@ function joinConditions(conditions: SQL[]): SQL {
 
 type ProviderMatchKind = "all" | "winner" | "loser";
 
-function buildRawLoserCandidates(
+export function buildRawLoserCandidates(
   source: SQL,
   providerMatchKind: ProviderMatchKind,
   sourceConditions: SQL[] = []
@@ -70,7 +70,7 @@ function buildRawLoserCandidates(
   `;
 }
 
-function buildSettledLoserCtes(rawLoserCandidates: SQL): SQL {
+export function buildSettledLoserCtes(rawLoserCandidates: SQL): SQL {
   return sql`
     raw_loser_candidates AS (
       ${rawLoserCandidates}
