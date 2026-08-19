@@ -848,6 +848,7 @@
     "usageLogs": "Usage Logs",
     "leaderboard": "Leaderboard",
     "availability": "Availability",
+    "securityEvents": "Security Events",
     "myQuota": "My Quota",
     "quotasManagement": "Quotas",
     "userManagement": "Users",
@@ -2285,5 +2286,57 @@
     },
     "alreadySet": "Configured",
     "confirmAdd": "Add"
+  },
+  "securityEvents": {
+    "title": "Security Events",
+    "description": "Structured upstream cyber policy blocks and additional safety checks.",
+    "unknown": "Unknown",
+    "users": {
+      "title": "Affected users",
+      "description": "Separate counts for the last 30 days. Additional checks are not confirmed violations.",
+      "empty": "No affected users in the last 30 days."
+    },
+    "events": {
+      "title": "Recent events",
+      "description": "Request-attributed events reported by the upstream service.",
+      "empty": "No security events recorded."
+    },
+    "columns": {
+      "user": "User",
+      "policyBlocks": "Policy blocks",
+      "safetyChecks": "Additional checks",
+      "lastEvent": "Last event",
+      "status": "Status",
+      "actions": "Actions",
+      "time": "Time",
+      "type": "Signal",
+      "key": "Key",
+      "session": "Session",
+      "provider": "Provider",
+      "request": "Request"
+    },
+    "types": {
+      "cyberPolicy": "Policy block",
+      "safetyCheck": "Additional check"
+    },
+    "status": {
+      "enabled": "Enabled",
+      "disabled": "Disabled"
+    },
+    "actions": {
+      "view": "View requests",
+      "disable": "Disable user",
+      "disabled": "Disabled",
+      "confirmTitle": "Disable this user?",
+      "confirmDescription": "Future requests from {user} will be rejected by CCH.",
+      "cancel": "Cancel",
+      "confirm": "Disable",
+      "success": "Disabled {user}",
+      "failed": "Failed to disable user"
+    },
+    "pagination": {
+      "previous": "Previous",
+      "next": "Next"
+    }
   }
 }

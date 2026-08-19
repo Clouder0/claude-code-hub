@@ -69,6 +69,8 @@ export type StreamingResponsePrefixInspection =
       code: string;
       detail?: string;
       rawText: string;
+      /** Bounded full prefix text for downstream signal detection (never persisted). */
+      prefixText: string;
       rawBodyTruncated: boolean;
       diagnostic: StreamingResponsePrefixDiagnostic;
     }
@@ -76,6 +78,8 @@ export type StreamingResponsePrefixInspection =
       kind: "upstream_failure";
       code: string;
       reason: Exclude<ResponsesStreamGateFailureReason, "read_error">;
+      /** Bounded full prefix text for downstream signal detection (never persisted). */
+      prefixText: string;
       diagnostic: StreamingResponsePrefixDiagnostic;
       semanticDiagnostic: StreamingResponseSemanticDiagnostic;
     };
@@ -451,6 +455,24 @@ function buildBoundedSemanticErrorEnvelope(diagnostic: UpstreamErrorDiagnostic):
   return JSON.stringify({ error });
 }
 
+// Bounded prefix text for downstream signal detection (e.g. cyber safety signals) on
+// precommit-failure streams. The gate deliberately keeps the free-form failure frame out of
+// ProxyError bodies; this bounded text is a transient detection input, never persisted.
+const MAX_PREFIX_TEXT_FOR_SIGNAL_DETECTION = 32 * 1024;
+
+function buildBoundedPrefixText(chunks: Uint8Array[]): { text: string; truncated: boolean } {
+  const decoder = new TextDecoder();
+  let remaining = MAX_PREFIX_TEXT_FOR_SIGNAL_DETECTION;
+  const parts: string[] = [];
+  for (const chunk of chunks) {
+    if (remaining <= 0) break;
+    const slice = chunk.length > remaining ? chunk.subarray(0, remaining) : chunk;
+    parts.push(decoder.decode(slice));
+    remaining -= slice.length;
+  }
+  return { text: parts.join(""), truncated: remaining <= 0 };
+}
+
 async function inspectResponsesSemanticPrefix(
   response: Response,
   options: InspectStreamingResponsePrefixOptions
@@ -513,8 +535,9 @@ async function inspectResponsesSemanticPrefix(
   // output. The bounded envelope deliberately excludes the free-form error
   // message because ProxyError.body is persisted in the provider decision
   // chain; protocol code/type are sufficient for overload classification.
-  const inspectionText = gate.reason === "gate_error" ? boundedErrorEnvelope : "";
-  const rawBodyTruncated = gate.reason === "gate_error";
+  const boundedPrefix = buildBoundedPrefixText(gate.prefixChunks);
+  const inspectionText = gate.reason === "gate_error" ? boundedErrorEnvelope : boundedPrefix.text;
+  const rawBodyTruncated = gate.reason === "gate_error" || boundedPrefix.truncated;
   const detectorCode = detected.isError
     ? detected.code
     : `STREAM_GATE_${gate.reason.toUpperCase()}`;
@@ -533,6 +556,7 @@ async function inspectResponsesSemanticPrefix(
       code: detected.code,
       detail: detected.detail,
       rawText: inspectionText,
+      prefixText: boundedPrefix.text,
       rawBodyTruncated,
       diagnostic,
     };
@@ -542,6 +566,7 @@ async function inspectResponsesSemanticPrefix(
     kind: "upstream_failure",
     code: detectorCode,
     reason: gate.reason === "read_error" ? "decode_error" : gate.reason,
+    prefixText: boundedPrefix.text,
     diagnostic,
     semanticDiagnostic: semanticDiagnostic(gate, "enforce", gate.reason),
   };
@@ -674,6 +699,7 @@ async function inspectLegacyStreamingResponsePrefix(
           return {
             ...jsonDecision,
             rawText,
+            prefixText: rawText,
             rawBodyTruncated: false,
             diagnostic: buildDiagnostic(diagnostics, {
               phase,
@@ -698,6 +724,7 @@ async function inspectLegacyStreamingResponsePrefix(
           return {
             ...finalSseDecision,
             rawText,
+            prefixText: rawText,
             rawBodyTruncated: false,
             diagnostic: buildDiagnostic(diagnostics, {
               phase,
@@ -728,6 +755,7 @@ async function inspectLegacyStreamingResponsePrefix(
         return {
           ...jsonDecision,
           rawText,
+          prefixText: rawText,
           rawBodyTruncated: true,
           diagnostic: buildDiagnostic(diagnostics, {
             phase,
@@ -763,6 +791,7 @@ async function inspectLegacyStreamingResponsePrefix(
         return {
           ...decision,
           rawText,
+          prefixText: rawText,
           rawBodyTruncated: true,
           diagnostic: buildDiagnostic(diagnostics, {
             phase,

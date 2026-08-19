@@ -21,6 +21,8 @@ const mocks = vi.hoisted(() => {
     recordVendorTypeAllEndpointsTimeout: vi.fn(async () => {}),
     // ErrorCategory.PROVIDER_ERROR
     categorizeErrorAsync: vi.fn(async () => 0),
+    recordSecurityEventBestEffort: vi.fn(async () => {}),
+    containCyberPolicy: vi.fn(async () => {}),
     loggerWarn: vi.fn(),
   };
 });
@@ -68,6 +70,14 @@ vi.mock("@/lib/vendor-type-circuit-breaker", () => ({
 
 vi.mock("@/repository/message", () => ({
   updateMessageRequestDetails: mocks.updateMessageRequestDetails,
+}));
+
+vi.mock("@/lib/security/security-event-recorder", () => ({
+  recordSecurityEventBestEffort: mocks.recordSecurityEventBestEffort,
+}));
+
+vi.mock("@/lib/security/cyber-containment", () => ({
+  containCyberPolicy: mocks.containCyberPolicy,
 }));
 
 vi.mock("@/app/v1/_lib/proxy/provider-selector", () => ({
@@ -203,6 +213,90 @@ describe("ProxyForwarder - fake 200 HTML body", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     resetFake200SseDiagnosticLogRateLimitForTests();
+  });
+
+  test("cyber policy response.failed is not retried or switched to another provider", async () => {
+    const provider1 = createProvider({
+      id: 1,
+      name: "policy-a",
+      providerType: "codex",
+      maxRetryAttempts: 1,
+      firstByteTimeoutStreamingMs: 0,
+    });
+    const provider2 = createProvider({ id: 2, name: "policy-b", providerType: "codex" });
+    const session = createSession();
+    session.requestUrl = new URL("https://example.com/v1/responses");
+    session.endpointPolicy = resolveEndpointPolicy("/v1/responses");
+    session.originalFormat = "openai";
+    session.request.message = { model: "gpt-5.6", input: "hello", stream: true };
+    session.messageContext = { id: 123, user: { id: 7 } } as ProxySession["messageContext"];
+    session.setProvider(provider1);
+
+    const realErrors = await vi.importActual<typeof import("@/app/v1/_lib/proxy/errors")>(
+      "@/app/v1/_lib/proxy/errors"
+    );
+    mocks.categorizeErrorAsync.mockImplementation(realErrors.categorizeErrorAsync);
+    mocks.pickRandomProviderWithExclusion.mockResolvedValue(provider2);
+    const body = [
+      'data: {"type":"response.created","safety_buffering":{"use_cases":["cyber"]}}\n\n',
+      'data: {"type":"response.failed","response":{"error":{"code":"cyber_policy","message":"blocked"}}}\n\n',
+    ].join("");
+    const fetchWithoutAutoDecode = vi.spyOn(ProxyForwarder as never, "fetchWithoutAutoDecode");
+    fetchWithoutAutoDecode.mockResolvedValueOnce(
+      new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } })
+    );
+
+    await expect(ProxyForwarder.send(session)).rejects.toMatchObject({ statusCode: 400 });
+
+    expect(fetchWithoutAutoDecode).toHaveBeenCalledTimes(1);
+    expect(mocks.pickRandomProviderWithExclusion).not.toHaveBeenCalled();
+    expect(mocks.recordFailure).not.toHaveBeenCalled();
+    expect(mocks.recordSecurityEventBestEffort).toHaveBeenCalledTimes(1);
+    expect(mocks.recordSecurityEventBestEffort).toHaveBeenCalledWith(7, 123, "cyber_safety_check");
+    expect(mocks.containCyberPolicy).toHaveBeenCalledTimes(1);
+    expect(session.provider?.id).toBe(provider1.id);
+    expect(session.getProviderChain()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: provider1.id,
+          reason: "client_error_non_retryable",
+          statusCode: 400,
+        }),
+      ])
+    );
+  });
+
+  test("HTTP cyber policy error is not retried or switched to another provider", async () => {
+    const provider1 = createProvider({ id: 1, name: "policy-http-a", providerType: "codex" });
+    const provider2 = createProvider({ id: 2, name: "policy-http-b", providerType: "codex" });
+    const session = createSession();
+    session.requestUrl = new URL("https://example.com/v1/responses");
+    session.endpointPolicy = resolveEndpointPolicy("/v1/responses");
+    session.originalFormat = "openai";
+    session.request.message = { model: "gpt-5.6", input: "hello", stream: false };
+    session.messageContext = { id: 124, user: { id: 7 } } as ProxySession["messageContext"];
+    session.setProvider(provider1);
+
+    const realErrors = await vi.importActual<typeof import("@/app/v1/_lib/proxy/errors")>(
+      "@/app/v1/_lib/proxy/errors"
+    );
+    mocks.categorizeErrorAsync.mockImplementation(realErrors.categorizeErrorAsync);
+    mocks.pickRandomProviderWithExclusion.mockResolvedValue(provider2);
+    const fetchWithoutAutoDecode = vi.spyOn(ProxyForwarder as never, "fetchWithoutAutoDecode");
+    fetchWithoutAutoDecode.mockResolvedValueOnce(
+      new Response(JSON.stringify({ error: { code: "cyber_policy", message: "blocked" } }), {
+        status: 400,
+        headers: { "content-type": "application/json" },
+      })
+    );
+
+    await expect(ProxyForwarder.send(session)).rejects.toMatchObject({ statusCode: 400 });
+
+    expect(fetchWithoutAutoDecode).toHaveBeenCalledTimes(1);
+    expect(mocks.pickRandomProviderWithExclusion).not.toHaveBeenCalled();
+    expect(mocks.recordFailure).not.toHaveBeenCalled();
+    expect(mocks.containCyberPolicy).toHaveBeenCalledTimes(1);
+    expect(session.provider?.id).toBe(provider1.id);
   });
 
   test("200 + text/html 的 HTML 页面应视为失败并切换供应商", async () => {

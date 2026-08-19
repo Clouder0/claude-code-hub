@@ -846,6 +846,7 @@
     "usageLogs": "使用ログ",
     "leaderboard": "ランキング",
     "availability": "可用性監視",
+    "securityEvents": "セキュリティイベント",
     "myQuota": "自分のクォータ",
     "quotasManagement": "クォータ管理",
     "userManagement": "ユーザー",
@@ -2214,5 +2215,57 @@
     },
     "alreadySet": "設定済み",
     "confirmAdd": "追加"
+  },
+  "securityEvents": {
+    "title": "セキュリティイベント",
+    "description": "上流サービスが報告した構造化されたサイバーポリシーブロックと追加安全チェックです。",
+    "unknown": "不明",
+    "users": {
+      "title": "影響を受けたユーザー",
+      "description": "過去30日間を種類別に集計します。追加チェックは違反の確定を意味しません。",
+      "empty": "過去30日間に影響を受けたユーザーはいません。"
+    },
+    "events": {
+      "title": "最近のイベント",
+      "description": "リクエストに帰属できる上流の安全イベントです。",
+      "empty": "セキュリティイベントは記録されていません。"
+    },
+    "columns": {
+      "user": "ユーザー",
+      "policyBlocks": "ポリシーブロック",
+      "safetyChecks": "追加チェック",
+      "lastEvent": "最終イベント",
+      "status": "状態",
+      "actions": "操作",
+      "time": "時刻",
+      "type": "シグナル",
+      "key": "キー",
+      "session": "セッション",
+      "provider": "プロバイダー",
+      "request": "リクエスト"
+    },
+    "types": {
+      "cyberPolicy": "ポリシーブロック",
+      "safetyCheck": "追加チェック"
+    },
+    "status": {
+      "enabled": "有効",
+      "disabled": "無効"
+    },
+    "actions": {
+      "view": "リクエストを表示",
+      "disable": "ユーザーを無効化",
+      "disabled": "無効",
+      "confirmTitle": "このユーザーを無効化しますか？",
+      "confirmDescription": "CCH は {user} からの以後のリクエストを拒否します。",
+      "cancel": "キャンセル",
+      "confirm": "無効化",
+      "success": "{user} を無効化しました",
+      "failed": "ユーザーの無効化に失敗しました"
+    },
+    "pagination": {
+      "previous": "前へ",
+      "next": "次へ"
+    }
   }
 }

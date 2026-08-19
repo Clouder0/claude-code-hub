@@ -90,13 +90,19 @@ vi.mock("@/lib/proxy-status-tracker", () => ({
 }));
 
 // Mock circuit breakers with tracked spies (vi.hoisted to avoid TDZ with vi.mock hoisting)
-const { mockRecordFailure, mockRecordEndpointFailure, mockRecordEndpointSuccess } = vi.hoisted(
-  () => ({
-    mockRecordFailure: vi.fn(),
-    mockRecordEndpointFailure: vi.fn(),
-    mockRecordEndpointSuccess: vi.fn(),
-  })
-);
+const {
+  mockRecordFailure,
+  mockRecordEndpointFailure,
+  mockRecordEndpointSuccess,
+  mockContainCyberPolicy,
+  mockRecordSecurityEvent,
+} = vi.hoisted(() => ({
+  mockRecordFailure: vi.fn(),
+  mockRecordEndpointFailure: vi.fn(),
+  mockRecordEndpointSuccess: vi.fn(),
+  mockContainCyberPolicy: vi.fn(async () => {}),
+  mockRecordSecurityEvent: vi.fn(async () => {}),
+}));
 
 vi.mock("@/lib/circuit-breaker", () => ({
   recordFailure: mockRecordFailure,
@@ -106,6 +112,14 @@ vi.mock("@/lib/endpoint-circuit-breaker", () => ({
   recordEndpointFailure: mockRecordEndpointFailure,
   recordEndpointSuccess: mockRecordEndpointSuccess,
   resetEndpointCircuit: vi.fn(),
+}));
+
+vi.mock("@/lib/security/cyber-containment", () => ({
+  containCyberPolicy: mockContainCyberPolicy,
+}));
+
+vi.mock("@/lib/security/security-event-recorder", () => ({
+  recordSecurityEventBestEffort: mockRecordSecurityEvent,
 }));
 
 import { ProxyResponseHandler } from "@/app/v1/_lib/proxy/response-handler";
@@ -324,6 +338,14 @@ function createSuccessStreamResponse(): Response {
   });
 }
 
+function createResponsesStreamResponse(events: unknown[]): Response {
+  const body = events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join("");
+  return new Response(body, {
+    status: 200,
+    headers: { "content-type": "text/event-stream" },
+  });
+}
+
 async function drainAsyncTasks(): Promise<void> {
   const tasks = asyncTasks.splice(0, asyncTasks.length);
   await Promise.all(tasks);
@@ -465,6 +487,63 @@ describe("Endpoint circuit breaker isolation", () => {
           item.statusCodeInferred === true
       )
     ).toBe(true);
+  });
+
+  it("cyber policy fake-200 is recorded without provider penalty or session rebinding", async () => {
+    const session = createSession();
+    setDeferredMeta(session, 42);
+    const response = createResponsesStreamResponse([
+      {
+        type: "response.output_text.delta",
+        delta: "held",
+        safety_buffering: { use_cases: ["cyber"], reasons: ["user_risk"] },
+      },
+      {
+        type: "response.failed",
+        response: { error: { code: "cyber_policy", message: "blocked" } },
+      },
+    ]);
+
+    await ProxyResponseHandler.dispatch(session, response);
+    await drainAsyncTasks();
+
+    expect(mockContainCyberPolicy).toHaveBeenCalledTimes(1);
+    expect(mockContainCyberPolicy).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionId: "fake-session" })
+    );
+    expect(mockRecordSecurityEvent).toHaveBeenCalledWith(123, 1, "cyber_safety_check");
+    expect(mockRecordFailure).not.toHaveBeenCalled();
+    expect(mockRecordEndpointFailure).not.toHaveBeenCalled();
+    expect(SessionManager.clearSessionProvider).not.toHaveBeenCalled();
+    expect(session.getProviderChain()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          reason: "client_error_non_retryable",
+          statusCode: 400,
+          errorMessage: "cyber_policy",
+        }),
+      ])
+    );
+  });
+
+  it("cyber safety buffering is recorded while a completed response remains successful", async () => {
+    const session = createSession();
+    setDeferredMeta(session, 42);
+    const response = createResponsesStreamResponse([
+      {
+        type: "response.created",
+        safety_buffering: { use_cases: ["cyber"], reasons: ["user_risk"] },
+      },
+      { type: "response.completed", response: { usage: {} } },
+    ]);
+
+    await ProxyResponseHandler.dispatch(session, response);
+    await drainAsyncTasks();
+
+    expect(mockRecordSecurityEvent).toHaveBeenCalledWith(123, 1, "cyber_safety_check");
+    expect(mockContainCyberPolicy).not.toHaveBeenCalled();
+    expect(mockRecordFailure).not.toHaveBeenCalled();
+    expect(mockRecordEndpointSuccess).toHaveBeenCalledWith(42);
   });
 
   it("non-200 HTTP status should call recordFailure but NOT recordEndpointFailure", async () => {

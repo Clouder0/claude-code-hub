@@ -69,6 +69,11 @@ export {
   updateProviderEndpointProbeSnapshot,
   updateProviderVendor,
 } from "./provider-endpoints";
+export {
+  findRecentSecurityEvents,
+  findSecurityEventUserSummaries,
+  insertSecurityEvent,
+} from "./security-events";
 // Statistics related exports
 export {
   getActiveKeysForUserFromDB,

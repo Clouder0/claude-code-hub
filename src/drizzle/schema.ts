@@ -22,6 +22,7 @@ import type { FilterOperation } from "@/lib/request-filter-types";
 import type { IpExtractionConfig } from "@/types/ip-extraction";
 import type { AuditCategory } from "@/types/audit-log";
 import type { CacheWriteAccounting } from "@/lib/billing/openai-usage-accounting";
+import type { CyberSecurityEventType } from "@/lib/security/cyber-security-signals";
 
 // Enums
 export const dailyResetModeEnum = pgEnum('daily_reset_mode', ['fixed', 'rolling']);
@@ -637,6 +638,32 @@ export const messageRequest = pgTable('message_request', {
     .where(sql`${table.deletedAt} IS NULL AND ${table.clientIp} IS NOT NULL`),
 }));
 
+// Structured upstream cyber safety facts. User attribution is stored directly so events and
+// strike counts survive message_request retention cleanup; the request link is best-effort.
+export const securityEvents = pgTable('security_event', {
+  id: serial('id').primaryKey(),
+  userId: integer('user_id')
+    .notNull()
+    .references(() => users.id),
+  messageRequestId: integer('message_request_id').references(() => messageRequest.id, {
+    onDelete: 'set null',
+  }),
+  type: varchar('type', { length: 32 }).notNull().$type<CyberSecurityEventType>(),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  securityEventsRequestTypeUniqueIdx: uniqueIndex('idx_security_event_request_type_unique').on(
+    table.messageRequestId,
+    table.type
+  ),
+  securityEventsCreatedAtIdx: index('idx_security_event_created_at').on(table.createdAt.desc()),
+  // Strike counting: per-user cyber_policy events in a trailing window
+  securityEventsUserTypeCreatedAtIdx: index('idx_security_event_user_type_created_at').on(
+    table.userId,
+    table.type,
+    table.createdAt
+  ),
+}));
+
 // Model Prices table
 export const modelPrices = pgTable('model_prices', {
   id: serial('id').primaryKey(),
@@ -1223,7 +1250,7 @@ export const providerEndpointProbeLogsRelations = relations(providerEndpointProb
   }),
 }));
 
-export const messageRequestRelations = relations(messageRequest, ({ one }) => ({
+export const messageRequestRelations = relations(messageRequest, ({ one, many }) => ({
   user: one(users, {
     fields: [messageRequest.userId],
     references: [users.id],
@@ -1231,5 +1258,13 @@ export const messageRequestRelations = relations(messageRequest, ({ one }) => ({
   provider: one(providers, {
     fields: [messageRequest.providerId],
     references: [providers.id],
+  }),
+  securityEvents: many(securityEvents),
+}));
+
+export const securityEventsRelations = relations(securityEvents, ({ one }) => ({
+  messageRequest: one(messageRequest, {
+    fields: [securityEvents.messageRequestId],
+    references: [messageRequest.id],
   }),
 }));

@@ -8,6 +8,10 @@
  */
 import { getEnvConfig } from "@/lib/config/env.schema";
 import { type ErrorDetectionResult, errorRuleDetector } from "@/lib/error-rule-detector";
+import {
+  containsCyberPolicySignal,
+  containsCyberPolicySignalInText,
+} from "@/lib/security/cyber-security-signals";
 import { redactJsonString } from "@/lib/utils/message-redaction";
 import { sanitizeErrorTextForDetail } from "@/lib/utils/upstream-error-detection";
 import type { ErrorOverrideResponse } from "@/repository/error-rules";
@@ -562,6 +566,18 @@ export enum ErrorCategory {
   CLIENT_ABORT, // 客户端主动中断 → 不计入熔断器 + 不重试 + 直接返回
   NON_RETRYABLE_CLIENT_ERROR, // 客户端输入错误（Prompt 超限、内容过滤、PDF 限制、Thinking 格式、参数缺失/额外参数、非法请求）→ 不计入熔断器 + 不重试 + 直接返回
   RESOURCE_NOT_FOUND, // 上游 404 错误 → 不计入熔断器 + 直接切换供应商
+  CYBER_POLICY, // 上游明确的 cyber policy 拒绝 → 不计入熔断器 + 不重试/切换
+}
+
+export function isCyberPolicyError(error: unknown): error is ProxyError {
+  if (!(error instanceof ProxyError)) return false;
+  if (containsCyberPolicySignal(error.upstreamError?.parsed)) return true;
+
+  const rawBody = error.upstreamError?.rawBody;
+  if (rawBody && containsCyberPolicySignalInText(rawBody)) return true;
+
+  const body = error.upstreamError?.body;
+  return Boolean(body && containsCyberPolicySignalInText(body));
 }
 
 /**
@@ -945,6 +961,12 @@ export async function categorizeErrorAsync(error: Error): Promise<ErrorCategory>
   // These are always SYSTEM_ERROR regardless of message content
   if (isTransportError(error)) {
     return ErrorCategory.SYSTEM_ERROR;
+  }
+
+  // Upstream policy decisions are request outcomes, not provider-health failures. This exact
+  // structured check intentionally precedes configurable message-based error rules.
+  if (isCyberPolicyError(error)) {
+    return ErrorCategory.CYBER_POLICY;
   }
 
   // 优先级 2: 不可重试的客户端输入错误检测（白名单模式）

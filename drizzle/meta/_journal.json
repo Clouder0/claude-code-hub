@@ -799,6 +799,13 @@
       "when": 1787134259865,
       "tag": "0113_sudden_iceman",
       "breakpoints": true
+    },
+    {
+      "idx": 114,
+      "version": "7",
+      "when": 1787134259866,
+      "tag": "0114_sour_namor",
+      "breakpoints": true
     }
   ]
 }

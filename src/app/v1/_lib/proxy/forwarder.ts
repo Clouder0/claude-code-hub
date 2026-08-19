@@ -29,6 +29,9 @@ import {
 } from "@/lib/provider-endpoints/endpoint-selector";
 import { getGlobalAgentPool, getProxyAgentForProvider } from "@/lib/proxy-agent";
 import { RateLimitService } from "@/lib/rate-limit/service";
+import { containCyberPolicy } from "@/lib/security/cyber-containment";
+import { detectCyberSecuritySignalsFromText } from "@/lib/security/cyber-security-signals";
+import { recordSecurityEventBestEffort } from "@/lib/security/security-event-recorder";
 import { SessionManager } from "@/lib/session-manager";
 import {
   detectUpstreamErrorFromSseOrJsonText,
@@ -1842,6 +1845,31 @@ export class ProxyForwarder {
               },
             });
 
+            throw lastError;
+          }
+
+          if (errorCategory === ErrorCategory.CYBER_POLICY) {
+            await containCyberPolicy(session);
+            logger.warn("ProxyForwarder: Cyber policy rejection, stopping immediately", {
+              providerId: currentProvider.id,
+              providerName: currentProvider.name,
+              statusCode: lastError instanceof ProxyError ? lastError.statusCode : undefined,
+              attemptNumber: attemptCount,
+              totalProvidersAttempted,
+            });
+            session.addProviderToChain(
+              currentProvider,
+              buildClientErrorChainEntry(
+                currentProvider,
+                endpointAudit,
+                attemptCount,
+                lastError,
+                errorMessage,
+                buildRequestDetails(session),
+                undefined,
+                rawCrossProviderFallbackEnabled
+              )
+            );
             throw lastError;
           }
 
@@ -3763,9 +3791,24 @@ export class ProxyForwarder {
             : {}),
         });
         if (inspection.kind === "fake_200") {
+          const securitySignals = detectCyberSecuritySignalsFromText(inspection.prefixText);
+          const isCyberPolicy = securitySignals.includes("cyber_policy");
+          if (securitySignals.includes("cyber_safety_check")) {
+            await recordSecurityEventBestEffort(
+              session.messageContext?.user?.id,
+              session.messageContext?.id,
+              "cyber_safety_check"
+            );
+          }
           const overload = detectUpstreamOverloadFromSseOrJsonText(inspection.rawText);
-          const inferredStatus = inferUpstreamErrorStatusCodeFromText(inspection.rawText);
-          const statusCode = overload.isOverload ? 503 : (inferredStatus?.statusCode ?? 502);
+          const inferredStatus = isCyberPolicy
+            ? null
+            : inferUpstreamErrorStatusCodeFromText(inspection.rawText);
+          const statusCode = isCyberPolicy
+            ? 400
+            : overload.isOverload
+              ? 503
+              : (inferredStatus?.statusCode ?? 502);
           const safeClientMessageCandidate = deriveClientSafeUpstreamErrorMessage({
             rawText: inspection.rawText,
             candidateMessage: overload.isOverload ? overload.message : inspection.detail,
@@ -3814,8 +3857,9 @@ export class ProxyForwarder {
             providerName: provider.name,
             rawBody: inspection.rawText,
             rawBodyTruncated: inspection.rawBodyTruncated,
-            statusCodeInferred: overload.isOverload || inferredStatus !== null,
+            statusCodeInferred: isCyberPolicy || overload.isOverload || inferredStatus !== null,
             statusCodeInferenceMatcherId:
+              (isCyberPolicy ? "cyber_policy" : undefined) ??
               inferredStatus?.matcherId ??
               (overload.isOverload ? "service_unavailable" : undefined),
             isOverload: overload.isOverload,
@@ -3830,6 +3874,25 @@ export class ProxyForwarder {
             endpointId: endpointAudit?.endpointId ?? null,
             attemptNumber: attemptNumber ?? null,
           });
+          const securitySignals = detectCyberSecuritySignalsFromText(inspection.prefixText);
+          if (securitySignals.includes("cyber_safety_check")) {
+            await recordSecurityEventBestEffort(
+              session.messageContext?.user?.id,
+              session.messageContext?.id,
+              "cyber_safety_check"
+            );
+          }
+          if (securitySignals.includes("cyber_policy")) {
+            // Structured cyber policy rejection: the retry loop classifies this as
+            // CYBER_POLICY and applies containment (record, session block, strike).
+            throw new ProxyError("cyber_policy", 400, {
+              body: JSON.stringify({
+                error: { code: "cyber_policy", message: "blocked" },
+              }),
+              providerId: provider.id,
+              providerName: provider.name,
+            });
+          }
           throw new ProxyError(inspection.code, 502, {
             body: JSON.stringify({
               error: {
@@ -4456,6 +4519,40 @@ export class ProxyForwarder {
             ? error
             : new ProxyError("Request aborted by client", 499, undefined, true)
         );
+        return;
+      }
+
+      if (errorCategory === ErrorCategory.CYBER_POLICY) {
+        await containCyberPolicy(session);
+        attempt.settled = true;
+        if (attempt.thresholdTimer) {
+          clearTimeout(attempt.thresholdTimer);
+          attempt.thresholdTimer = null;
+        }
+        attempts.delete(attempt);
+
+        logger.warn("ProxyForwarder: Cyber policy rejection in hedge, aborting all attempts", {
+          providerId: attempt.provider.id,
+          providerName: attempt.provider.name,
+          statusCode,
+          participantSequence: attempt.sequence,
+          attemptNumber: attempt.requestAttemptCount,
+        });
+        session.addProviderToChain(attempt.provider, {
+          ...buildClientErrorChainEntry(
+            attempt.provider,
+            attempt.endpointAudit,
+            attempt.sequence,
+            error,
+            errorMessage,
+            buildRequestDetails(attempt.session),
+            undefined,
+            rawCrossProviderFallbackEnabled
+          ),
+          modelRedirect: getAttemptModelRedirect(attempt),
+        });
+        abortAllAttempts(undefined, "client_error_non_retryable");
+        await settleFailure(error);
         return;
       }
 
@@ -5137,7 +5234,8 @@ export class ProxyForwarder {
     if (
       lastError &&
       (lastErrorCategory === ErrorCategory.CLIENT_ABORT ||
-        lastErrorCategory === ErrorCategory.NON_RETRYABLE_CLIENT_ERROR)
+        lastErrorCategory === ErrorCategory.NON_RETRYABLE_CLIENT_ERROR ||
+        lastErrorCategory === ErrorCategory.CYBER_POLICY)
     ) {
       return lastError;
     }
