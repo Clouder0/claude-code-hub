@@ -1,6 +1,13 @@
 # CCH Dashboard Slowness Elimination (backfill / cache stampede / observability)
 
-Status: Draft
+Status: Approved (Human, 2026-08-20: A+B first, canary + rolling rollout;
+Phase C pg_stat_statements deferred until A+B verified live). Phases A+B
+implemented same day: commits 211fcf0a (backfill sync/repair split) and
+ba7e5d7d (composite cache + SWR) on codex/compaction-v2. Gates: tsgo clean,
+biome clean on changed files, targeted suites 680 passed, full suite 7245/7249
+(3 known pre-existing/env failures + 1 flaky, none in changed surfaces),
+next build + standalone chain passed. Deployment rides the established canary
+ladder after the 4ec57fe2 parse-chain rollout completes (tracked separately).
 
 ## Goal
 
