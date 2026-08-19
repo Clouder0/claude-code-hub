@@ -328,6 +328,26 @@ operational data ever justifies it.
   production build, and the strike-disable SQL exercised against a containerized test database
   (1 strike no disable, 2 strikes disable, idempotent re-run).
 
+### Pre-production review polish (2026-08-19, after merge)
+
+- Merge onto `codex/compaction-v2` (e77709de) surfaced one real integration defect: the semantic
+  stream gate (a76fce16) reclassified `response.failed` SSE as `upstream_failure` and bounded the
+  fake_200 raw text to an error-only envelope, which bypassed cyber detection and would have let a
+  cyber_policy rejection retry on another provider. Fixed by exposing a bounded `prefixText` on
+  fake_200/upstream_failure inspections (transient detection input, never persisted) and throwing
+  the structured 400 from the upstream_failure branch so the retry loop applies containment.
+- `containCyberPolicy` now blocks the session before recording the event, so the critical step is
+  not delayed by database latency.
+- The guard pipeline `cyberBlock` rejection path gained direct tests (blocked session -> structured
+  400, unblocked pass, no-session skip).
+- The Security Events page can re-enable an auto-disabled user in place (two-way action, i18n in
+  all five locales).
+- Review verdicts on unchanged points: fail-open on Redis errors for the block check is correct
+  (fail-closed would break all traffic); the strike UPDATE is idempotent and race-contained; the
+  session block cannot be used to block other users (the session id is the requester's own); the
+  bounded prefix text is not logged or persisted; the guard rejection message follows the proxy
+  path's existing hardcoded-message convention.
+
 ## Progress and Material Discoveries
 
 - Read-only investigation established that first-party Codex uses the exact `cyber_policy` code and
