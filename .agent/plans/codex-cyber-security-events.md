@@ -425,80 +425,145 @@ session quarantine, automatic suspension, and a general Security Center remain i
 - Commit, push, migration application, production inspection, and deployment remain separate future
   authorization decisions.
 
-## Production Deployment Plan (2026-08-19, not yet executed)
+## Production Deployment Plan (2026-08-19, step 1 done, step 2 planned)
 
-Status: planned; execution requires separate authorization. The provider-page query fix deploy
-(`fc9eaad2`) must finish and be verified first; this feature is the next production change.
+Status: **COMPLETE.** Migration (step 1) applied 2026-08-19; full app rollout
+(step 2) finished 2026-08-20 with image `e028b070-cyber-cachefix` on A and B.
+See cops `notes/2026-08-20-hostdzire-cch-cyber-containment-rollout.md`.
 
-### Merge state
+### Preconditions (verified / to verify)
 
-- Feature merged onto `codex/compaction-v2` (merge commit pending; conflicts resolved).
-- Migration renumbered `0113_sour_namor` -> `0114_sour_namor` (journal idx 114, snapshot
-  `0114_snapshot.json`); `0113_sudden_iceman` (availability fix) stays idx 113. Migration validator
-  passes all 116 migrations.
-- Branch is NOT pushed; the deploy flow needs a push decision.
+- [x] Migration 0114 applied; `security_event` table verified (columns/FKs/indexes, 0 rows).
+- [x] Production baseline: A (`cch-docker-green`) and B
+  (`cch-postgres-pgbouncer-rehearsal-app`) both on `fc9eaad2-availability-cache`,
+  healthy, HAProxy weights A 50 / B 50, legacy/canary slots DOWN.
+- [x] Previous images retained on host (490614f6, fc9eaad2) for rollback.
+- [ ] Push `codex/compaction-v2` (HEAD `e5e40bce`) or assemble the deploy bundle
+      from the local checkout (Human decision; last deploy used a network-isolated
+      bundle, so push is optional but recommended for durability).
+- [ ] Check clouder-group upstream exhaustion before Stage 2: if the 429
+      `usage_limit_reached` state from the availability deploy persists, use the
+      traffic-phase guard tolerances (exempt upstream-exhaustion 503s, manual
+      econ checks) instead of a strict zero-5xx guard.
 
-### Phase 0 — Preconditions
+### Test plan
 
-1. Provider fix deploy (`fc9eaad2`) complete and verified on prod.
-2. Confirm whether `0113_sudden_iceman` (availability) was applied in that deploy; if not, it must
-   be applied before `0114_sour_namor` (journal order).
-3. Push `codex/compaction-v2` (or the deploy flow's source of truth) after Human approval.
+#### Tier 0 — build-time (offline)
 
-### Phase 1 — Database migration (0114_sour_namor)
+- Full repo gates already green on the merged branch: typecheck, biome, build,
+  full suite (7167 passed; 3 pre-existing baseline failures unrelated).
+- Build image `localhost/claude-code-hub:e5e40bce-cyber-containment`
+  network-isolated from a bundle, per the fc9eaad2 deploy's assembly process.
+- Image smoke: container starts, healthcheck passes, version label correct,
+  `/api/actions/health` 200 on loopback.
 
-- Apply via the established reviewed migration procedure (drizzle migrate against prod DSN, or the
-  equivalent ops SQL path used for previous migrations).
-- Content: `CREATE TABLE security_event` (user_id NOT NULL FK users, message_request_id nullable
-  FK SET NULL, type, created_at), unique (message_request_id, type), indexes on created_at and
-  (user_id, type, created_at). Additive only: no existing-table rewrite, no backfill, no lock risk
-  beyond the FK constraint checks on an empty table.
-- Verify: table + indexes exist; FK delete behavior is SET NULL (not cascade).
-- Rollback: `DROP TABLE security_event` (safe; nothing in prod depends on it). Only after app
-  rollback if the app is reverted.
+#### Tier 1 — isolated acceptance (canary at weight 0)
 
-### Phase 2 — Image build and canary
+- Start the canary container (candidate slot `172.30.0.1:23005`) with the new
+  image; preflight PASS, healthy, RestartCount 0.
+- Direct admin-session verification on loopback `127.0.0.1:23005`:
+  - login 200; dashboard loads;
+  - Security Events page loads (empty state) and redirects non-admin;
+  - dashboard header shows the Security Events link for admins;
+  - regression pass on logs/providers/availability pages.
+- Private streaming acceptance with `providerGroup=GPT_pro_standard` (the
+  established acceptance script pattern) — normal traffic path unchanged.
+- Normal-traffic invariance: a handful of private requests record ZERO
+  `security_event` rows and ZERO session-block keys; response shapes unchanged.
 
-- Build the image from the merged branch using the established artifact flow
-  (playbooks/hostdzire-cch-*-artifact.yml pattern).
-- Deploy to canary backend (B) first; keep HAProxy weights unchanged.
-- Canary checks: health, ordinary proxy traffic, dashboard pages, no new error logs.
+#### Tier 2 — cyber containment end-to-end (canary, disposable objects only)
 
-### Phase 3 — Rollout
+- Mock upstream: tiny HTTP server on the host bound to the Docker bridge
+  (`172.30.0.1:PORT`), returns `{"error":{"code":"cyber_policy"}}` for
+  `POST /v1/responses`; counters every hit.
+- Register a THROWAWAY provider (admin API) pointing at the mock; assign it to a
+  THROWAWAY user's provider group; create a throwaway key for that user.
+- Session block:
+  1. Request 1 via the throwaway key/session -> expect 400
+     `error.code=cyber_policy`; verify one `security_event` row
+     (user-attributed), the Redis `session:{id}:cyber_blocked` key, and a
+     single-attempt provider chain (no retry/switch).
+  2. Request 2 with the same session id -> expect immediate 400
+     `cyber_policy` with the mock hit counter UNCHANGED (guard rejected before
+     upstream).
+- Strike disable:
+  3. Request 3 with a NEW session id -> 400 again (second event); assert the
+     throwaway user is auto-disabled (`is_enabled=false`) and request 4 is
+     rejected with 401 `user_disabled` (auth-guard, no upstream).
+  4. Re-enable the throwaway user from the Security Events page (exercises the
+     new re-enable action), assert requests pass again.
+- Cleanup (must run): delete throwaway provider/user/key, delete test
+  `security_event` rows, stop the mock server. Confirm no residue.
 
-- Advance HAProxy weights through the established canary -> 50/50 -> 100 flow with observation
-  windows.
-- The guard pipeline now performs one Redis GET per request (`session:{id}:cyber_blocked`). Watch
-  request latency and Redis load during the rollout; the GET is a single key lookup, but Redis is
-  the box's top CPU consumer, so measure rather than assume.
+#### Tier 3 — regression sweep on the canary
 
-### Phase 4 — Post-deploy verification
+- Re-run the Tier 1 acceptance after the Tier 2 tests (nothing contaminated).
+- Confirm `pg_stat_activity` clean, no lock waits, `security_event` back to 0.
 
-1. Security Events page: admin-only, loads, empty state renders; non-admin is redirected.
-2. Normal traffic: no cyber signals in ordinary traffic, so no behavior change expected; confirm
-   zero `cyber_policy` events recorded and zero session blocks written.
-3. Containment behavior (staging preferred; on prod only with disposable test data):
-   - Session block: set `session:{test}:cyber_blocked` in Redis, send a request with that session
-     id, confirm 400 `cyber_policy` before any upstream call; delete the key.
-   - Strike disable: insert two `cyber_policy` events for a disposable test user, confirm the
-     user is auto-disabled and requests are rejected with `user_disabled`; re-enable and clean up.
-4. Dashboard header shows the Security Events link for admins.
+### Rollout (gradual gray release)
 
-### Phase 5 — Rollback
+#### Stage 0 — prepare
+- Push or bundle (precondition above); build the image; retain
+  `fc9eaad2-availability-cache` untouched.
 
-- App: HAProxy weight back to the previous image (established flow); keep the old image retained.
-- Migration: `DROP TABLE security_event` only after the app is rolled back (or keep the table —
-  it is inert without the app writing to it).
+#### Stage 1 — canary at weight 0
+- Canary container in the candidate slot; Tier 1 + Tier 2 + Tier 3 all pass.
+- Gate: all Tier tests green; rollback = stop the canary (nothing else touched).
+
+#### Stage 2 — 5% canary (guarded window)
+- Canary weight 5, A/B weights adjusted to keep the total at 100 (pattern from
+  the last rollout: candidate carried the share; weights moved in two steps).
+- Guarded observation window (15-30 min), per the last rollout's guard lessons:
+  - tolerate upstream-exhaustion 503s (exempt "所有供应商暂时不可用"), do not
+    use a strict zero-5xx gate while clouder-group relays are exhausted;
+  - per-sample checks: backends UP, canary econ=0, candidate RestartCount 0,
+    public health 200, Redis ops/latency/slowlog (the new per-request GET),
+    `security_event` count unchanged.
+- Rollback: candidate weight 0, drain, stop.
+
+#### Stage 3 — A/B swap (drained-swap-acceptance-ramp, per-stage checkpoints)
+- Per backend (A then B), per the fc9eaad2 pattern: drain weight to 0 with the
+  candidate carrying the drained share, swap the image, acceptance PASS on the
+  swapped backend, return weights 5/25/50 then A 50 / B 50.
+- Every stage: acceptance PASS + rollback checkpoint (compose backup +
+  HAProxy phase backup, per the established backup naming).
+
+#### Stage 4 — canary retirement
+- Candidate weight 0, DRAIN, stop the container (retained, exited), remove from
+  weights. Persistent HAProxy config returns to A 50 / B 50.
+
+#### Stage 5 — post-cutover verification and soak
+- Public probes: cc2 / cc3 / topup 200, latency within baseline.
+- All backends econ=0 during the whole rollout; no new 4xx beyond the normal
+  client-abort class.
+- `security_event` stays at 0 rows (normal traffic records nothing); no
+  session-block keys from normal traffic; Redis slowlog clean.
+- Security Events page loads on the admin dashboard (empty state).
+- Soak: a bounded observation window (operator choice, hours), then declare
+  the rollout complete.
+
+### Rollback (any stage)
+
+- Per-stage compose backups + HAProxy phase backups (established path).
+- Weight reversal to the pre-change state (A 50 / B 50 on the old image); the
+  previous image is retained.
+- DB layer is fully backward compatible: the old app does not read or write
+  `security_event`; the table stays (inert). No DB rollback needed.
+- Redis session-block keys expire via TTL (24h); no cleanup required.
 
 ### Risks and follow-ups
 
-- Per-request Redis GET in the guard pipeline: measured during rollout; if it shows up in latency,
-  a short-lived in-process cache of the block check is a bounded follow-up (a 1-2s staleness is
-  acceptable for a 24h block).
-- `security_event` has no retention policy yet; growth is bounded by cyber-signal frequency, but a
-  retention decision (e.g., 90 days) is a follow-up before the table accumulates history.
-- The strike rule (2 in 30 days) and session block TTL (24h) are operational defaults; revisit
-  with real event data.
-- The auto-disable writes `is_enabled=false` directly; the Security Events page shows the event
-  evidence (>= 2 policy blocks) so an admin can distinguish auto-disable from manual disable
-  without a dedicated reason field.
+- Per-request Redis GET in the guard pipeline: measured at the 5% stage and
+  during ramp; if latency/Redis load moves measurably, a short-lived in-process
+  cache of the block check (1-2s staleness, acceptable for a 24h block) is the
+  bounded follow-up.
+- Auto-disable is a real production consequence of two confirmed
+  `cyber_policy` events in 30 days: intended behavior; admin re-enables from
+  the Security Events page or the users page. Watch the page after any real
+  event.
+- `security_event` has no retention policy yet: growth bounded by cyber-signal
+  frequency; retention (e.g., 90 days) is a follow-up decision.
+- The clouder-group upstream exhaustion (if present) constrains canary guard
+  strictness; verify before Stage 2.
+- drizzle migration tracking desync (0113 unrecorded): production stays
+  manual-ops-SQL-only; follow-up options are in the migration note.
