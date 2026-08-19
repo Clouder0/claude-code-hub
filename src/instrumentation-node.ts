@@ -359,8 +359,12 @@ export async function register() {
             })
           )
           .catch((err) => {
+            const pgErr = err as { code?: unknown; detail?: unknown; hint?: unknown } | null;
             logger.warn("[Instrumentation] Ledger backfill failed (non-fatal)", {
               error: err instanceof Error ? err.message : String(err),
+              code: pgErr?.code,
+              detail: typeof pgErr?.detail === "string" ? pgErr.detail.slice(0, 500) : undefined,
+              hint: pgErr?.hint,
             });
           });
       }
@@ -517,8 +521,12 @@ export async function register() {
               })
             )
             .catch((err) => {
+              const pgErr = err as { code?: unknown; detail?: unknown; hint?: unknown } | null;
               logger.warn("[Instrumentation] Ledger backfill failed (non-fatal)", {
                 error: err instanceof Error ? err.message : String(err),
+                code: pgErr?.code,
+                detail: typeof pgErr?.detail === "string" ? pgErr.detail.slice(0, 500) : undefined,
+                hint: pgErr?.hint,
               });
             });
         }

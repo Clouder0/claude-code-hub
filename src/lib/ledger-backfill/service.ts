@@ -41,6 +41,32 @@ export async function backfillUsageLedger(
   options: { mode?: LedgerBackfillMode } = {}
 ): Promise<BackfillUsageLedgerSummary> {
   const mode = options.mode ?? "sync";
+
+  // sync 模式处理的是账本水位之后的尾部行，与 trg_upsert_usage_ledger 的
+  // 并发写入天然重叠：INSERT ... SELECT ... ON CONFLICT 撞上未提交的同行
+  // 插入时可能直接报错。错误会把 PG 事务置为 aborted，批次内无法重试，
+  // 因此整个事务级重试（每次重拿 advisory 锁、重取水位，幂等）。
+  const maxAttempts = mode === "sync" ? 3 : 1;
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      return await runBackfillTransaction(mode);
+    } catch (error) {
+      lastError = error;
+      if (attempt < maxAttempts) {
+        logger.warn("Ledger backfill transaction failed, retrying", {
+          mode,
+          attempt,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        await new Promise((resolve) => setTimeout(resolve, 1500 * attempt));
+      }
+    }
+  }
+  throw lastError;
+}
+
+async function runBackfillTransaction(mode: LedgerBackfillMode): Promise<BackfillUsageLedgerSummary> {
   const startTime = Date.now();
   const LOCK_KEY = 20260101;
 
