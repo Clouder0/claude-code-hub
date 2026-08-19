@@ -341,17 +341,29 @@ export async function register() {
       }
 
       // Ledger backfill: fire-and-forget after migration (non-blocking, idempotent)
-      import("@/lib/ledger-backfill")
-        .then(({ backfillUsageLedger }) =>
-          backfillUsageLedger().then((result) => {
-            logger.info("[Instrumentation] Ledger backfill complete", result);
-          })
-        )
-        .catch((err) => {
-          logger.warn("[Instrumentation] Ledger backfill failed (non-fatal)", {
-            error: err instanceof Error ? err.message : String(err),
+      // LEDGER_BACKFILL_MODE:
+      //   sync（默认）——只补账本水位之后的缺失行（anti-join，亚秒级）；
+      //   repair——完整语义重导（分钟级全表扫描），仅在派生语义变更后手动设置并重启一次；
+      //   off——跳过。
+      const ledgerBackfillMode = process.env.LEDGER_BACKFILL_MODE;
+      if (ledgerBackfillMode !== "off") {
+        import("@/lib/ledger-backfill")
+          .then(({ backfillUsageLedger }) =>
+            backfillUsageLedger({
+              mode: ledgerBackfillMode === "repair" ? "repair" : "sync",
+            }).then((result) => {
+              logger.info("[Instrumentation] Ledger backfill complete", {
+                ...result,
+                mode: ledgerBackfillMode === "repair" ? "repair" : "sync",
+              });
+            })
+          )
+          .catch((err) => {
+            logger.warn("[Instrumentation] Ledger backfill failed (non-fatal)", {
+              error: err instanceof Error ? err.message : String(err),
+            });
           });
-        });
+      }
 
       warmupApiKeyVacuumFilter();
 
@@ -490,17 +502,26 @@ export async function register() {
         await runMigrations();
 
         // Ledger backfill: fire-and-forget after migration (non-blocking, idempotent)
-        import("@/lib/ledger-backfill")
-          .then(({ backfillUsageLedger }) =>
-            backfillUsageLedger().then((result) => {
-              logger.info("[Instrumentation] Ledger backfill complete", result);
-            })
-          )
-          .catch((err) => {
-            logger.warn("[Instrumentation] Ledger backfill failed (non-fatal)", {
-              error: err instanceof Error ? err.message : String(err),
+        // 模式说明见上方生产分支注释（LEDGER_BACKFILL_MODE: sync/repair/off）。
+        const devBackfillMode = process.env.LEDGER_BACKFILL_MODE;
+        if (devBackfillMode !== "off") {
+          import("@/lib/ledger-backfill")
+            .then(({ backfillUsageLedger }) =>
+              backfillUsageLedger({
+                mode: devBackfillMode === "repair" ? "repair" : "sync",
+              }).then((result) => {
+                logger.info("[Instrumentation] Ledger backfill complete", {
+                  ...result,
+                  mode: devBackfillMode === "repair" ? "repair" : "sync",
+                });
+              })
+            )
+            .catch((err) => {
+              logger.warn("[Instrumentation] Ledger backfill failed (non-fatal)", {
+                error: err instanceof Error ? err.message : String(err),
+              });
             });
-          });
+        }
 
         warmupApiKeyVacuumFilter();
 

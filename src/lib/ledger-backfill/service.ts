@@ -11,7 +11,36 @@ export interface BackfillUsageLedgerSummary {
   alreadyExisted: number;
 }
 
-export async function backfillUsageLedger(): Promise<BackfillUsageLedgerSummary> {
+export type LedgerBackfillMode = "sync" | "repair";
+
+/**
+ * 启动同步模式的墙钟上限。同步模式只应处理账本水位之后的少量尾部行；
+ * 超过该时长通常意味着水位锚定失效（如账本被清空），记录并让出启动路径，
+ * 由下一次启动或显式 repair 处理。
+ */
+const SYNC_MODE_MAX_DURATION_MS = 60_000;
+
+/**
+ * 回填 usage_ledger。
+ *
+ * 两种模式（背景：写路径由 trg_upsert_usage_ledger 触发器维护账本，回填只是兜底）：
+ *
+ * - "sync"（默认，启动用）：只处理"账本尾部之后"的缺失行。水位锚点是
+ *   max(usage_ledger.request_id)（request_id 有索引，瞬时取得），因此正常情况下
+ *   每次启动只扫描最后几秒~几分钟的 message_request 尾巴。选择条件是纯
+ *   anti-join（ul.request_id IS NULL），不逐行求值派生函数——历史版本的启动
+ *   路径为了支持语义修复在 WHERE 里保留了 IS DISTINCT FROM fn_... 条件，
+ *   导致每次启动都对 300 万+ 行各跑两个 PL/pgSQL 函数（分钟级全表扫描，
+ *   2026-08-20 诊断确认它会打满主库 I/O）。
+ * - "repair"（显式调用）：完整的语义重导——按当前派生规则重新计算
+ *   final_provider_id / is_success / success_rate_outcome 并更新不一致行。
+ *   仅在派生语义变更（如成功率先兆修正）后由维护者手动触发，不挂在启动上。
+ *   无时长上限：它本来就预期跑很久。
+ */
+export async function backfillUsageLedger(
+  options: { mode?: LedgerBackfillMode } = {}
+): Promise<BackfillUsageLedgerSummary> {
+  const mode = options.mode ?? "sync";
   const startTime = Date.now();
   const LOCK_KEY = 20260101;
 
@@ -38,7 +67,57 @@ export async function backfillUsageLedger(): Promise<BackfillUsageLedgerSummary>
       let totalAlreadyExisted = 0;
       let lastId = 0;
 
+      if (mode === "sync") {
+        // 水位锚点：账本已覆盖到的最大 message_request id。
+        // 低于水位的缺失属于历史漂移，归 repair 模式管。
+        const anchorResult = await tx.execute(sql`
+          SELECT COALESCE(MAX(request_id), 0)::bigint AS max_request_id FROM usage_ledger
+        `);
+        lastId = Number(
+          (anchorResult as unknown as Array<{ max_request_id: string | number }>)[0]
+            ?.max_request_id ?? 0
+        );
+      }
+
       while (true) {
+        // 行选择条件按模式在 TS 侧组装（而不是参数化布尔）：
+        // - sync 只做缺失行 anti-join，查询文本里不出现语义比较条件，
+        //   计划器与执行器都不需要为它求值；
+        // - repair 保留完整语义重导条件。
+        const selectionCondition =
+          mode === "repair"
+            ? sql`
+              ul.request_id IS NULL
+              OR ul.success_rate_outcome IS NULL
+              OR ul.final_provider_id IS DISTINCT FROM resolved.final_provider_id
+              OR ul.is_success IS DISTINCT FROM (
+                (mr.error_message IS NULL OR mr.error_message = '')
+                AND (mr.status_code IS NULL OR mr.status_code < 400)
+              )
+            `
+            : sql`ul.request_id IS NULL`;
+
+        // repair 必须直接调 fn_compute（mr.success_rate_outcome 列可能存着
+        // 旧语义的值，重导的意义就是按当前函数重算）；sync 处理的是刚写入的
+        // 尾部行，触发器已用当前函数维护过该列，COALESCE 省一次函数调用。
+        const outcomeExpression =
+          mode === "repair"
+            ? sql`fn_compute_message_request_success_rate_outcome(
+                mr.blocked_by,
+                mr.status_code,
+                mr.error_message,
+                mr.provider_chain
+              )`
+            : sql`COALESCE(
+              mr.success_rate_outcome,
+              fn_compute_message_request_success_rate_outcome(
+                mr.blocked_by,
+                mr.status_code,
+                mr.error_message,
+                mr.provider_chain
+              )
+            )`;
+
         const batchResult = await tx.execute(sql`
         WITH batch AS (
           SELECT
@@ -53,13 +132,7 @@ export async function backfillUsageLedger(): Promise<BackfillUsageLedgerSummary>
             mr.endpoint,
             mr.api_type,
             mr.session_id,
-            mr.status_code,
-            fn_compute_message_request_success_rate_outcome(
-              mr.blocked_by,
-              mr.status_code,
-              mr.error_message,
-              mr.provider_chain
-            ) AS success_rate_outcome,
+            ${outcomeExpression} AS success_rate_outcome,
             (mr.error_message IS NULL OR mr.error_message = '')
               AND (mr.status_code IS NULL OR mr.status_code < 400) AS is_success,
             mr.blocked_by,
@@ -103,15 +176,7 @@ export async function backfillUsageLedger(): Promise<BackfillUsageLedgerSummary>
                 '/v1/responses/compact'
               )
             )
-            AND (
-              ul.request_id IS NULL
-              OR ul.success_rate_outcome IS NULL
-              OR ul.final_provider_id IS DISTINCT FROM resolved.final_provider_id
-              OR ul.is_success IS DISTINCT FROM (
-                (mr.error_message IS NULL OR mr.error_message = '')
-                AND (mr.status_code IS NULL OR mr.status_code < 400)
-              )
-            )
+            AND ${selectionCondition}
           ORDER BY mr.id ASC
           LIMIT 10000
         ),
@@ -221,10 +286,22 @@ export async function backfillUsageLedger(): Promise<BackfillUsageLedgerSummary>
         lastId = maxId;
 
         logger.info("Backfill progress", {
+          mode,
           processed: totalProcessed,
           inserted: totalInserted,
           elapsed: Date.now() - startTime,
         });
+
+        if (mode === "sync" && Date.now() - startTime > SYNC_MODE_MAX_DURATION_MS) {
+          // 水位锚定失效的保险带：正常 sync 模式几秒内应扫完尾部。
+          // 到达上限即让出启动路径；剩余漂移由下次启动或显式 repair 处理。
+          logger.warn("Backfill sync mode hit wall-clock cap, deferring remaining work", {
+            processed: totalProcessed,
+            lastId,
+            elapsed: Date.now() - startTime,
+          });
+          break;
+        }
       }
 
       const durationMs = Date.now() - startTime;
