@@ -161,6 +161,7 @@ async function runBackfillTransaction(mode: LedgerBackfillMode): Promise<Backfil
             mr.endpoint,
             mr.api_type,
             mr.session_id,
+            mr.status_code,
             ${outcomeExpression} AS success_rate_outcome,
             (mr.error_message IS NULL OR mr.error_message = '')
               AND (mr.status_code IS NULL OR mr.status_code < 400) AS is_success,
