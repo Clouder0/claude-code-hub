@@ -3263,6 +3263,10 @@ export class ProxyResponseHandler {
         // await 链（计费写库、Redis、详情落盘）期间可回收。HC 模式下 Redis
         // 存储分支已在上方跳过；langfuse 关闭时其 emit 入口直接返回（同一
         // 环境变量判定），开启时保留文本供其截断消费。
+        // 注意：调用方已内联 flushAndJoin() 使本参数成为唯一源级引用；但 V8
+        // 对未优化（interpreted/baseline）挂起 frame 做保守寄存器扫描，字符串
+        // 是否真能提前回收取决于 JIT 层级——收益以 canary RSS 实测为准，若未
+        // 兑现需将结算尾链拆为不捕获文本的独立任务（P7b 范畴）。
         if (!retainTextForLangfuse) {
           allContent = "";
           streamSnapshot = null;
@@ -3494,10 +3498,9 @@ export class ProxyResponseHandler {
 
         // 流式读取完成：清除静默期计时器
         clearIdleTimer();
-        const allContent = flushAndJoin();
         const clientAborted = session.clientAbortSignal?.aborted ?? false;
         try {
-          await finalizeStream(allContent, streamEndedNormally, clientAborted);
+          await finalizeStream(flushAndJoin(), streamEndedNormally, clientAborted);
         } catch (finalizeError) {
           logger.error("ResponseHandler: Failed to finalize stream", {
             taskId,
@@ -3550,8 +3553,7 @@ export class ProxyResponseHandler {
 
             // 结算并消费 deferred meta，确保 provider chain/熔断归因完整
             try {
-              const allContent = flushAndJoin();
-              await finalizeStream(allContent, false, false, "STREAM_RESPONSE_TIMEOUT");
+              await finalizeStream(flushAndJoin(), false, false, "STREAM_RESPONSE_TIMEOUT");
             } catch (finalizeError) {
               logger.error("ResponseHandler: Failed to finalize response-timeout stream", {
                 taskId,
@@ -3584,9 +3586,8 @@ export class ProxyResponseHandler {
 
             // 结算并消费 deferred meta，确保 provider chain/熔断归因完整
             try {
-              const allContent = flushAndJoin();
               await finalizeStream(
-                allContent,
+                flushAndJoin(),
                 false,
                 clientAborted,
                 clientAborted ? "CLIENT_ABORTED" : "STREAM_IDLE_TIMEOUT"
@@ -3622,8 +3623,7 @@ export class ProxyResponseHandler {
 
             // 结算并消费 deferred meta，确保 provider chain/熔断归因完整
             try {
-              const allContent = flushAndJoin();
-              await finalizeStream(allContent, false, false, "STREAM_UPSTREAM_ABORTED");
+              await finalizeStream(flushAndJoin(), false, false, "STREAM_UPSTREAM_ABORTED");
             } catch (finalizeError) {
               logger.error("ResponseHandler: Failed to finalize upstream-aborted stream", {
                 taskId,
@@ -3656,8 +3656,7 @@ export class ProxyResponseHandler {
                   : "Client disconnected",
             });
             try {
-              const allContent = flushAndJoin();
-              await finalizeStream(allContent, false, true);
+              await finalizeStream(flushAndJoin(), false, true);
             } catch (finalizeError) {
               logger.error("ResponseHandler: Failed to finalize aborted stream response", {
                 taskId,
@@ -3681,8 +3680,7 @@ export class ProxyResponseHandler {
           });
 
           try {
-            const allContent = flushAndJoin();
-            await finalizeStream(allContent, false, false, "STREAM_UPSTREAM_ABORTED");
+            await finalizeStream(flushAndJoin(), false, false, "STREAM_UPSTREAM_ABORTED");
           } catch (finalizeError) {
             logger.error("ResponseHandler: Failed to finalize transport-error stream", {
               taskId,
@@ -3704,8 +3702,7 @@ export class ProxyResponseHandler {
 
           // 结算并消费 deferred meta，确保 provider chain/熔断归因完整
           try {
-            const allContent = flushAndJoin();
-            await finalizeStream(allContent, false, clientAborted, "STREAM_PROCESSING_ERROR");
+            await finalizeStream(flushAndJoin(), false, clientAborted, "STREAM_PROCESSING_ERROR");
           } catch (finalizeError) {
             logger.error("ResponseHandler: Failed to finalize stream after processing error", {
               taskId,
