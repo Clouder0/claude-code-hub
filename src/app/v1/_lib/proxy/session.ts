@@ -1379,6 +1379,9 @@ export function extractModelFromPath(pathname: string): string | null {
  */
 const LARGE_REQUEST_BODY_BYTES = 10 * 1024 * 1024;
 
+// 摄入路径的 TextDecoder：decode() 不带 stream 选项时每次调用前重置状态，可安全共享
+const INTAKE_TEXT_DECODER = new TextDecoder();
+
 function parseContentLengthHeader(value: string | undefined): number | null {
   if (!value) return null;
   const parsed = Number.parseInt(value, 10);
@@ -1472,7 +1475,7 @@ async function parseRequestBody(
   // 使下游模型解析、过滤、计费、日志与转发都基于明文。
   const decodedBody = decodeRequestBody(rawBodyBuffer, contentEncoding);
   const requestBodyBuffer = decodedBody.buffer;
-  const requestBodyText = new TextDecoder().decode(requestBodyBuffer);
+  const requestBodyText = INTAKE_TEXT_DECODER.decode(requestBodyBuffer);
 
   try {
     const parsedMessage = JSON.parse(requestBodyText) as Record<string, unknown>;

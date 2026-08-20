@@ -89,6 +89,8 @@ const STREAM_STATS_TAIL_BYTES = STREAM_STATS_MAX_BUFFER_BYTES - STREAM_STATS_HEA
 const STREAM_STATS_TAIL_CHUNKS = 8192;
 const STREAM_STATS_TRUNCATED_MARKER = "\n\n: [cch_truncated]\n\n";
 const ALPHA_SEARCH_BASE_COST_USD = new Decimal("0.01");
+// TextEncoder 无状态，模块级共享（Gemini 转换流原先每个事件新建一个）
+const GEMINI_TEXT_ENCODER = new TextEncoder();
 
 type BoundedStreamTextSnapshot = {
   text: string;
@@ -2840,10 +2842,11 @@ export class ProxyResponseHandler {
         });
 
         let buffer = "";
+        // decoder 带 {stream:true} 状态，不能跨流共享，但每流一个即可（原实现每 chunk 新建）
+        const geminiDecoder = new TextDecoder();
         const transformStream = new TransformStream<Uint8Array, Uint8Array>({
           transform(chunk, controller) {
-            const decoder = new TextDecoder();
-            const text = decoder.decode(chunk, { stream: true });
+            const text = geminiDecoder.decode(chunk, { stream: true });
             buffer += text;
 
             const lines = buffer.split("\n");
@@ -2859,7 +2862,7 @@ export class ProxyResponseHandler {
                   const geminiResponse = JSON.parse(jsonStr) as GeminiResponse;
                   const openAIChunk = GeminiAdapter.transformResponse(geminiResponse, true);
                   const output = `data: ${JSON.stringify(openAIChunk)}\n\n`;
-                  controller.enqueue(new TextEncoder().encode(output));
+                  controller.enqueue(GEMINI_TEXT_ENCODER.encode(output));
                 } catch {
                   // Ignore parse errors
                 }
@@ -2873,7 +2876,7 @@ export class ProxyResponseHandler {
                 const geminiResponse = JSON.parse(jsonStr) as GeminiResponse;
                 const openAIChunk = GeminiAdapter.transformResponse(geminiResponse, true);
                 const output = `data: ${JSON.stringify(openAIChunk)}\n\n`;
-                controller.enqueue(new TextEncoder().encode(output));
+                controller.enqueue(GEMINI_TEXT_ENCODER.encode(output));
               } catch {}
             }
           },
@@ -2917,6 +2920,11 @@ export class ProxyResponseHandler {
     // 提升 idleTimeoutId 到外部作用域，以便客户端断开时能清除
     let idleTimeoutId: NodeJS.Timeout | null = null;
     let clientAbortDrainTimeoutId: NodeJS.Timeout | null = null;
+    // 上次 idle timer 重置时刻：读循环每个 chunk 都到货时重置一次定时器会产生
+    // 大量 clearTimeout/setsetTimeout 堆操作，改为仅当距上次重置已过半超时
+    // 周期才重置。代价是实际静默判定下界从 idleTimeoutMs 收紧到
+    // idleTimeoutMs/2（上界不变）——对"分钟级上游停摆"的检测目标无实质影响。
+    let lastIdleResetAt = 0;
     const streamTextAccumulator = new BoundedStreamTextAccumulator();
     let lastStreamTextSnapshot: BoundedStreamTextSnapshot | null = null;
     const getCollectedChunkCount = () =>
@@ -2936,6 +2944,7 @@ export class ProxyResponseHandler {
     const startIdleTimer = () => {
       if (idleTimeoutMs === Infinity) return; // 禁用时跳过
       clearIdleTimer(); // 清除旧的
+      lastIdleResetAt = Date.now();
       idleTimeoutId = setTimeout(() => {
         logger.warn("ResponseHandler: Streaming idle timeout triggered", {
           taskId,
@@ -3402,15 +3411,22 @@ export class ProxyResponseHandler {
             streamTextAccumulator.pushBytes(value);
             AsyncTaskManager.touch(taskId);
 
-            // 每次收到数据后重置静默期计时器（首次收到数据时启动）
-            startIdleTimer();
-            logger.trace("ResponseHandler: Idle timer reset (data received)", {
-              taskId,
-              providerId: provider.id,
-              chunksCollected: getCollectedChunkCount(),
-              lastChunkSize: chunkSize,
-              idleTimeoutMs: idleTimeoutMs === Infinity ? "disabled" : idleTimeoutMs,
-            });
+            // 每次收到数据后重置静默期计时器（首次收到数据时启动）。
+            // 节流：距上次重置不足半周期时跳过，避免每个 chunk 一对
+            // clearTimeout/setTimeout 堆操作；静默判定下界的收紧见 lastIdleResetAt 声明处。
+            if (idleTimeoutMs !== Infinity && Date.now() - lastIdleResetAt >= idleTimeoutMs / 2) {
+              startIdleTimer();
+              // trace 的参数对象在调用点求值，生产级别下也照常分配——用级别守卫挡掉
+              if (logger.level === "trace") {
+                logger.trace("ResponseHandler: Idle timer reset (data received)", {
+                  taskId,
+                  providerId: provider.id,
+                  chunksCollected: getCollectedChunkCount(),
+                  lastChunkSize: chunkSize,
+                  idleTimeoutMs,
+                });
+              }
+            }
 
             // 流式：读到第一块数据后立即清除响应超时定时器
             if (isFirstChunk) {

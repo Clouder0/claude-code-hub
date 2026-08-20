@@ -82,9 +82,12 @@ const SSE_FINALIZATION_MARKERS = [
 ] as const;
 
 /**
- * parseSSEData 的 finalization 变体：只对 data 文本命中标记子串的事件做 JSON.parse，
- * 其余事件保留字符串 data。用于把流结束时对 allContent 的多次独立全量解析合并为
- * 一次共享解析，并跳过占字节大头的文本增量事件。
+ * parseSSEData 的 finalization 变体：只保留 data 文本命中标记子串的事件
+ * （并对其做 JSON.parse），其余事件（占字节大头的文本增量）不进入结果——
+ * 四个 finalization 消费者（cyber 信号 / usage / service_tier / prompt_cache_key）
+ * 对 string data 本就有 `typeof !== "object"` 跳过逻辑，跳过与丢弃等价，
+ * 但丢弃后事件数组不再随响应体大小线性驻留内存。
+ * 用于把流结束时对 allContent 的多次独立全量解析合并为一次共享解析。
  *
  * 注意：detectUpstreamErrorFromSseOrJsonText（假 200 检测）需要全部事件的对象 data，
  * 不得消费本函数的结果。
@@ -104,15 +107,14 @@ export function parseSSEDataForFinalization(sseText: string): ParsedSSEEvent[] {
 
     const dataStr = dataLines.join("\n");
 
-    let data: ParsedSSEEvent["data"] = dataStr;
     if (SSE_FINALIZATION_MARKERS.some((marker) => dataStr.includes(marker))) {
       try {
-        data = JSON.parse(dataStr) as Record<string, unknown>;
+        events.push({ event: eventName || "message", data: JSON.parse(dataStr) });
       } catch {
         // 与 parseSSEData 保持一致：解析失败保留原始字符串。
+        events.push({ event: eventName || "message", data: dataStr });
       }
     }
-    events.push({ event: eventName || "message", data });
 
     eventName = "";
     dataLines = [];
