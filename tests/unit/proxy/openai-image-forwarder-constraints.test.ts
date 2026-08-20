@@ -26,6 +26,7 @@ vi.mock("@/lib/logger", () => ({
 vi.mock("@/lib/request-filter-engine", () => ({
   requestFilterEngine: {
     applyFinal: vi.fn(async () => {}),
+    hasFinalBodyFilters: vi.fn(async () => false),
   },
 }));
 

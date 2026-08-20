@@ -99,7 +99,10 @@ import {
 } from "./gemini-function-id-rectifier";
 import { ModelRedirector } from "./model-redirector";
 import { nodeStreamToWebStreamSafe } from "./node-stream-to-web";
-import { ensureOpenAIChatStreamUsageOption } from "./openai-chat-usage-options";
+import {
+  ensureOpenAIChatStreamUsageOption,
+  mayInjectOpenAIChatStreamUsage,
+} from "./openai-chat-usage-options";
 import {
   cloneOpenAIImageRequestMetadata,
   sanitizeGenerationsRequestForProvider,
@@ -588,6 +591,70 @@ function filterPrivateParameters(obj: unknown): unknown {
   }
 
   return filtered;
+}
+
+/**
+ * 只读扫描：树中任意层级是否存在 "_" 前缀键。
+ * 与 filterPrivateParameters 的判定条件保持一致（仅扫描，不分配）。
+ */
+export function hasPrivateParameters(obj: unknown): boolean {
+  if (typeof obj !== "object" || obj === null) {
+    return false;
+  }
+
+  if (Array.isArray(obj)) {
+    for (const item of obj) {
+      if (hasPrivateParameters(item)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  for (const [key, value] of Object.entries(obj)) {
+    if (key.startsWith("_")) {
+      return true;
+    }
+    if (hasPrivateParameters(value)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * 过滤之后、序列化之前，是否还有步骤会改写请求体。
+ * 改写者清单与 doForward 标准分支的实际顺序一一对应：
+ * claude 元数据注入 / final 阶段请求过滤器 / images 消毒 / openai-chat
+ * stream_options 注入。任一命中即不能按引用透传原始树。
+ */
+async function forwardPreprocessingMayMutateBody(
+  session: ProxySession,
+  provider: Provider,
+  requestPath: string,
+  bypassRequestFilters: boolean
+): Promise<boolean> {
+  if (provider.providerType === "claude" || provider.providerType === "claude-auth") {
+    return true;
+  }
+
+  if (requestPath === "/v1/images/generations") {
+    return true;
+  }
+
+  const message = session.request.message as Record<string, unknown>;
+  if (mayInjectOpenAIChatStreamUsage(provider.providerType, requestPath, message)) {
+    return true;
+  }
+
+  if (!bypassRequestFilters) {
+    const { requestFilterEngine } = await import("@/lib/request-filter-engine");
+    if (await requestFilterEngine.hasFinalBodyFilters(session)) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 type ClaudeMetadataUserIdInjectionResult = {
@@ -2951,10 +3018,21 @@ export class ProxyForwarder {
             });
           }
         } else {
-          const filteredMessage = filterPrivateParameters(session.request.message) as Record<
-            string,
-            unknown
-          >;
+          // scan-first 透传：原实现每次 attempt 都为剥离 "_" 前缀键重建整棵请求树
+          // （多 MB body 下是可观的 CPU+GC 开销，且每次重试/换供应商重付）。
+          // 树中无私有键、且后续没有任何会改写 body 的步骤时，按引用透传——
+          // 序列化字节与重建路径完全一致；命中任一改写者即回退原重建路径。
+          const mayMutateDownstream = await forwardPreprocessingMayMutateBody(
+            session,
+            provider,
+            requestPath,
+            ProxyForwarder.getEndpointPolicy(session).bypassRequestFilters
+          );
+          const filteredMessage = (
+            mayMutateDownstream || hasPrivateParameters(session.request.message)
+              ? filterPrivateParameters(session.request.message)
+              : session.request.message
+          ) as Record<string, unknown>;
 
           // 将 metadata.user_id 注入放在私有参数过滤之后，避免受过滤逻辑影响。
           let messageToSend: Record<string, unknown> = filteredMessage;

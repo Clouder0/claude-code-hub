@@ -471,6 +471,16 @@ export class RequestFilterEngine {
     await this.initializationPromise;
   }
 
+  /**
+   * 是否存在会改写请求体的 final 阶段过滤器。
+   * 供 forwarder 的 scan-first 透传作为守卫条件：无过滤器时 applyFinal
+   * 对 body 无副作用（仅清理 transport headers），可安全按引用传递原始树。
+   */
+  async hasFinalBodyFilters(session: ProxySession): Promise<boolean> {
+    await this.ensureInitialized();
+    return this.collectFinalFilters(session).length > 0;
+  }
+
   // ---------------------------------------------------------------------------
   // Guard phase (existing behavior, unchanged API)
   // ---------------------------------------------------------------------------

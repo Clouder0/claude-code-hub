@@ -6,6 +6,7 @@ import type { Provider } from "@/types/provider";
 
 const mocks = vi.hoisted(() => ({
   applyFinal: vi.fn(async () => {}),
+  hasFinalBodyFilters: vi.fn(async () => false),
 }));
 
 vi.mock("@/lib/logger", () => ({
@@ -22,6 +23,7 @@ vi.mock("@/lib/logger", () => ({
 vi.mock("@/lib/request-filter-engine", () => ({
   requestFilterEngine: {
     applyFinal: mocks.applyFinal,
+    hasFinalBodyFilters: mocks.hasFinalBodyFilters,
   },
 }));
 
@@ -104,6 +106,7 @@ describe("ProxyForwarder - official OpenAI endpoints stay on provider URL", () =
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.applyFinal.mockImplementation(async () => {});
+    mocks.hasFinalBodyFilters.mockImplementation(async () => false);
   });
 
   it("records the final filtered JSON body used by upstream billing", async () => {
@@ -116,6 +119,8 @@ describe("ProxyForwarder - official OpenAI endpoints stay on provider URL", () =
       stream: true,
       service_tier: "default",
     };
+    // applyFinal 会改写 body，对应真实引擎 hasFinalBodyFilters 返回 true
+    mocks.hasFinalBodyFilters.mockImplementation(async () => true);
     mocks.applyFinal.mockImplementation(async (_session, body) => {
       body.service_tier = "priority";
       body.prompt_cache_options = { mode: "explicit" };
