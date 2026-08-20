@@ -150,9 +150,12 @@ export async function handleProxyRequest(c: Context): Promise<Response> {
 
     return ProxyResponses.buildError(500, "代理请求发生未知错误");
   } finally {
-    // 11. 减少并发计数（确保无论成功失败都执行）- 跳过 count_tokens
+    // 11. 减少并发计数（确保无论成功失败都执行）- 跳过 count_tokens。
+    // 不 await：finally 里的 await 会推迟 Response 对象交还给 Hono，客户端
+    // 等头时间被记账往返拖长；计数本身是尽力而为的观测值（600s TTL 兜底
+    // 防泄漏），且方法内部已捕获所有错误。
     if (session?.sessionId && session.getEndpointPolicy().trackConcurrentRequests) {
-      await SessionTracker.decrementConcurrentCount(session.sessionId);
+      void SessionTracker.decrementConcurrentCount(session.sessionId);
     }
   }
 }

@@ -6,6 +6,7 @@ import { modelPrices } from "@/drizzle/schema";
 import { logger } from "@/lib/logger";
 import { buildModelNameFallbackCandidates } from "@/lib/utils/model-name-matching";
 import type { ModelPrice, ModelPriceData, ModelPriceSource } from "@/types/model-price";
+import { getCachedLatestPrice, setCachedLatestPrice } from "./_shared/model-price-cache";
 import { toModelPrice } from "./_shared/transformers";
 
 /**
@@ -40,6 +41,23 @@ export interface PaginatedResult<T> {
  * 3. aliases 命中候选名
  */
 export async function findLatestPriceByModel(modelName: string): Promise<ModelPrice | null> {
+  const cached = getCachedLatestPrice(modelName);
+  if (cached) {
+    return cached.value;
+  }
+
+  const value = await queryLatestPriceByModel(modelName);
+  if (value === undefined) {
+    // 查询失败：不缓存，下一请求重试
+    return null;
+  }
+
+  setCachedLatestPrice(modelName, value);
+  return value;
+}
+
+/** 实际查询。返回 undefined 表示查询异常（区别于"无价格"的 null）。 */
+async function queryLatestPriceByModel(modelName: string): Promise<ModelPrice | null | undefined> {
   try {
     const selection = {
       id: modelPrices.id,
@@ -68,7 +86,7 @@ export async function findLatestPriceByModel(modelName: string): Promise<ModelPr
       modelName,
       error: error instanceof Error ? error.message : String(error),
     });
-    return null;
+    return undefined;
   }
 }
 

@@ -14,7 +14,19 @@ vi.mock("@/repository/system-config", () => ({
   getSystemSettings: vi.fn(),
 }));
 
+// loadBillingSettings 主路径走缓存层（与各守卫同源）。默认委托到已 mock 的
+// getSystemSettings 保持既有测试语义；失败场景直接让缓存层抛错，
+// 以覆盖 loadBillingSettings 自身的降级链（OnlyCache → 保守默认）。
+vi.mock("@/lib/config", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/config")>();
+  return {
+    ...actual,
+    getCachedSystemSettings: vi.fn(),
+  };
+});
+
 import { ProxySession } from "@/app/v1/_lib/proxy/session";
+import { getCachedSystemSettings } from "@/lib/config";
 import { findLatestPriceByModel } from "@/repository/model-price";
 import { getSystemSettings } from "@/repository/system-config";
 
@@ -74,6 +86,7 @@ function makeSystemSettings(
 
 beforeEach(() => {
   invalidateSystemSettingsCache();
+  vi.mocked(getCachedSystemSettings).mockImplementation(async () => getSystemSettings());
 });
 
 function makePriceRecord(modelName: string, priceData: ModelPriceData): ModelPrice {
@@ -303,13 +316,14 @@ describe("ProxySession.getCachedPriceDataByBillingSource", () => {
     expect(findLatestPriceByModel).toHaveBeenNthCalledWith(2, "redirected-model");
   });
 
-  it("应在 getSystemSettings 失败且无缓存时回退到 redirected 并继续价格解析", async () => {
+  it("应在设置层失败且无缓存时回退到 redirected 并继续价格解析", async () => {
     const redirectedPriceData: ModelPriceData = {
       input_cost_per_token: 3,
       output_cost_per_token: 4,
     };
 
-    vi.mocked(getSystemSettings).mockRejectedValue(new Error("DB error"));
+    vi.mocked(getCachedSystemSettings).mockReset();
+    vi.mocked(getCachedSystemSettings).mockRejectedValue(new Error("settings layer down"));
     vi.mocked(findLatestPriceByModel).mockResolvedValue(
       makePriceRecord("redirected-model", redirectedPriceData)
     );
@@ -321,7 +335,7 @@ describe("ProxySession.getCachedPriceDataByBillingSource", () => {
 
     const result = await session.getCachedPriceDataByBillingSource();
     expect(result).toEqual(redirectedPriceData);
-    expect(getSystemSettings).toHaveBeenCalledTimes(1);
+    expect(getCachedSystemSettings).toHaveBeenCalledTimes(1);
     expect(findLatestPriceByModel).toHaveBeenCalledTimes(1);
     expect(findLatestPriceByModel).toHaveBeenCalledWith("redirected-model");
 

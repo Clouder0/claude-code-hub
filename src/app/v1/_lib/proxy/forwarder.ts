@@ -558,6 +558,21 @@ function buildEndpointAttemptKey(endpointId: number | null, endpointUrl: string)
  * @param obj - 原始请求对象
  * @returns 过滤后的请求对象
  */
+/**
+ * 记录用请求体大小：字符串取字符长度，二进制取字节数。
+ * 此前用 JSON.stringify(requestBody).length——字符串 body 会为取长度分配整个
+ * 带引号的副本，raw-passthrough 的 Buffer 更会序列化成
+ * {"type":"Buffer","data":[...]}（约 5 倍体积），恰在故障路径上放大内存压力。
+ */
+function logBodySize(body: BodyInit | undefined): number {
+  if (!body) return 0;
+  if (typeof body === "string") return body.length;
+  if (body instanceof Blob) return body.size;
+  if (body instanceof ArrayBuffer) return body.byteLength;
+  if (ArrayBuffer.isView(body)) return (body as Uint8Array).byteLength;
+  return 0;
+}
+
 function filterPrivateParameters(obj: unknown): unknown {
   // 非对象类型直接返回
   if (typeof obj !== "object" || obj === null) {
@@ -568,7 +583,6 @@ function filterPrivateParameters(obj: unknown): unknown {
   if (Array.isArray(obj)) {
     return obj.map((item) => filterPrivateParameters(item));
   }
-
   // 对象类型：过滤下划线前缀的键
   const filtered: Record<string, unknown> = {};
   const removedKeys: string[] = [];
@@ -3742,7 +3756,7 @@ export class ProxyForwarder {
             // 请求上下文
             method: session.method,
             hasBody: !!requestBody,
-            bodySize: requestBody ? JSON.stringify(requestBody).length : 0,
+            bodySize: logBodySize(requestBody),
           });
 
           cleanupCombinedSignal();
@@ -3781,7 +3795,7 @@ export class ProxyForwarder {
           // 请求上下文
           method: session.method,
           hasBody: !!requestBody,
-          bodySize: requestBody ? JSON.stringify(requestBody).length : 0,
+          bodySize: logBodySize(requestBody),
         });
 
         cleanupCombinedSignal();
