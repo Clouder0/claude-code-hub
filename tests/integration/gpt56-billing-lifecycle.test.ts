@@ -26,13 +26,17 @@ vi.mock("@/lib/config/system-settings-cache", () => ({
 
 vi.mock("@/lib/langfuse/emit-proxy-trace", () => ({
   emitProxyLangfuseTrace: vi.fn(),
+  // perf-bundle-a 新增的文本释放门控：mock 必须提供，否则 finalize 访问即抛错
+  isLangfuseTraceEnabled: vi.fn(() => false),
 }));
+
+const { loggerWarnMock } = vi.hoisted(() => ({ loggerWarnMock: vi.fn() }));
 
 vi.mock("@/lib/logger", () => ({
   logger: {
     debug: vi.fn(),
     info: vi.fn(),
-    warn: vi.fn(),
+    warn: loggerWarnMock,
     error: vi.fn(),
     trace: vi.fn(),
   },
@@ -97,6 +101,11 @@ vi.mock("@/lib/endpoint-circuit-breaker", () => ({
   resetEndpointCircuit: vi.fn(async () => undefined),
 }));
 
+vi.mock("@/repository/message-write-buffer", () => ({
+  flushMessageRequestWriteBuffer: vi.fn(async () => undefined),
+  enqueueMessageRequestUpdate: vi.fn(),
+}));
+
 vi.mock("@/repository/message", () => ({
   addMessageRequestHedgeLoserCost: vi.fn(async () => undefined),
   updateMessageRequestCostWithBreakdown: vi.fn(async (_id: number, cost: unknown) => String(cost)),
@@ -107,6 +116,7 @@ vi.mock("@/repository/message", () => ({
 }));
 
 import { ProxyResponseHandler } from "@/app/v1/_lib/proxy/response-handler";
+import { flushMessageRequestWriteBuffer } from "@/repository/message-write-buffer";
 import { ProxySession } from "@/app/v1/_lib/proxy/session";
 import { setDeferredStreamingFinalization } from "@/app/v1/_lib/proxy/stream-finalization";
 import { RateLimitService } from "@/lib/rate-limit";
@@ -116,6 +126,7 @@ import { SessionManager } from "@/lib/session-manager";
 import {
   updateMessageRequestCostWithBreakdown,
   updateMessageRequestDetails,
+  updateMessageRequestDuration,
   updateMessageRequestUnsupportedBillingSettlement,
   updateMessageRequestWinnerCost,
 } from "@/repository/message";
@@ -314,11 +325,42 @@ async function dispatchAndDrain(session: ProxySession, response: Response): Prom
   return (await dispatchAndCapture(session, response)).response;
 }
 
-function expectSingleSettlement(): void {
+function expectSingleSettlement(mode: "stream" | "non-stream" = "stream"): void {
   expect(updateMessageRequestCostWithBreakdown).toHaveBeenCalledTimes(1);
   expect(RateLimitService.trackCost).toHaveBeenCalledTimes(1);
   expect(SessionManager.updateSessionUsage).toHaveBeenCalledTimes(1);
-  expect(updateMessageRequestDetails).toHaveBeenCalledTimes(1);
+  if (mode === "stream") {
+    // review 修复：settlement 前必须先 flush 异步写缓冲，防止历史 buffered
+    // patch 在 settlement 之后落地、用过期列覆盖终态。
+    expect(flushMessageRequestWriteBuffer.mock.invocationCallOrder[0] ?? 0).toBeLessThan(
+      updateMessageRequestCostWithBreakdown.mock.invocationCallOrder[0] ?? Infinity
+    );
+    // db-write-churn 契约：流式成功路径的终态 facts 折叠进 settlement 的
+    // overlay（第 5 参），不再有独立的 buffered details/duration 写。
+    expect(settleOverlay()).toEqual(
+      expect.objectContaining({
+        statusCode: expect.any(Number),
+        durationMs: expect.any(Number),
+      })
+    );
+    expect(updateMessageRequestDetails).not.toHaveBeenCalled();
+    expect(updateMessageRequestDuration).not.toHaveBeenCalled();
+  } else {
+    // 非流式路径保持旧契约：settlement 不携带 overlay（第 5 参为 undefined），
+    // 终态仍由一次 details 写落库。
+    expect(updateMessageRequestCostWithBreakdown.mock.calls.at(-1)?.[4]).toBeUndefined();
+    expect(updateMessageRequestDetails).toHaveBeenCalledTimes(1);
+  }
+}
+
+/** 取最近一次 settlement 调用携带的 finalize overlay（cost/winner/unsupported 任一）。 */
+function settleOverlay(): Record<string, unknown> {
+  const cost = updateMessageRequestCostWithBreakdown.mock.calls.at(-1)?.[4];
+  const winner = updateMessageRequestWinnerCost.mock.calls.at(-1)?.[4];
+  const unsupported = updateMessageRequestUnsupportedBillingSettlement.mock.calls.at(-1)?.[2];
+  const overlay = cost ?? winner ?? unsupported;
+  expect(overlay).toBeTruthy();
+  return overlay as Record<string, unknown>;
 }
 
 describe("GPT-5.6 billing lifecycle", () => {
@@ -373,7 +415,8 @@ describe("GPT-5.6 billing lifecycle", () => {
         cacheReadInputTokens: 200,
         cacheWriteTokensReported: 300,
         cacheWriteAccounting: "reported_positive",
-      })
+      }),
+      expect.objectContaining({ statusCode: expect.any(Number), durationMs: expect.any(Number) })
     );
     expect(RateLimitService.trackCost).toHaveBeenCalledWith(
       202,
@@ -396,8 +439,7 @@ describe("GPT-5.6 billing lifecycle", () => {
         costUsd: "0.04295",
       })
     );
-    expect(updateMessageRequestDetails).toHaveBeenCalledWith(
-      40_001,
+    expect(settleOverlay()).toEqual(
       expect.objectContaining({
         observedInputTokens: 2_000,
         inputTokens: 1_500,
@@ -453,10 +495,10 @@ describe("GPT-5.6 billing lifecycle", () => {
         total: "0.04295",
         pricing: expect.objectContaining({ tier: "priority" }),
       }),
-      expect.objectContaining({ model: "gpt-5.6-sol" })
+      expect.objectContaining({ model: "gpt-5.6-sol" }),
+      expect.objectContaining({ statusCode: expect.any(Number), durationMs: expect.any(Number) })
     );
-    expect(updateMessageRequestDetails).toHaveBeenCalledWith(
-      40_002,
+    expect(settleOverlay()).toEqual(
       expect.objectContaining({
         specialSettings: expect.arrayContaining([
           expect.objectContaining({
@@ -500,12 +542,10 @@ describe("GPT-5.6 billing lifecycle", () => {
       40_018,
       expect.anything(),
       expect.anything(),
-      expect.objectContaining({ model: "gpt-5.6-terra" })
+      expect.objectContaining({ model: "gpt-5.6-terra" }),
+      expect.objectContaining({ statusCode: expect.any(Number), durationMs: expect.any(Number) })
     );
-    expect(updateMessageRequestDetails).toHaveBeenCalledWith(
-      40_018,
-      expect.objectContaining({ model: "gpt-5.6-terra" })
-    );
+    expect(settleOverlay()).toEqual(expect.objectContaining({ model: "gpt-5.6-terra" }));
   });
 
   it("publishes the loser-inclusive DB total to session while rate limits keep the winner event cost", async () => {
@@ -558,7 +598,8 @@ describe("GPT-5.6 billing lifecycle", () => {
         cacheCreationInputTokens: 400,
         cacheWriteTokensReported: 400,
         cacheWriteAccounting: "reported_positive",
-      })
+      }),
+      expect.objectContaining({ statusCode: expect.any(Number), durationMs: expect.any(Number) })
     );
     expect(updateMessageRequestCostWithBreakdown).not.toHaveBeenCalled();
     expect(RateLimitService.trackCost).toHaveBeenCalledWith(
@@ -688,7 +729,8 @@ describe("GPT-5.6 billing lifecycle", () => {
         cacheCreationInputTokens: 300,
         cacheWriteTokensReported: 300,
         cacheWriteAccounting: "reported_positive",
-      })
+      }),
+      expect.objectContaining({ statusCode: expect.any(Number), durationMs: expect.any(Number) })
     );
     expect(RateLimitService.trackCost).toHaveBeenCalledWith(
       202,
@@ -701,8 +743,7 @@ describe("GPT-5.6 billing lifecycle", () => {
       "gpt56-lifecycle-40002",
       expect.objectContaining({ costUsd: "0.04295" })
     );
-    expect(updateMessageRequestDetails).toHaveBeenCalledWith(
-      40_002,
+    expect(settleOverlay()).toEqual(
       expect.objectContaining({
         specialSettings: expect.arrayContaining([
           expect.objectContaining({
@@ -767,10 +808,10 @@ describe("GPT-5.6 billing lifecycle", () => {
         cacheCreationInputTokens: 0,
         cacheWriteTokensReported: 0,
         cacheWriteAccounting: "none",
-      })
+      }),
+      expect.objectContaining({ statusCode: expect.any(Number), durationMs: expect.any(Number) })
     );
-    expect(updateMessageRequestDetails).toHaveBeenCalledWith(
-      40_009,
+    expect(settleOverlay()).toEqual(
       expect.objectContaining({
         observedInputTokens: 9_016,
         inputTokens: 9_016,
@@ -820,9 +861,10 @@ describe("GPT-5.6 billing lifecycle", () => {
 
     expect(updateMessageRequestCostWithBreakdown).not.toHaveBeenCalled();
     expect(RateLimitService.trackCost).not.toHaveBeenCalled();
-    expect(updateMessageRequestDetails).toHaveBeenCalledWith(
-      40_010,
+    // db-write-churn：流式 unsupported 路径同样折叠 overlay，details 不再单独调用。
+    expect(settleOverlay()).toEqual(
       expect.objectContaining({
+        statusCode: expect.any(Number),
         observedInputTokens: 9_016,
         inputTokens: 9_016,
         cacheCreationInputTokens: 0,
@@ -863,7 +905,8 @@ describe("GPT-5.6 billing lifecycle", () => {
             missingFields: ["cache_creation_input_token_cost"],
           }),
         ]),
-      })
+      }),
+      expect.objectContaining({ statusCode: expect.any(Number), durationMs: expect.any(Number) })
     );
   });
 
@@ -899,7 +942,8 @@ describe("GPT-5.6 billing lifecycle", () => {
         inputTokens: 122_001,
         cacheReadInputTokens: 100_000,
         cacheCreationInputTokens: 50_000,
-      })
+      }),
+      expect.objectContaining({ statusCode: expect.any(Number), durationMs: expect.any(Number) })
     );
   });
 
@@ -961,7 +1005,8 @@ describe("GPT-5.6 billing lifecycle", () => {
         inputTokens: 122_001,
         cacheReadInputTokens: 100_000,
         cacheCreationInputTokens: 50_000,
-      })
+      }),
+      expect.objectContaining({ statusCode: expect.any(Number), durationMs: expect.any(Number) })
     );
     expect(updateMessageRequestUnsupportedBillingSettlement).not.toHaveBeenCalled();
     expect(RateLimitService.trackCost).toHaveBeenCalledWith(
@@ -1062,7 +1107,7 @@ describe("GPT-5.6 billing lifecycle", () => {
 
     await dispatchAndDrain(session, response);
 
-    expectSingleSettlement();
+    expectSingleSettlement("non-stream");
     expect(updateMessageRequestCostWithBreakdown).toHaveBeenCalledWith(
       40_003,
       expect.anything(),
@@ -1082,7 +1127,8 @@ describe("GPT-5.6 billing lifecycle", () => {
         cacheCreationInputTokens: 400,
         cacheWriteTokensReported: 400,
         cacheWriteAccounting: "reported_positive",
-      })
+      }),
+      undefined
     );
     expect(RateLimitService.trackCost).toHaveBeenCalledWith(
       202,
@@ -1162,7 +1208,7 @@ describe("GPT-5.6 billing lifecycle", () => {
 
     await dispatchAndDrain(session, response);
 
-    expectSingleSettlement();
+    expectSingleSettlement("non-stream");
     expect(updateMessageRequestCostWithBreakdown).toHaveBeenCalledWith(
       40_007,
       expect.anything(),
@@ -1182,7 +1228,8 @@ describe("GPT-5.6 billing lifecycle", () => {
         cacheCreationInputTokens: 400,
         cacheWriteTokensReported: 400,
         cacheWriteAccounting: "reported_positive",
-      })
+      }),
+      undefined
     );
     expect(updateMessageRequestDetails).toHaveBeenCalledWith(
       40_007,
@@ -1246,10 +1293,10 @@ describe("GPT-5.6 billing lifecycle", () => {
         cacheCreationInputTokens: 400,
         cacheWriteTokensReported: 400,
         cacheWriteAccounting: "reported_positive",
-      })
+      }),
+      expect.objectContaining({ statusCode: expect.any(Number), durationMs: expect.any(Number) })
     );
-    expect(updateMessageRequestDetails).toHaveBeenCalledWith(
-      40_008,
+    expect(settleOverlay()).toEqual(
       expect.objectContaining({
         observedInputTokens: 2_000,
         inputTokens: 1_000,
@@ -1300,7 +1347,8 @@ describe("GPT-5.6 billing lifecycle", () => {
         cacheCreationInputTokens: 0,
         cacheWriteTokensReported: 0,
         cacheWriteAccounting: "none",
-      })
+      }),
+      expect.objectContaining({ statusCode: expect.any(Number), durationMs: expect.any(Number) })
     );
     expect(RateLimitService.trackCost).toHaveBeenCalledWith(
       202,
@@ -1319,8 +1367,7 @@ describe("GPT-5.6 billing lifecycle", () => {
         costUsd: "0.04523",
       })
     );
-    expect(updateMessageRequestDetails).toHaveBeenCalledWith(
-      40_004,
+    expect(settleOverlay()).toEqual(
       expect.objectContaining({
         observedInputTokens: 9_016,
         inputTokens: 9_016,
@@ -1371,7 +1418,8 @@ describe("GPT-5.6 billing lifecycle", () => {
         cacheCreationInputTokens: 0,
         cacheWriteTokensReported: 0,
         cacheWriteAccounting: "none",
-      })
+      }),
+      expect.objectContaining({ statusCode: expect.any(Number), durationMs: expect.any(Number) })
     );
     expect(RateLimitService.trackCost).toHaveBeenCalledWith(
       202,
@@ -1390,8 +1438,7 @@ describe("GPT-5.6 billing lifecycle", () => {
         costUsd: "0.009518",
       })
     );
-    expect(updateMessageRequestDetails).toHaveBeenCalledWith(
-      40_005,
+    expect(settleOverlay()).toEqual(
       expect.objectContaining({
         observedInputTokens: 9_016,
         inputTokens: 1_080,
@@ -1452,7 +1499,8 @@ describe("GPT-5.6 billing lifecycle", () => {
         cacheCreationInputTokens: 0,
         cacheWriteTokensReported: 0,
         cacheWriteAccounting: "none",
-      })
+      }),
+      expect.objectContaining({ statusCode: expect.any(Number), durationMs: expect.any(Number) })
     );
     expect(RateLimitService.trackCost).toHaveBeenCalledWith(
       202,
@@ -1471,8 +1519,7 @@ describe("GPT-5.6 billing lifecycle", () => {
         costUsd: "0.04523",
       })
     );
-    expect(updateMessageRequestDetails).toHaveBeenCalledWith(
-      40_006,
+    expect(settleOverlay()).toEqual(
       expect.objectContaining({
         observedInputTokens: 9_016,
         inputTokens: 9_016,

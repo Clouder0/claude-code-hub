@@ -56,12 +56,14 @@ import {
 import {
   addMessageRequestHedgeLoserCost,
   type MessageRequestBillingSettlement,
+  type MessageRequestFinalizeOverlay,
   updateMessageRequestCostWithBreakdown,
   updateMessageRequestDetails,
   updateMessageRequestDuration,
   updateMessageRequestUnsupportedBillingSettlement,
   updateMessageRequestWinnerCost,
 } from "@/repository/message";
+import { flushMessageRequestWriteBuffer } from "@/repository/message-write-buffer";
 import type {
   HedgeLoserBilling,
   StoredCostBreakdown,
@@ -3156,7 +3158,6 @@ export class ProxyResponseHandler {
         }
 
         const duration = Date.now() - session.startTime;
-        await updateMessageRequestDuration(messageContext.id, duration);
 
         const tracker = ProxyStatusTracker.getInstance();
         tracker.endRequest(messageContext.user.id, messageContext.id);
@@ -3278,6 +3279,27 @@ export class ProxyResponseHandler {
           streamTextAccumulator.releaseRetainedText();
         }
 
+        const finalizeDetailsPayload = {
+          statusCode: effectiveStatusCode,
+          ...buildUsageAuditPersistence(usageForCost),
+          inputTokens: usageForCost?.input_tokens,
+          outputTokens: usageForCost?.output_tokens,
+          ttfbMs: session.ttfbMs,
+          cacheCreationInputTokens: usageForCost?.cache_creation_input_tokens,
+          cacheReadInputTokens: usageForCost?.cache_read_input_tokens,
+          cacheCreation5mInputTokens: usageForCost?.cache_creation_5m_input_tokens,
+          cacheCreation1hInputTokens: usageForCost?.cache_creation_1h_input_tokens,
+          cacheTtlApplied: usageForCost?.cache_ttl ?? null,
+          providerChain: session.getProviderChain(),
+          ...(streamErrorMessage ? { errorMessage: streamErrorMessage } : {}),
+          model: session.getBillingModel() ?? undefined, // 持久化最终发往上游的模型
+          actualResponseModel: finalActualResponseModel,
+          providerId: providerIdForPersistence ?? session.provider?.id, // 更新最终供应商ID（重试切换后）
+          context1mApplied: session.getContext1mApplied(),
+          swapCacheTtlApplied: provider.swapCacheTtlBilling ?? false,
+          specialSettings: session.getSpecialSettings() ?? undefined,
+        };
+
         const billing = sessionBillingInputs(session, provider, priorityServiceTierApplied);
         const costUpdateResult = await updateRequestCostFromUsage(
           messageContext.id,
@@ -3289,7 +3311,8 @@ export class ProxyResponseHandler {
           // an alternative can still be mid-launch when the initial provider commits, so
           // isHedgeWinner may read false even though a loser will bill — using it would
           // let the winner's replacement clobber that loser's additive write.
-          finalized.billHedgeLosers
+          finalized.billHedgeLosers,
+          { ...finalizeDetailsPayload, durationMs: duration }
         );
         if (costUpdateResult.longContextPricingApplied) {
           ensureLongContextPricingAudit(session, costUpdateResult.longContextPricing);
@@ -3404,27 +3427,12 @@ export class ProxyResponseHandler {
           }
         }
 
-        // 保存扩展信息（status code, tokens, provider chain）
-        await updateMessageRequestDetails(messageContext.id, {
-          statusCode: effectiveStatusCode,
-          ...buildUsageAuditPersistence(usageForCost),
-          inputTokens: usageForCost?.input_tokens,
-          outputTokens: usageForCost?.output_tokens,
-          ttfbMs: session.ttfbMs,
-          cacheCreationInputTokens: usageForCost?.cache_creation_input_tokens,
-          cacheReadInputTokens: usageForCost?.cache_read_input_tokens,
-          cacheCreation5mInputTokens: usageForCost?.cache_creation_5m_input_tokens,
-          cacheCreation1hInputTokens: usageForCost?.cache_creation_1h_input_tokens,
-          cacheTtlApplied: usageForCost?.cache_ttl ?? null,
-          providerChain: session.getProviderChain(),
-          ...(streamErrorMessage ? { errorMessage: streamErrorMessage } : {}),
-          model: session.getBillingModel() ?? undefined, // 持久化最终发往上游的模型
-          actualResponseModel: finalActualResponseModel,
-          providerId: providerIdForPersistence ?? session.provider?.id, // 更新最终供应商ID（重试切换后）
-          context1mApplied: session.getContext1mApplied(),
-          swapCacheTtlApplied: provider.swapCacheTtlBilling ?? false,
-          specialSettings: session.getSpecialSettings() ?? undefined,
-        });
+        // 终态 details 不再单独落库：folded 进下面的持久 settlement 写（一次 UPDATE）。
+        // 仅当没有 settlement 变体真正持久化（无 usage / 无价格 / 零成本）时走缓冲回退。
+        if (!costUpdateResult.detailsPersisted) {
+          await updateMessageRequestDuration(messageContext.id, duration);
+          await updateMessageRequestDetails(messageContext.id, finalizeDetailsPayload);
+        }
 
         emitProxyLangfuseTrace(session, {
           responseHeaders: response.headers,
@@ -4598,13 +4606,21 @@ async function updateRequestCostFromUsage(
   // replacement (cost_usd = winnerCost + SUM(hedge_losers[].costUsd)) so it coexists
   // with losers' concurrent additive writes without clobbering or double-counting.
   // Used for hedge-path winners when billHedgeLosers is on.
-  winnerLoserAware: boolean = false
+  winnerLoserAware: boolean = false,
+  /**
+   * Terminal request facts folded into the durable settlement write (one UPDATE
+   * instead of settlement + buffered details patch). When provided AND a
+   * settlement variant actually persists, the caller must SKIP the ordinary
+   * buffered duration/details writes; detailsPersisted in the result says which.
+   */
+  finalizeOverlay?: MessageRequestFinalizeOverlay
 ): Promise<{
   costUsd: string | null;
   costSettled: boolean;
   resolvedPricing: Awaited<ReturnType<ProxySession["getResolvedPricingByBillingSource"]>> | null;
   longContextPricing: ResolvedLongContextPricing | null;
   longContextPricingApplied: boolean;
+  detailsPersisted: boolean;
 }> {
   const {
     provider,
@@ -4613,6 +4629,20 @@ async function updateRequestCostFromUsage(
     priorityServiceTierApplied,
     groupCostMultiplier,
   } = billing;
+  if (finalizeOverlay) {
+    // 终态 overlay 将以同步 settlement 落库；先把异步写缓冲里同表的历史
+    // patch（如 forwarder 参数覆写的 specialSettings）刷下去，防止缓冲在
+    // settlement 之后 flush、用过期的部分列覆盖终态（旧代码里终态 details
+    // 与它们在同一缓冲内 merge、后写者赢，不存在该窗口）。
+    try {
+      await flushMessageRequestWriteBuffer();
+    } catch (flushError) {
+      logger.warn("[BillingSettlement] Pre-settlement buffer flush failed; continuing", {
+        messageId,
+        error: flushError instanceof Error ? flushError.message : String(flushError),
+      });
+    }
+  }
   if (!usage) {
     logger.warn("[CostCalculation] No usage data, skipping cost update", {
       messageId,
@@ -4623,6 +4653,7 @@ async function updateRequestCostFromUsage(
       resolvedPricing: null,
       longContextPricing: null,
       longContextPricingApplied: false,
+      detailsPersisted: false,
     };
   }
 
@@ -4633,6 +4664,7 @@ async function updateRequestCostFromUsage(
       resolvedPricing: null,
       longContextPricing: null,
       longContextPricingApplied: false,
+      detailsPersisted: false,
     };
   }
 
@@ -4644,6 +4676,7 @@ async function updateRequestCostFromUsage(
       resolvedPricing: null,
       longContextPricing: null,
       longContextPricingApplied: false,
+      detailsPersisted: false,
     };
   }
 
@@ -4658,6 +4691,7 @@ async function updateRequestCostFromUsage(
       resolvedPricing: null,
       longContextPricing: null,
       longContextPricingApplied: false,
+      detailsPersisted: false,
     };
   }
 
@@ -4698,6 +4732,7 @@ async function updateRequestCostFromUsage(
         resolvedPricing: null,
         longContextPricing: null,
         longContextPricingApplied: false,
+        detailsPersisted: false,
       };
     }
 
@@ -4747,12 +4782,19 @@ async function updateRequestCostFromUsage(
 
     if (cost.gt(0)) {
       const persistedCostUsd = winnerLoserAware
-        ? await updateMessageRequestWinnerCost(messageId, cost, storedBreakdown, billingSettlement)
+        ? await updateMessageRequestWinnerCost(
+            messageId,
+            cost,
+            storedBreakdown,
+            billingSettlement,
+            finalizeOverlay
+          )
         : await updateMessageRequestCostWithBreakdown(
             messageId,
             cost,
             storedBreakdown,
-            billingSettlement
+            billingSettlement,
+            finalizeOverlay
           );
       if (persistedCostUsd == null) {
         logger.error("[BillingSettlement] Durable cost write returned no settled value", {
@@ -4764,6 +4806,7 @@ async function updateRequestCostFromUsage(
           resolvedPricing: null,
           longContextPricing,
           longContextPricingApplied: longContextPricing != null,
+          detailsPersisted: false,
         };
       }
       return {
@@ -4772,6 +4815,7 @@ async function updateRequestCostFromUsage(
         resolvedPricing,
         longContextPricing,
         longContextPricingApplied: longContextPricing != null,
+        detailsPersisted: true,
       };
     } else {
       logger.warn("[CostCalculation] Calculated cost is zero or negative", {
@@ -4791,15 +4835,19 @@ async function updateRequestCostFromUsage(
       resolvedPricing,
       longContextPricing,
       longContextPricingApplied: longContextPricing != null,
+      detailsPersisted: false,
     };
   } catch (error) {
     if (error instanceof UnsupportedPricingCombinationError) {
       ensureUnsupportedBillingSettlement(session, usage, error, resolvedPricing);
+      let unsupportedDetailsPersisted = false;
       try {
         await updateMessageRequestUnsupportedBillingSettlement(
           messageId,
-          createBillingSettlement()
+          createBillingSettlement(),
+          finalizeOverlay
         );
+        unsupportedDetailsPersisted = finalizeOverlay !== undefined;
       } catch (settlementError) {
         logger.error("[BillingSettlement] Failed to persist unsupported pricing audit", {
           messageId,
@@ -4820,6 +4868,7 @@ async function updateRequestCostFromUsage(
         resolvedPricing: null,
         longContextPricing: null,
         longContextPricingApplied: false,
+        detailsPersisted: unsupportedDetailsPersisted,
       };
     }
 
@@ -4833,6 +4882,7 @@ async function updateRequestCostFromUsage(
       resolvedPricing: null,
       longContextPricing: null,
       longContextPricingApplied: false,
+      detailsPersisted: false,
     };
   }
 }
