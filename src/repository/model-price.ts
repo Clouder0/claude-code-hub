@@ -6,7 +6,11 @@ import { modelPrices } from "@/drizzle/schema";
 import { logger } from "@/lib/logger";
 import { buildModelNameFallbackCandidates } from "@/lib/utils/model-name-matching";
 import type { ModelPrice, ModelPriceData, ModelPriceSource } from "@/types/model-price";
-import { getCachedLatestPrice, setCachedLatestPrice } from "./_shared/model-price-cache";
+import {
+  getCachedLatestPrice,
+  invalidateLatestPriceCache,
+  setCachedLatestPrice,
+} from "./_shared/model-price-cache";
 import { toModelPrice } from "./_shared/transformers";
 
 /**
@@ -338,6 +342,7 @@ export async function createModelPrice(
       updatedAt: modelPrices.updatedAt,
     });
 
+  invalidateLatestPriceCache(modelName);
   return toModelPrice(price);
 }
 
@@ -351,20 +356,25 @@ export async function upsertModelPrice(
   source: ModelPriceSource = "manual"
 ): Promise<ModelPrice> {
   // 使用事务确保删除和插入的原子性
-  return await db.transaction(async (tx) => {
-    // 先删除该模型的所有旧记录
-    await tx.delete(modelPrices).where(eq(modelPrices.modelName, modelName));
+  return await db
+    .transaction(async (tx) => {
+      // 先删除该模型的所有旧记录
+      await tx.delete(modelPrices).where(eq(modelPrices.modelName, modelName));
 
-    const [price] = await tx
-      .insert(modelPrices)
-      .values({
-        modelName: modelName,
-        priceData: priceData,
-        source: source,
-      })
-      .returning();
-    return toModelPrice(price);
-  });
+      const [price] = await tx
+        .insert(modelPrices)
+        .values({
+          modelName: modelName,
+          priceData: priceData,
+          source: source,
+        })
+        .returning();
+      return toModelPrice(price);
+    })
+    .finally(() => {
+      // 事务结束（无论成败）后失效：失败回滚时缓存仍持有旧值，语义一致
+      invalidateLatestPriceCache(modelName);
+    });
 }
 
 /**
@@ -372,6 +382,7 @@ export async function upsertModelPrice(
  */
 export async function deleteModelPriceByName(modelName: string): Promise<void> {
   await db.delete(modelPrices).where(eq(modelPrices.modelName, modelName));
+  invalidateLatestPriceCache(modelName);
 }
 
 /**
@@ -421,6 +432,8 @@ export async function deleteCloudPricesNotIn(keepModelNames: string[]): Promise<
   `);
   // 驱动可能以 number/string/bigint 报告受影响行数,统一归一化,避免静默回落 0
   const count = Number((result as unknown as { count?: number | bigint | string }).count ?? 0);
+  // 批量删除无法廉价得知被删集合，整表失效（同步低频，代价可忽略）
+  invalidateLatestPriceCache();
   return Number.isFinite(count) ? count : 0;
 }
 

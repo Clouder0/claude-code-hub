@@ -38,3 +38,16 @@ export function setCachedLatestPrice(modelName: string, value: ModelPrice | null
 export function resetModelPriceCacheForTests(): void {
   latestPriceCache.clear();
 }
+
+/**
+ * 写路径失效：单模型编辑精准失效；不传 modelName 时整表清空（云同步等
+ * 批量写后使用）。审计"before"快照与计费读取共享本缓存，写后不失效会让
+ * 60s 内的连续编辑读到上一次编辑前的旧值。
+ */
+export function invalidateLatestPriceCache(modelName?: string): void {
+  if (modelName === undefined) {
+    latestPriceCache.clear();
+    return;
+  }
+  latestPriceCache.delete(modelName);
+}
