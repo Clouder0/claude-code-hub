@@ -89,6 +89,7 @@ import {
 } from "./errors";
 import {
   logFake200SseDiagnostic,
+  logResponsesStreamGateCommitObservation,
   logResponsesStreamGateDiagnostic,
 } from "./fake-200-observability";
 import {
@@ -3888,6 +3889,21 @@ export class ProxyForwarder {
               }
             : {}),
         });
+        if (inspection.kind === "pass" && inspection.commitDiagnostic) {
+          // 成功 commit 此前完全静默（诊断只覆盖失败路径），导致回显体积分布与
+          // 供应商健康分母不可观测；按 provider 分桶限流补一条抽样观测。
+          const commitDiagnostic = inspection.commitDiagnostic;
+          logResponsesStreamGateCommitObservation({
+            providerId: provider.id,
+            providerName: provider.name,
+            endpointId: endpointAudit?.endpointId ?? null,
+            framesSeen: commitDiagnostic.framesSeen,
+            bufferedBytes: commitDiagnostic.bufferedBytes,
+            echoExcludedBytes: commitDiagnostic.echoExcludedBytes,
+            observedEventTypes: commitDiagnostic.observedEventTypes,
+            eventTypesTruncated: commitDiagnostic.eventTypesTruncated,
+          });
+        }
         if (inspection.kind === "fake_200") {
           const securitySignals = detectSecuritySignalsFromText(inspection.prefixText);
           const rejectedPolicy = firstPolicyRejectionCode(securitySignals);
