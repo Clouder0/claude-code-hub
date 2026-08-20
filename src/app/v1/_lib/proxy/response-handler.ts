@@ -1593,9 +1593,18 @@ export class ProxyResponseHandler {
       throw new Error("Alpha Search response is missing its billing context");
     }
 
+    const sessionWithCleanup = session as ProxySession & {
+      clearResponseTimeout?: () => void;
+    };
+    const clearResponseTimeout = () => {
+      const clear = sessionWithCleanup.clearResponseTimeout;
+      sessionWithCleanup.clearResponseTimeout = undefined;
+      clear?.();
+    };
     let completeResponse: Response;
     try {
       const bytes = await response.arrayBuffer();
+      clearResponseTimeout();
       completeResponse = new Response(bytes, {
         status: response.status,
         statusText: response.statusText,
@@ -1679,6 +1688,7 @@ export class ProxyResponseHandler {
       }
       ProxyStatusTracker.getInstance().endRequest(messageContext.user.id, messageContext.id);
     } finally {
+      clearResponseTimeout();
       releaseSessionAgent(session);
     }
 

@@ -686,6 +686,9 @@ describe("Alpha Search fixed-request billing", () => {
 
   it("charges one completed 2xx operation and preserves the exact upstream response", async () => {
     const session = createAlphaSession();
+    const clearResponseTimeout = vi.fn();
+    const releaseAgent = vi.fn();
+    Object.assign(session, { clearResponseTimeout, releaseAgent });
     const body = new Uint8Array([0, 1, 2, 127, 128, 255]);
     const upstream = new Response(body, {
       status: 201,
@@ -722,6 +725,11 @@ describe("Alpha Search fixed-request billing", () => {
       0.03,
       expect.objectContaining({ billingEventId: "7001:alpha-search" })
     );
+    expect(clearResponseTimeout).toHaveBeenCalledTimes(1);
+    expect(releaseAgent).toHaveBeenCalledTimes(1);
+    expect(
+      (session as ProxySession & { clearResponseTimeout?: () => void }).clearResponseTimeout
+    ).toBeUndefined();
   });
 
   it("does not charge a non-2xx response", async () => {
@@ -743,6 +751,9 @@ describe("Alpha Search fixed-request billing", () => {
 
   it("does not settle cost when the upstream body cannot be read completely", async () => {
     const session = createAlphaSession();
+    const clearResponseTimeout = vi.fn();
+    const releaseAgent = vi.fn();
+    Object.assign(session, { clearResponseTimeout, releaseAgent });
     const brokenBody = new ReadableStream<Uint8Array>({
       start(controller) {
         controller.enqueue(new Uint8Array([1, 2, 3]));
@@ -755,5 +766,25 @@ describe("Alpha Search fixed-request billing", () => {
     ).rejects.toThrow("truncated");
     expect(updateMessageRequestCostWithBreakdown).not.toHaveBeenCalled();
     expect(RateLimitService.trackCost).not.toHaveBeenCalled();
+    expect(clearResponseTimeout).toHaveBeenCalledTimes(1);
+    expect(releaseAgent).toHaveBeenCalledTimes(1);
+  });
+
+  it("clears response timeout when billing persistence fails", async () => {
+    const session = createAlphaSession();
+    const clearResponseTimeout = vi.fn();
+    const releaseAgent = vi.fn();
+    Object.assign(session, { clearResponseTimeout, releaseAgent });
+    vi.mocked(updateMessageRequestCostWithBreakdown).mockImplementationOnce(async () => {
+      expect(clearResponseTimeout).toHaveBeenCalledTimes(1);
+      throw new Error("billing unavailable");
+    });
+
+    await expect(
+      ProxyResponseHandler.dispatch(session, new Response("{}", { status: 200 }))
+    ).rejects.toThrow("billing unavailable");
+
+    expect(clearResponseTimeout).toHaveBeenCalledTimes(1);
+    expect(releaseAgent).toHaveBeenCalledTimes(1);
   });
 });
