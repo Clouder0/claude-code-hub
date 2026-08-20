@@ -7,6 +7,13 @@ const withNextIntl = createNextIntlPlugin("./src/i18n/request.ts");
 const nextConfig: NextConfig = {
   output: "standalone",
 
+  // worktree 构建修复：嵌套在主仓库目录下时两份 bun.lock 会让 Next 误判
+  // workspace root（推断到外层主 checkout），standalone 文件追踪随之产出
+  // 空壳 node_modules。显式锚定本目录；主 checkout 构建不受影响。
+  turbopack: {
+    root: import.meta.dirname,
+  },
+
   // 转译 ESM 模块（@lobehub/icons 需要）
   transpilePackages: ["@lobehub/icons"],
 
