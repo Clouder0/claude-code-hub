@@ -71,6 +71,10 @@ export function parseSSEData(sseText: string): ParsedSSEEvent[] {
  * prompt_cache_key）读取的每个字段都位于以下字面 JSON key 之下，因此 data 文本
  * 不含任何标记子串的事件不可能贡献结果，可安全跳过 JSON.parse（保留原始字符串
  * data；消费者对 string data 本就有 `typeof !== "object"` 跳过逻辑）。
+ *
+ * 已知边界（预存在，非本函数引入）：判定基于原始文本的 ASCII 子串，若上游用
+ * \u 转义书写标记文本（如 "cyber_\u0070olicy"），门控不会命中、事件保持未解析。
+ * 修复需要先解码再判定，等于恢复被本优化省掉的成本，故记录而不修。
  */
 const SSE_FINALIZATION_MARKERS = [
   "usage",

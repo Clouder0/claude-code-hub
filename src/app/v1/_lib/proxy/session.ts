@@ -1235,6 +1235,9 @@ export class ProxySession {
           // 主路径走 60s 进程内缓存（与各守卫同源）：finalization 每流触发一次，
           // 原先每请求直查 DB。缓存层内部已含刷新与降级（旧缓存→保守默认），
           // 基本不会抛错；catch 链保留为极端情况下的兜底。
+          // 降级语义变化：冷进程 + DB 全挂时取设置层默认 billingModelSource=
+          // "original"（与 DB 层默认一致），而非旧直查链的显式 "redirected"——
+          // 该窗口内价格查询同样失败，实际无计费发生。
           const { getCachedSystemSettings } = await import("@/lib/config");
           const systemSettings = await getCachedSystemSettings();
 

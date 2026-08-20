@@ -551,14 +551,6 @@ function buildEndpointAttemptKey(endpointId: number | null, endpointUrl: string)
 // connectTimeout 属于 Dispatcher/Client 配置（已在全局 Agent / ProxyAgent 里处理）。
 
 /**
- * 过滤私有参数（下划线前缀）
- *
- * 目的：防止私有参数（下划线前缀）泄露到上游供应商导致 "Unsupported parameter" 错误
- *
- * @param obj - 原始请求对象
- * @returns 过滤后的请求对象
- */
-/**
  * 记录用请求体大小：字符串取字符长度，二进制取字节数。
  * 此前用 JSON.stringify(requestBody).length——字符串 body 会为取长度分配整个
  * 带引号的副本，raw-passthrough 的 Buffer 更会序列化成
@@ -573,6 +565,14 @@ function logBodySize(body: BodyInit | undefined): number {
   return 0;
 }
 
+/**
+ * 过滤私有参数（下划线前缀）
+ *
+ * 目的：防止私有参数（下划线前缀）泄露到上游供应商导致 "Unsupported parameter" 错误
+ *
+ * @param obj - 原始请求对象
+ * @returns 过滤后的请求对象
+ */
 function filterPrivateParameters(obj: unknown): unknown {
   // 非对象类型直接返回
   if (typeof obj !== "object" || obj === null) {

@@ -224,7 +224,7 @@ export function resetFake200SseDiagnosticLogRateLimitForTests(): void {
 }
 
 export function getFake200SseDiagnosticLogRateLimitBucketCountForTests(): number {
-  return buckets.size + streamGateBuckets.size;
+  return buckets.size + streamGateBuckets.size + commitBuckets.size;
 }
 
 export type ResponsesStreamGateCommitObservationLog = {

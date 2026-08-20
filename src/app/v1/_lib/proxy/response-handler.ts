@@ -2869,7 +2869,9 @@ export class ProxyResponseHandler {
         });
 
         let buffer = "";
-        // decoder 带 {stream:true} 状态，不能跨流共享，但每流一个即可（原实现每 chunk 新建）
+        // decoder 带 {stream:true} 状态，不能跨流共享，但每流一个即可。
+        // 行为改进（原实现每 chunk 新建 decoder）：跨 chunk 分裂的 UTF-8 序列此前
+        // 会各自解码成 U+FFFD，状态化共享后正确拼接。
         const geminiDecoder = new TextDecoder();
         const transformStream = new TransformStream<Uint8Array, Uint8Array>({
           transform(chunk, controller) {
@@ -2948,7 +2950,7 @@ export class ProxyResponseHandler {
     let idleTimeoutId: NodeJS.Timeout | null = null;
     let clientAbortDrainTimeoutId: NodeJS.Timeout | null = null;
     // 上次 idle timer 重置时刻：读循环每个 chunk 都到货时重置一次定时器会产生
-    // 大量 clearTimeout/setsetTimeout 堆操作，改为仅当距上次重置已过半超时
+    // 大量 clearTimeout/setTimeout 堆操作，改为仅当距上次重置已过半超时
     // 周期才重置。代价是实际静默判定下界从 idleTimeoutMs 收紧到
     // idleTimeoutMs/2（上界不变）——对"分钟级上游停摆"的检测目标无实质影响。
     let lastIdleResetAt = 0;
@@ -3233,7 +3235,9 @@ export class ProxyResponseHandler {
         // 经由 getBillingRequestMessage 读取：高并发模式下请求体已在门控提交后
         // 释放为投影（投影保留了 thinking 配置），语义与读原树一致。
         // 这两个检测只读流头部事件且为纯 CPU——上移到结算 await 链之前，
-        // 使全量文本可以在此后统一释放。
+        // 使全量文本可以在此后统一释放。附带变化：thinking_signature_model_detection
+        // 现在也会进入 billing settlement 的 specialSettings 快照（原先只在最终
+        // details 写入出现），且数组条目顺序改变——审计面更全，无金额影响。
         const currentRequestedModel = session.getCurrentModel();
         const thinkingActuallyEnabled = isThinkingEnabled(session.getBillingRequestMessage() ?? {});
         const anthropicModelDetection = resolveAnthropicStreamActualResponseModel({
