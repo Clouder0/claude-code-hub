@@ -76,6 +76,41 @@ describe("security event repository", () => {
     });
   });
 
+  it("accepts bio_policy as a first-class event type on insert", async () => {
+    await insertSecurityEvent(8, 43, "bio_policy");
+
+    expect(mocks.values).toHaveBeenCalledWith({
+      userId: 8,
+      messageRequestId: 43,
+      type: "bio_policy",
+    });
+  });
+
+  it("counts cyber and bio blocks in the same policy-block aggregation", async () => {
+    const query = summaryQuery([]);
+    mocks.select.mockReturnValue(query);
+
+    await findSecurityEventUserSummaries();
+
+    // 聚合 SELECT 的原始 SQL 把两类确认拦截都计入 policyBlockCount。
+    // drizzle 的 sql 模板由 queryChunks 组成；只提取 StringChunk 文本即可断言 SQL 片段，
+    // 避免列对象（PgTable 循环引用）参与序列化。
+    const sqlText = (fragment: unknown): string => {
+      const chunks = (fragment as { queryChunks?: unknown[] }).queryChunks ?? [];
+      return chunks
+        .map((chunk) => {
+          const value = (chunk as { value?: unknown }).value;
+          if (typeof value === "string") return value;
+          if (Array.isArray(value)) return value.join("");
+          return "";
+        })
+        .join("");
+    };
+    const selectArg = mocks.select.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(sqlText(selectArg.policyBlockCount)).toContain("IN ('cyber_policy', 'bio_policy')");
+    expect(sqlText(selectArg.safetyCheckCount)).toContain("= 'cyber_safety_check'");
+  });
+
   it("returns one lookahead row as hasMore and clamps recent-event pagination", async () => {
     const rows = Array.from({ length: 101 }, (_, index) => ({ id: index + 1 }));
     const query = recentQuery(rows);

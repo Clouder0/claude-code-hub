@@ -9,9 +9,10 @@
 import { getEnvConfig } from "@/lib/config/env.schema";
 import { type ErrorDetectionResult, errorRuleDetector } from "@/lib/error-rule-detector";
 import {
-  containsCyberPolicySignal,
-  containsCyberPolicySignalInText,
-} from "@/lib/security/cyber-security-signals";
+  detectPolicyRejectionCode,
+  detectPolicyRejectionCodeFromText,
+  type PolicyRejectionCode,
+} from "@/lib/security/security-signals";
 import { redactJsonString } from "@/lib/utils/message-redaction";
 import { sanitizeErrorTextForDetail } from "@/lib/utils/upstream-error-detection";
 import type { ErrorOverrideResponse } from "@/repository/error-rules";
@@ -566,18 +567,34 @@ export enum ErrorCategory {
   CLIENT_ABORT, // 客户端主动中断 → 不计入熔断器 + 不重试 + 直接返回
   NON_RETRYABLE_CLIENT_ERROR, // 客户端输入错误（Prompt 超限、内容过滤、PDF 限制、Thinking 格式、参数缺失/额外参数、非法请求）→ 不计入熔断器 + 不重试 + 直接返回
   RESOURCE_NOT_FOUND, // 上游 404 错误 → 不计入熔断器 + 直接切换供应商
-  CYBER_POLICY, // 上游明确的 cyber policy 拒绝 → 不计入熔断器 + 不重试/切换
+  POLICY_REJECTION, // 上游明确的策略拒绝（cyber_policy/bio_policy）→ 不计入熔断器 + 不重试/切换
 }
 
-export function isCyberPolicyError(error: unknown): error is ProxyError {
-  if (!(error instanceof ProxyError)) return false;
-  if (containsCyberPolicySignal(error.upstreamError?.parsed)) return true;
+/**
+ * 返回错误携带的确认策略码（无则 null）。检测顺序 cyber 优先。
+ * isPolicyRejectionError 与本函数共用同一条检测路径，保证分类与遏制不会各说各话。
+ */
+export function policyRejectionCodeOf(error: unknown): PolicyRejectionCode | null {
+  if (!(error instanceof ProxyError)) return null;
+  const upstream = error.upstreamError;
+  if (!upstream) return null;
 
-  const rawBody = error.upstreamError?.rawBody;
-  if (rawBody && containsCyberPolicySignalInText(rawBody)) return true;
+  const fromParsed = detectPolicyRejectionCode(upstream.parsed);
+  if (fromParsed) return fromParsed;
 
-  const body = error.upstreamError?.body;
-  return Boolean(body && containsCyberPolicySignalInText(body));
+  if (upstream.rawBody) {
+    const code = detectPolicyRejectionCodeFromText(upstream.rawBody);
+    if (code) return code;
+  }
+  if (upstream.body) {
+    const code = detectPolicyRejectionCodeFromText(upstream.body);
+    if (code) return code;
+  }
+  return null;
+}
+
+export function isPolicyRejectionError(error: unknown): error is ProxyError {
+  return policyRejectionCodeOf(error) !== null;
 }
 
 /**
@@ -965,8 +982,8 @@ export async function categorizeErrorAsync(error: Error): Promise<ErrorCategory>
 
   // Upstream policy decisions are request outcomes, not provider-health failures. This exact
   // structured check intentionally precedes configurable message-based error rules.
-  if (isCyberPolicyError(error)) {
-    return ErrorCategory.CYBER_POLICY;
+  if (isPolicyRejectionError(error)) {
+    return ErrorCategory.POLICY_REJECTION;
   }
 
   // 优先级 2: 不可重试的客户端输入错误检测（白名单模式）

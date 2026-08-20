@@ -1,11 +1,11 @@
 import { logger } from "@/lib/logger";
 import { insertSecurityEvent } from "@/repository/security-events";
-import type { CyberSecurityEventType } from "./cyber-security-signals";
+import type { SecurityEventType } from "./security-signals";
 
 export async function recordSecurityEventBestEffort(
   userId: number | null | undefined,
   messageRequestId: number | null | undefined,
-  type: CyberSecurityEventType
+  type: SecurityEventType
 ): Promise<void> {
   if (userId == null) {
     logger.warn("[SecurityEvent] Cannot attribute event without user", { type });

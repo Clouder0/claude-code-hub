@@ -252,4 +252,32 @@ describe("ProxyErrorHandler.handle - upstream message passthrough", () => {
     expect(body.error.code).toBe("cyber_policy");
     expect(mocks.getErrorOverrideAsync).not.toHaveBeenCalled();
   });
+
+  test("preserves bio_policy code and does not allow generic error overrides to hide it", async () => {
+    mocks.getErrorOverrideAsync.mockResolvedValue({
+      statusCode: 503,
+      response: {
+        error: {
+          type: "service_unavailable_error",
+          message: "custom override",
+          code: "provider_unavailable",
+        },
+      },
+    });
+    const rawBody =
+      'data: {"type":"response.failed","response":{"error":{"code":"bio_policy","message":"This content was flagged for possible biological risk."}}}\n\n';
+    const error = new ProxyError("FAKE_200_JSON_ERROR_MESSAGE_NON_EMPTY", 400, {
+      body: "flagged",
+      rawBody,
+      statusCodeInferred: true,
+      statusCodeInferenceMatcherId: "bio_policy",
+    });
+
+    const response = await ProxyErrorHandler.handle(createSession(), error);
+    const body = await response.json();
+
+    expect(response.status).toBe(400);
+    expect(body.error.code).toBe("bio_policy");
+    expect(mocks.getErrorOverrideAsync).not.toHaveBeenCalled();
+  });
 });

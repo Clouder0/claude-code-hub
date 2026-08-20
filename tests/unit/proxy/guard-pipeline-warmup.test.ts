@@ -48,10 +48,10 @@ vi.mock("@/app/v1/_lib/proxy/session-guard", () => ({
   },
 }));
 
-vi.mock("@/lib/security/cyber-containment", () => ({
-  isSessionCyberBlocked: async () => {
-    callOrder.push("cyberBlock");
-    return false;
+vi.mock("@/lib/security/policy-containment", () => ({
+  findSessionBlockPolicy: async () => {
+    callOrder.push("policyBlock");
+    return null;
   },
 }));
 
@@ -115,20 +115,20 @@ vi.mock("@/app/v1/_lib/proxy/message-service", () => ({
 }));
 
 describe("GuardPipeline：warmup 拦截点", () => {
-  test("CHAT pipeline 必须包含 warmup，且位于 cyberBlock 之后、requestFilter 之前", async () => {
+  test("CHAT pipeline 必须包含 warmup，且位于 policyBlock 之后、requestFilter 之前", async () => {
     const { CHAT_PIPELINE } = await import("@/app/v1/_lib/proxy/guard-pipeline");
 
     const sensitiveIdx = CHAT_PIPELINE.steps.indexOf("sensitive");
     const sessionIdx = CHAT_PIPELINE.steps.indexOf("session");
-    const cyberBlockIdx = CHAT_PIPELINE.steps.indexOf("cyberBlock");
+    const policyBlockIdx = CHAT_PIPELINE.steps.indexOf("policyBlock");
     const warmupIdx = CHAT_PIPELINE.steps.indexOf("warmup");
     const requestFilterIdx = CHAT_PIPELINE.steps.indexOf("requestFilter");
 
     expect(sensitiveIdx).toBeGreaterThanOrEqual(0);
     expect(sessionIdx).toBeGreaterThanOrEqual(0);
     expect(sensitiveIdx).toBeLessThan(sessionIdx);
-    expect(cyberBlockIdx).toBe(sessionIdx + 1);
-    expect(warmupIdx).toBe(cyberBlockIdx + 1);
+    expect(policyBlockIdx).toBe(sessionIdx + 1);
+    expect(warmupIdx).toBe(policyBlockIdx + 1);
     expect(requestFilterIdx).toBeGreaterThan(warmupIdx);
   });
 

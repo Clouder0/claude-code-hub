@@ -211,6 +211,36 @@ describe("tryResponsesWebsocketUpstream", () => {
     expect(body).toContain('"code":"cyber_policy"');
   });
 
+  it("preserves bio policy events for the shared downstream detector", async () => {
+    server = await startMockServer((socket) => {
+      socket.on("message", () => {
+        socket.send(
+          JSON.stringify({
+            type: "response.failed",
+            response: {
+              error: {
+                code: "bio_policy",
+                message: "This content was flagged for possible biological risk.",
+              },
+            },
+          })
+        );
+      });
+    });
+
+    const result = await tryResponsesWebsocketUpstream({
+      provider: codexProvider(),
+      upstreamUrl: `http://127.0.0.1:${server.port}/v1/responses`,
+      upstreamHeaders: new Headers({ authorization: "Bearer sk-mock" }),
+      body: { model: "gpt-5.5", input: "hi" },
+    });
+
+    expect("response" in result).toBe(true);
+    if (!("response" in result)) return;
+    const body = await collectSseBody(result.response);
+    expect(body).toContain('"code":"bio_policy"');
+  });
+
   it("returns failure when upstream rejects the WS upgrade", async () => {
     // Create a plain http server that returns 404 on /v1/responses to simulate
     // providers that don't speak WS on that path.

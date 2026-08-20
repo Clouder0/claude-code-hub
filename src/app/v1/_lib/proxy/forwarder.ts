@@ -29,9 +29,12 @@ import {
 } from "@/lib/provider-endpoints/endpoint-selector";
 import { getGlobalAgentPool, getProxyAgentForProvider } from "@/lib/proxy-agent";
 import { RateLimitService } from "@/lib/rate-limit/service";
-import { containCyberPolicy } from "@/lib/security/cyber-containment";
-import { detectCyberSecuritySignalsFromText } from "@/lib/security/cyber-security-signals";
+import { containPolicyRejection } from "@/lib/security/policy-containment";
 import { recordSecurityEventBestEffort } from "@/lib/security/security-event-recorder";
+import {
+  detectSecuritySignalsFromText,
+  firstPolicyRejectionCode,
+} from "@/lib/security/security-signals";
 import { SessionManager } from "@/lib/session-manager";
 import {
   detectUpstreamErrorFromSseOrJsonText,
@@ -81,6 +84,7 @@ import {
   isHttp2Error,
   isSSLCertificateError,
   ProxyError,
+  policyRejectionCodeOf,
   sanitizeUrl,
 } from "./errors";
 import {
@@ -1860,9 +1864,13 @@ export class ProxyForwarder {
             throw lastError;
           }
 
-          if (errorCategory === ErrorCategory.CYBER_POLICY) {
-            await containCyberPolicy(session);
-            logger.warn("ProxyForwarder: Cyber policy rejection, stopping immediately", {
+          if (errorCategory === ErrorCategory.POLICY_REJECTION) {
+            // categorizeErrorAsync 判定 POLICY_REJECTION 与 policyRejectionCodeOf 共用
+            // 同一条结构化检测路径，此处必然非空；?? 仅为类型收窄，不可能命中。
+            const rejectedPolicy = policyRejectionCodeOf(lastError) ?? "cyber_policy";
+            await containPolicyRejection(session, rejectedPolicy);
+            logger.warn("ProxyForwarder: Policy rejection, stopping immediately", {
+              policy: rejectedPolicy,
               providerId: currentProvider.id,
               providerName: currentProvider.name,
               statusCode: lastError instanceof ProxyError ? lastError.statusCode : undefined,
@@ -3800,8 +3808,8 @@ export class ProxyForwarder {
             : {}),
         });
         if (inspection.kind === "fake_200") {
-          const securitySignals = detectCyberSecuritySignalsFromText(inspection.prefixText);
-          const isCyberPolicy = securitySignals.includes("cyber_policy");
+          const securitySignals = detectSecuritySignalsFromText(inspection.prefixText);
+          const rejectedPolicy = firstPolicyRejectionCode(securitySignals);
           if (securitySignals.includes("cyber_safety_check")) {
             await recordSecurityEventBestEffort(
               session.messageContext?.user?.id,
@@ -3810,10 +3818,10 @@ export class ProxyForwarder {
             );
           }
           const overload = detectUpstreamOverloadFromSseOrJsonText(inspection.rawText);
-          const inferredStatus = isCyberPolicy
+          const inferredStatus = rejectedPolicy
             ? null
             : inferUpstreamErrorStatusCodeFromText(inspection.rawText);
-          const statusCode = isCyberPolicy
+          const statusCode = rejectedPolicy
             ? 400
             : overload.isOverload
               ? 503
@@ -3866,9 +3874,10 @@ export class ProxyForwarder {
             providerName: provider.name,
             rawBody: inspection.rawText,
             rawBodyTruncated: inspection.rawBodyTruncated,
-            statusCodeInferred: isCyberPolicy || overload.isOverload || inferredStatus !== null,
+            statusCodeInferred:
+              rejectedPolicy !== null || overload.isOverload || inferredStatus !== null,
             statusCodeInferenceMatcherId:
-              (isCyberPolicy ? "cyber_policy" : undefined) ??
+              rejectedPolicy ??
               inferredStatus?.matcherId ??
               (overload.isOverload ? "service_unavailable" : undefined),
             isOverload: overload.isOverload,
@@ -3883,7 +3892,7 @@ export class ProxyForwarder {
             endpointId: endpointAudit?.endpointId ?? null,
             attemptNumber: attemptNumber ?? null,
           });
-          const securitySignals = detectCyberSecuritySignalsFromText(inspection.prefixText);
+          const securitySignals = detectSecuritySignalsFromText(inspection.prefixText);
           if (securitySignals.includes("cyber_safety_check")) {
             await recordSecurityEventBestEffort(
               session.messageContext?.user?.id,
@@ -3891,12 +3900,13 @@ export class ProxyForwarder {
               "cyber_safety_check"
             );
           }
-          if (securitySignals.includes("cyber_policy")) {
-            // Structured cyber policy rejection: the retry loop classifies this as
-            // CYBER_POLICY and applies containment (record, session block, strike).
-            throw new ProxyError("cyber_policy", 400, {
+          const rejectedPolicy = firstPolicyRejectionCode(securitySignals);
+          if (rejectedPolicy) {
+            // Structured policy rejection (cyber/bio): the retry loop classifies this as
+            // POLICY_REJECTION and applies containment (record, session block, strike for cyber).
+            throw new ProxyError(rejectedPolicy, 400, {
               body: JSON.stringify({
-                error: { code: "cyber_policy", message: "blocked" },
+                error: { code: rejectedPolicy, message: "blocked" },
               }),
               providerId: provider.id,
               providerName: provider.name,
@@ -4531,8 +4541,10 @@ export class ProxyForwarder {
         return;
       }
 
-      if (errorCategory === ErrorCategory.CYBER_POLICY) {
-        await containCyberPolicy(session);
+      if (errorCategory === ErrorCategory.POLICY_REJECTION) {
+        // 与主重试循环同理：分类与 codeOf 共用同一条检测路径，?? 仅为类型收窄。
+        const rejectedPolicy = policyRejectionCodeOf(error) ?? "cyber_policy";
+        await containPolicyRejection(session, rejectedPolicy);
         attempt.settled = true;
         if (attempt.thresholdTimer) {
           clearTimeout(attempt.thresholdTimer);
@@ -4540,7 +4552,8 @@ export class ProxyForwarder {
         }
         attempts.delete(attempt);
 
-        logger.warn("ProxyForwarder: Cyber policy rejection in hedge, aborting all attempts", {
+        logger.warn("ProxyForwarder: Policy rejection in hedge, aborting all attempts", {
+          policy: rejectedPolicy,
           providerId: attempt.provider.id,
           providerName: attempt.provider.name,
           statusCode,
@@ -5245,7 +5258,7 @@ export class ProxyForwarder {
       lastError &&
       (lastErrorCategory === ErrorCategory.CLIENT_ABORT ||
         lastErrorCategory === ErrorCategory.NON_RETRYABLE_CLIENT_ERROR ||
-        lastErrorCategory === ErrorCategory.CYBER_POLICY)
+        lastErrorCategory === ErrorCategory.POLICY_REJECTION)
     ) {
       return lastError;
     }

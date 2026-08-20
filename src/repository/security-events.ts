@@ -3,11 +3,11 @@
 import { and, desc, eq, gte, isNull, sql } from "drizzle-orm";
 import { db } from "@/drizzle/db";
 import { keys, messageRequest, providers, securityEvents, users } from "@/drizzle/schema";
-import type { CyberSecurityEventType } from "@/lib/security/cyber-security-signals";
+import type { SecurityEventType } from "@/lib/security/security-signals";
 
 export type RecentSecurityEvent = {
   id: number;
-  type: CyberSecurityEventType;
+  type: SecurityEventType;
   createdAt: Date;
   messageRequestId: number | null;
   userId: number;
@@ -33,7 +33,7 @@ export type SecurityEventUserSummary = {
 export async function insertSecurityEvent(
   userId: number,
   messageRequestId: number | null,
-  type: CyberSecurityEventType
+  type: SecurityEventType
 ): Promise<void> {
   await db
     .insert(securityEvents)
@@ -100,7 +100,8 @@ export async function findSecurityEventUserSummaries(options?: {
       userId: users.id,
       userName: users.name,
       userEnabled: users.isEnabled,
-      policyBlockCount: sql<number>`count(*) FILTER (WHERE ${securityEvents.type} = 'cyber_policy')::int`,
+      // 确认的策略拦截（cyber/bio）合计为 policyBlockCount；额外检查单列。
+      policyBlockCount: sql<number>`count(*) FILTER (WHERE ${securityEvents.type} IN ('cyber_policy', 'bio_policy'))::int`,
       safetyCheckCount: sql<number>`count(*) FILTER (WHERE ${securityEvents.type} = 'cyber_safety_check')::int`,
       lastEventAt: sql<Date>`max(${securityEvents.createdAt})`,
     })

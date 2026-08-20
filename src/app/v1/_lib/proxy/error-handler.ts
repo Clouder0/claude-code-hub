@@ -16,10 +16,11 @@ import { attachSessionIdToErrorResponse } from "./error-session-id";
 import {
   ALL_PROVIDERS_UNAVAILABLE_MESSAGE,
   getErrorOverrideAsync,
-  isCyberPolicyError,
   isEmptyResponseError,
+  isPolicyRejectionError,
   isRateLimitError,
   ProxyError,
+  policyRejectionCodeOf,
   type RateLimitError,
 } from "./errors";
 import { ProxyResponses } from "./responses";
@@ -282,7 +283,7 @@ export class ProxyErrorHandler {
 
     // 检测是否有覆写配置（响应体或状态码）
     // 使用异步版本确保错误规则已加载
-    if (error instanceof Error && !isCyberPolicyError(error)) {
+    if (error instanceof Error && !isPolicyRejectionError(error)) {
       const override = await getErrorOverrideAsync(error);
       if (override) {
         // 运行时校验覆写状态码范围（400-599），防止数据库脏数据导致 Response 抛 RangeError
@@ -513,11 +514,11 @@ export class ProxyErrorHandler {
       typeof upstreamRequestId === "string" && upstreamRequestId.trim()
         ? upstreamRequestId.trim()
         : undefined;
-    const terminalErrorCode = isCyberPolicyError(error)
-      ? "cyber_policy"
-      : error instanceof ProxyError && error.upstreamError?.isOverload
+    const terminalErrorCode =
+      policyRejectionCodeOf(error) ??
+      (error instanceof ProxyError && error.upstreamError?.isOverload
         ? "server_is_overloaded"
-        : undefined;
+        : undefined);
     const settings = await getSettings();
     const finalClientErrorMessage = resolveFinalClientErrorMessage({
       error,

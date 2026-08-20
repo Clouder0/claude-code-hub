@@ -2289,7 +2289,7 @@
   },
   "securityEvents": {
     "title": "Security Events",
-    "description": "Structured upstream cyber policy blocks and additional safety checks.",
+    "description": "Structured upstream policy blocks (cyber and bio) and additional safety checks.",
     "unknown": "Unknown",
     "users": {
       "title": "Affected users",
@@ -2317,6 +2317,7 @@
     },
     "types": {
       "cyberPolicy": "Policy block",
+      "bioPolicy": "Bio policy block",
       "safetyCheck": "Additional check"
     },
     "status": {

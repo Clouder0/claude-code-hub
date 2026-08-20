@@ -2226,7 +2226,7 @@
   },
   "securityEvents": {
     "title": "安全事件",
-    "description": "上游回報的結構化網路安全政策攔截與額外安全檢查。",
+    "description": "上游回報的結構化安全政策攔截（網路安全/生物安全）與額外安全檢查。",
     "unknown": "未知",
     "users": {
       "title": "受影響使用者",
@@ -2254,6 +2254,7 @@
     },
     "types": {
       "cyberPolicy": "政策攔截",
+      "bioPolicy": "生物政策攔截",
       "safetyCheck": "額外檢查"
     },
     "status": {

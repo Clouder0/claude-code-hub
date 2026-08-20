@@ -94,13 +94,13 @@ const {
   mockRecordFailure,
   mockRecordEndpointFailure,
   mockRecordEndpointSuccess,
-  mockContainCyberPolicy,
+  mockContainPolicyRejection,
   mockRecordSecurityEvent,
 } = vi.hoisted(() => ({
   mockRecordFailure: vi.fn(),
   mockRecordEndpointFailure: vi.fn(),
   mockRecordEndpointSuccess: vi.fn(),
-  mockContainCyberPolicy: vi.fn(async () => {}),
+  mockContainPolicyRejection: vi.fn(async () => {}),
   mockRecordSecurityEvent: vi.fn(async () => {}),
 }));
 
@@ -114,8 +114,8 @@ vi.mock("@/lib/endpoint-circuit-breaker", () => ({
   resetEndpointCircuit: vi.fn(),
 }));
 
-vi.mock("@/lib/security/cyber-containment", () => ({
-  containCyberPolicy: mockContainCyberPolicy,
+vi.mock("@/lib/security/policy-containment", () => ({
+  containPolicyRejection: mockContainPolicyRejection,
 }));
 
 vi.mock("@/lib/security/security-event-recorder", () => ({
@@ -507,13 +507,95 @@ describe("Endpoint circuit breaker isolation", () => {
     await ProxyResponseHandler.dispatch(session, response);
     await drainAsyncTasks();
 
-    expect(mockContainCyberPolicy).toHaveBeenCalledTimes(1);
-    expect(mockContainCyberPolicy).toHaveBeenCalledWith(
-      expect.objectContaining({ sessionId: "fake-session" })
+    expect(mockContainPolicyRejection).toHaveBeenCalledTimes(1);
+    expect(mockContainPolicyRejection).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionId: "fake-session" }),
+      "cyber_policy"
     );
     expect(mockRecordSecurityEvent).toHaveBeenCalledWith(123, 1, "cyber_safety_check");
     expect(mockRecordFailure).not.toHaveBeenCalled();
     expect(mockRecordEndpointFailure).not.toHaveBeenCalled();
+    expect(SessionManager.clearSessionProvider).not.toHaveBeenCalled();
+    expect(session.getProviderChain()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          reason: "client_error_non_retryable",
+          statusCode: 400,
+          errorMessage: "cyber_policy",
+        }),
+      ])
+    );
+  });
+
+  it("bio policy fake-200 is recorded without provider penalty or session rebinding", async () => {
+    const session = createSession();
+    setDeferredMeta(session, 42);
+    const response = createResponsesStreamResponse([
+      { type: "response.output_text.delta", delta: "held" },
+      {
+        type: "response.failed",
+        response: {
+          error: {
+            code: "bio_policy",
+            message: "This content was flagged for possible biological risk.",
+          },
+        },
+      },
+    ]);
+
+    await ProxyResponseHandler.dispatch(session, response);
+    await drainAsyncTasks();
+
+    expect(mockContainPolicyRejection).toHaveBeenCalledTimes(1);
+    expect(mockContainPolicyRejection).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionId: "fake-session" }),
+      "bio_policy"
+    );
+    expect(mockRecordFailure).not.toHaveBeenCalled();
+    expect(mockRecordEndpointFailure).not.toHaveBeenCalled();
+    expect(SessionManager.clearSessionProvider).not.toHaveBeenCalled();
+    expect(session.getProviderChain()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          reason: "client_error_non_retryable",
+          statusCode: 400,
+          errorMessage: "bio_policy",
+        }),
+      ])
+    );
+  });
+
+  it("a stream carrying both cyber and bio rejections contains each policy exactly once", async () => {
+    const session = createSession();
+    setDeferredMeta(session, 42);
+    const response = createResponsesStreamResponse([
+      { type: "response.output_text.delta", delta: "held" },
+      {
+        type: "response.failed",
+        response: { error: { code: "bio_policy", message: "flagged for biological risk" } },
+      },
+      {
+        type: "response.failed",
+        response: { error: { code: "cyber_policy", message: "blocked" } },
+      },
+    ]);
+
+    await ProxyResponseHandler.dispatch(session, response);
+    await drainAsyncTasks();
+
+    // 每个确认的策略各自遏制一次（封锁键与事件按策略独立）；下游判定取 cyber。
+    expect(mockContainPolicyRejection).toHaveBeenCalledTimes(2);
+    expect(mockContainPolicyRejection).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ sessionId: "fake-session" }),
+      "cyber_policy"
+    );
+    expect(mockContainPolicyRejection).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ sessionId: "fake-session" }),
+      "bio_policy"
+    );
+    expect(mockRecordFailure).not.toHaveBeenCalled();
     expect(SessionManager.clearSessionProvider).not.toHaveBeenCalled();
     expect(session.getProviderChain()).toEqual(
       expect.arrayContaining([
@@ -541,7 +623,7 @@ describe("Endpoint circuit breaker isolation", () => {
     await drainAsyncTasks();
 
     expect(mockRecordSecurityEvent).toHaveBeenCalledWith(123, 1, "cyber_safety_check");
-    expect(mockContainCyberPolicy).not.toHaveBeenCalled();
+    expect(mockContainPolicyRejection).not.toHaveBeenCalled();
     expect(mockRecordFailure).not.toHaveBeenCalled();
     expect(mockRecordEndpointSuccess).toHaveBeenCalledWith(42);
   });

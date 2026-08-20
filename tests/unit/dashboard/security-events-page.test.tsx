@@ -71,4 +71,42 @@ describe("SecurityEventsPage", () => {
     expect(mocks.findSecurityEventUserSummaries).toHaveBeenCalledTimes(1);
     expect(mocks.findRecentSecurityEvents).toHaveBeenCalledWith({ limit: 50, offset: 0 });
   });
+
+  it("renders a bio_policy event with the bio policy-block label", async () => {
+    const { default: SecurityEventsPage } = await import(
+      "@/app/[locale]/dashboard/security-events/page"
+    );
+    mocks.getSession.mockResolvedValue({ user: { id: 1, role: "admin" } });
+    mocks.findRecentSecurityEvents.mockResolvedValueOnce({
+      items: [
+        {
+          id: 3,
+          type: "bio_policy",
+          createdAt: new Date("2026-08-21T00:00:00Z"),
+          messageRequestId: 9,
+          userId: 5,
+          userName: "bio-user",
+          userEnabled: true,
+          keyId: null,
+          keyName: null,
+          sessionId: "sess_bio",
+          requestSequence: 1,
+          providerId: 1,
+          providerName: "p1",
+        },
+      ],
+      hasMore: false,
+    });
+
+    const element = await SecurityEventsPage({
+      params: Promise.resolve({ locale: "en" }),
+      searchParams: Promise.resolve({}),
+    });
+
+    // 页面返回 RSC 元素树；用静态渲染断言 bio 事件走到 bioPolicy 标签分支。
+    const { renderToStaticMarkup } = await import("react-dom/server");
+    const html = renderToStaticMarkup(element);
+    expect(html).toContain("types.bioPolicy");
+    expect(html).toContain("bio-user");
+  });
 });

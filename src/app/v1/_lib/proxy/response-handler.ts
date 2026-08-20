@@ -16,9 +16,13 @@ import { requestCloudPriceTableSync } from "@/lib/price-sync/cloud-price-updater
 import { ProxyStatusTracker } from "@/lib/proxy-status-tracker";
 import { RateLimitService } from "@/lib/rate-limit";
 import { deleteLiveChain } from "@/lib/redis/live-chain-store";
-import { containCyberPolicy } from "@/lib/security/cyber-containment";
-import { detectCyberSecuritySignalsFromText } from "@/lib/security/cyber-security-signals";
+import { containPolicyRejection } from "@/lib/security/policy-containment";
 import { recordSecurityEventBestEffort } from "@/lib/security/security-event-recorder";
+import {
+  detectSecuritySignalsFromText,
+  firstPolicyRejectionCode,
+  POLICY_REJECTION_CODES,
+} from "@/lib/security/security-signals";
 import { SessionManager } from "@/lib/session-manager";
 import { SessionTracker } from "@/lib/session-tracker";
 import { CODEX_1M_CONTEXT_TOKEN_THRESHOLD } from "@/lib/special-attributes";
@@ -1027,11 +1031,15 @@ async function finalizeDeferredStreamingFinalizationIfNeeded(
 ): Promise<FinalizeDeferredStreamingResult> {
   const meta = consumeDeferredStreamingFinalization(session);
   const provider = session.provider;
-  const securitySignals = detectCyberSecuritySignalsFromText(allContent, preparsedSseEvents);
-  const isCyberPolicy = securitySignals.includes("cyber_policy");
-  if (isCyberPolicy) {
-    await containCyberPolicy(session);
+  const securitySignals = detectSecuritySignalsFromText(allContent, preparsedSseEvents);
+  // 极少数流可能同时携带多种策略拒绝信号：对每个确认的策略分别遏制
+  // （封锁键与事件类型按策略独立）；下游判定取第一个命中（cyber 优先）。
+  for (const policy of POLICY_REJECTION_CODES) {
+    if (securitySignals.includes(policy)) {
+      await containPolicyRejection(session, policy);
+    }
   }
+  const rejectedPolicy = firstPolicyRejectionCode(securitySignals);
   if (securitySignals.includes("cyber_safety_check")) {
     await recordSecurityEventBestEffort(
       session.messageContext?.user?.id,
@@ -1102,11 +1110,11 @@ async function finalizeDeferredStreamingFinalizationIfNeeded(
   let statusCodeInferred = false;
   let statusCodeInferenceMatcherId: string | undefined;
   if (detected.isError) {
-    const inferred = isCyberPolicy ? null : inferUpstreamErrorStatusCodeFromText(allContent);
-    if (isCyberPolicy) {
+    const inferred = rejectedPolicy ? null : inferUpstreamErrorStatusCodeFromText(allContent);
+    if (rejectedPolicy) {
       effectiveStatusCode = 400;
       statusCodeInferred = true;
-      statusCodeInferenceMatcherId = "cyber_policy";
+      statusCodeInferenceMatcherId = rejectedPolicy;
     } else if (inferred) {
       effectiveStatusCode = inferred.statusCode;
       statusCodeInferred = true;
@@ -1114,8 +1122,8 @@ async function finalizeDeferredStreamingFinalizationIfNeeded(
     } else {
       effectiveStatusCode = 502;
     }
-    errorMessage = isCyberPolicy
-      ? "cyber_policy"
+    errorMessage = rejectedPolicy
+      ? rejectedPolicy
       : detected.detail
         ? `${detected.code}: ${detected.detail}`
         : detected.code;
@@ -1141,7 +1149,7 @@ async function finalizeDeferredStreamingFinalizationIfNeeded(
 
   const shouldClearSessionBindingOnFailure =
     (!streamEndedNormally && !clientAbortCompleteSuccess) ||
-    (detected.isError && !isCyberPolicy) ||
+    (detected.isError && !rejectedPolicy) ||
     (upstreamStatusCode >= 400 && errorMessage !== null);
 
   if ((!meta || !provider) && shouldClearSessionBindingOnFailure) {
@@ -1256,8 +1264,9 @@ async function finalizeDeferredStreamingFinalizationIfNeeded(
   }
 
   if (detected.isError) {
-    if (isCyberPolicy) {
-      logger.warn("[ResponseHandler] SSE completed with cyber policy rejection", {
+    if (rejectedPolicy) {
+      logger.warn("[ResponseHandler] SSE completed with policy rejection", {
+        policy: rejectedPolicy,
         providerId: meta.providerId,
         providerName: meta.providerName,
         upstreamStatusCode: meta.upstreamStatusCode,
@@ -1270,7 +1279,7 @@ async function finalizeDeferredStreamingFinalizationIfNeeded(
         attemptNumber: meta.attemptNumber,
         statusCode: effectiveStatusCode,
         statusCodeInferred,
-        errorMessage: "cyber_policy",
+        errorMessage: rejectedPolicy,
       });
 
       return {

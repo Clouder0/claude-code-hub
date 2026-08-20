@@ -1,14 +1,14 @@
 import { describe, expect, test, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
-  isSessionCyberBlocked: vi.fn(async () => false),
+  findSessionBlockPolicy: vi.fn(async () => null),
 }));
 
-vi.mock("@/lib/security/cyber-containment", () => ({
-  isSessionCyberBlocked: mocks.isSessionCyberBlocked,
+vi.mock("@/lib/security/policy-containment", () => ({
+  findSessionBlockPolicy: mocks.findSessionBlockPolicy,
 }));
 
-// All other guard steps pass through so the cyberBlock step is the only decision point.
+// All other guard steps pass through so the policyBlock step is the only decision point.
 vi.mock("@/app/v1/_lib/proxy/auth-guard", () => ({
   ProxyAuthenticator: { ensure: async () => null },
 }));
@@ -46,9 +46,9 @@ vi.mock("@/app/v1/_lib/proxy/message-service", () => ({
   ProxyMessageService: { ensureContext: async () => {} },
 }));
 
-describe("GuardPipeline cyberBlock step", () => {
-  test("rejects a blocked session with the structured cyber_policy error before provider selection", async () => {
-    mocks.isSessionCyberBlocked.mockResolvedValueOnce(true);
+describe("GuardPipeline policyBlock step", () => {
+  test("rejects a cyber-blocked session with the structured cyber_policy error before provider selection", async () => {
+    mocks.findSessionBlockPolicy.mockResolvedValueOnce("cyber_policy");
 
     const { GuardPipelineBuilder, RequestType } = await import(
       "@/app/v1/_lib/proxy/guard-pipeline"
@@ -65,11 +65,53 @@ describe("GuardPipeline cyberBlock step", () => {
     expect(response?.status).toBe(400);
     const body = await response?.json();
     expect(body.error.code).toBe("cyber_policy");
-    expect(mocks.isSessionCyberBlocked).toHaveBeenCalledWith("sess_blocked");
+    expect(mocks.findSessionBlockPolicy).toHaveBeenCalledWith("sess_blocked");
+  });
+
+  test("rejects a bio-blocked session with the structured bio_policy error", async () => {
+    mocks.findSessionBlockPolicy.mockResolvedValueOnce("bio_policy");
+
+    const { GuardPipelineBuilder, RequestType } = await import(
+      "@/app/v1/_lib/proxy/guard-pipeline"
+    );
+    const pipeline = GuardPipelineBuilder.fromRequestType(RequestType.CHAT);
+
+    const session = {
+      isProbeRequest: () => false,
+      sessionId: "sess_bio_blocked",
+    } as never;
+
+    const response = await pipeline.run(session);
+    expect(response).not.toBeNull();
+    expect(response?.status).toBe(400);
+    const body = await response?.json();
+    expect(body.error.code).toBe("bio_policy");
+  });
+
+  test.each([
+    "cyber_policy",
+    "bio_policy",
+  ] as const)("a %s-blocked session on the raw safe session pipeline is also rejected", async (policy) => {
+    mocks.findSessionBlockPolicy.mockResolvedValueOnce(policy);
+
+    const { GuardPipelineBuilder, RequestType } = await import(
+      "@/app/v1/_lib/proxy/guard-pipeline"
+    );
+    const pipeline = GuardPipelineBuilder.fromRequestType(RequestType.COUNT_TOKENS);
+
+    const session = {
+      isProbeRequest: () => false,
+      sessionId: "sess_raw",
+    } as never;
+
+    const response = await pipeline.run(session);
+    expect(response).not.toBeNull();
+    const body = await response?.json();
+    expect(body.error.code).toBe(policy);
   });
 
   test("passes an unblocked session through", async () => {
-    mocks.isSessionCyberBlocked.mockResolvedValueOnce(false);
+    mocks.findSessionBlockPolicy.mockResolvedValueOnce(null);
 
     const { GuardPipelineBuilder, RequestType } = await import(
       "@/app/v1/_lib/proxy/guard-pipeline"
@@ -98,6 +140,6 @@ describe("GuardPipeline cyberBlock step", () => {
 
     const response = await pipeline.run(session);
     expect(response).toBeNull();
-    expect(mocks.isSessionCyberBlocked).not.toHaveBeenCalled();
+    expect(mocks.findSessionBlockPolicy).not.toHaveBeenCalled();
   });
 });

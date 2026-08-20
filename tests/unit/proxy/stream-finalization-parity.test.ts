@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { detectCyberSecuritySignalsFromText } from "@/lib/security/cyber-security-signals";
+import { detectSecuritySignalsFromText } from "@/lib/security/security-signals";
 import { isSSEText, parseSSEData, parseSSEDataForFinalization } from "@/lib/utils/sse";
 import {
   parseServiceTierFromResponseText,
@@ -63,6 +63,21 @@ const codexFailedCyber = buildSse([
     data: {
       type: "response.failed",
       response: { error: { code: "cyber_policy", message: "blocked" } },
+    },
+  },
+]);
+
+const codexFailedBio = buildSse([
+  {
+    event: "response.failed",
+    data: {
+      type: "response.failed",
+      response: {
+        error: {
+          code: "bio_policy",
+          message: "This content was flagged for possible biological risk.",
+        },
+      },
     },
   },
 ]);
@@ -168,6 +183,7 @@ const nonSseJsonBody = JSON.stringify({
 const sseFixtures: Array<[string, string]> = [
   ["codex normal completion", codexNormal],
   ["codex response.failed cyber_policy", codexFailedCyber],
+  ["codex response.failed bio_policy", codexFailedBio],
   ["codex safety_buffering", codexSafetyBuffering],
   ["openai chat completions stream", openaiChatStream],
   ["anthropic messages stream", anthropicStream],
@@ -215,10 +231,10 @@ describe("stream finalization shared events parity", () => {
     );
   });
 
-  test.each(sseFixtures)("cyber signals parity: %s", (_name, text) => {
+  test.each(sseFixtures)("security signals parity: %s", (_name, text) => {
     const events = parseSSEDataForFinalization(text);
-    expect(detectCyberSecuritySignalsFromText(text, events)).toEqual(
-      detectCyberSecuritySignalsFromText(text)
+    expect(detectSecuritySignalsFromText(text, events)).toEqual(
+      detectSecuritySignalsFromText(text)
     );
   });
 
@@ -234,17 +250,17 @@ describe("stream finalization shared events parity", () => {
       parseServiceTierFromResponseText(codexNormal, parseSSEDataForFinalization(codexNormal))
     ).toBe("priority");
     expect(
-      detectCyberSecuritySignalsFromText(
-        codexFailedCyber,
-        parseSSEDataForFinalization(codexFailedCyber)
-      )
+      detectSecuritySignalsFromText(codexFailedCyber, parseSSEDataForFinalization(codexFailedCyber))
     ).toContain("cyber_policy");
     expect(
-      detectCyberSecuritySignalsFromText(
+      detectSecuritySignalsFromText(
         codexSafetyBuffering,
         parseSSEDataForFinalization(codexSafetyBuffering)
       )
     ).toContain("cyber_safety_check");
+    expect(
+      detectSecuritySignalsFromText(codexFailedBio, parseSSEDataForFinalization(codexFailedBio))
+    ).toContain("bio_policy");
   });
 
   test("non-SSE JSON body keeps legacy path (events must not be passed for non-SSE text)", () => {
