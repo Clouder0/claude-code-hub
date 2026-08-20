@@ -10,7 +10,7 @@ import {
 } from "@/lib/billing/openai-usage-accounting";
 import { getEnvConfig } from "@/lib/config/env.schema";
 import { getCachedSystemSettings } from "@/lib/config/system-settings-cache";
-import { emitProxyLangfuseTrace } from "@/lib/langfuse/emit-proxy-trace";
+import { emitProxyLangfuseTrace, isLangfuseTraceEnabled } from "@/lib/langfuse/emit-proxy-trace";
 import { logger } from "@/lib/logger";
 import { requestCloudPriceTableSync } from "@/lib/price-sync/cloud-price-updater";
 import { ProxyStatusTracker } from "@/lib/proxy-status-tracker";
@@ -196,7 +196,34 @@ export class BoundedStreamTextAccumulator {
       chunkCount: this.chunksSeen,
     };
 
+    // 快照生成后原始 chunk 字节不再被需要：accumulator 对象会活到整个
+    // finalization 结算 await 链结束，保留 chunk 数组等于让 ≤10MB 字节陪跑。
+    // 计数器（totalBytes/chunksSeen）与快照字段不受影响；finish 后若仍有
+    // 数据到达（异常路径），pushBytes 在清空后的数组上继续累积，语义不变。
+    this.releaseChunkMemory();
+
     return this.finishedSnapshot;
+  }
+
+  /** 释放已快照化的原始 chunk 字节（计数器与 finishedSnapshot 保留）。 */
+  private releaseChunkMemory(): void {
+    this.headChunks.length = 0;
+    this.tailChunks.length = 0;
+    this.tailChunkBytes.length = 0;
+    this.tailHead = 0;
+    this.headBufferedBytes = 0;
+    this.tailBufferedBytes = 0;
+  }
+
+  /**
+   * 释放快照缓存的文本引用。finalization 的文本阶段（cyber/usage/tier/
+   * 缓存键/计费检测）结束后调用，让 ≤10MB 的响应文本在尾部结算 await 链
+   * 期间可被回收。chunkCount 计数器保留（getCollectedChunkCount 回退到
+   * 计数器仍正确）。调用后不得再依赖 finish() 重建快照（现有调用点仅在
+   * finalize 前使用一次）。
+   */
+  releaseRetainedText(): void {
+    this.finishedSnapshot = null;
   }
 
   private createSnapshotText(): string {
@@ -3074,7 +3101,11 @@ export class ProxyResponseHandler {
         const streamErrorMessage = finalized.errorMessage;
         const providerIdForPersistence = finalized.providerIdForPersistence;
 
-        const streamSnapshot = lastStreamTextSnapshot;
+        let streamSnapshot = lastStreamTextSnapshot;
+        // langfuse 开启时尾部 emit 仍需全量文本（其内部自行截断）；关闭时
+        // 文本阶段结束后即可释放。判定与 emitProxyLangfuseTrace 的入口早退
+        // 共用 isLangfuseTraceEnabled，单一事实源。
+        const retainTextForLangfuse = isLangfuseTraceEnabled();
 
         // 存储响应体到 Redis（5分钟过期）。截断后的统计快照不是完整正文，不能伪装成完整调试正文落盘。
         if (
@@ -3197,6 +3228,47 @@ export class ProxyResponseHandler {
           effectiveStatusCode,
           allContent
         );
+
+        // Anthropic 流式 thinking signature 模型检测(优先于明文 model 字段)。
+        // 经由 getBillingRequestMessage 读取：高并发模式下请求体已在门控提交后
+        // 释放为投影（投影保留了 thinking 配置），语义与读原树一致。
+        // 这两个检测只读流头部事件且为纯 CPU——上移到结算 await 链之前，
+        // 使全量文本可以在此后统一释放。
+        const currentRequestedModel = session.getCurrentModel();
+        const thinkingActuallyEnabled = isThinkingEnabled(session.getBillingRequestMessage() ?? {});
+        const anthropicModelDetection = resolveAnthropicStreamActualResponseModel({
+          providerType: provider.providerType,
+          requestedModel: currentRequestedModel,
+          thinkingEnabled: thinkingActuallyEnabled,
+          responseStreamText: allContent,
+        });
+        if (anthropicModelDetection.source) {
+          session.addSpecialSetting({
+            type: "thinking_signature_model_detection",
+            scope: "response",
+            hit: anthropicModelDetection.source === "fallback_no_signature_with_thinking",
+            source: anthropicModelDetection.source,
+            extractedModel: anthropicModelDetection.actualResponseModel,
+            signatureFound: anthropicModelDetection.source === "signature",
+            thinkingEnabled: thinkingActuallyEnabled,
+            requestedModel: currentRequestedModel,
+          });
+        }
+        const finalActualResponseModel = anthropicModelDetection.source
+          ? anthropicModelDetection.actualResponseModel
+          : extractActualResponseModelForProvider(provider.providerType, true, allContent);
+
+        // ★ 文本阶段结束：此后只剩小字段结算与落库。断开全量文本的全部强引用
+        //（frame 绑定 / 快照引用 / accumulator 缓存），让 ≤10MB 文本在尾部
+        // await 链（计费写库、Redis、详情落盘）期间可回收。HC 模式下 Redis
+        // 存储分支已在上方跳过；langfuse 关闭时其 emit 入口直接返回（同一
+        // 环境变量判定），开启时保留文本供其截断消费。
+        if (!retainTextForLangfuse) {
+          allContent = "";
+          streamSnapshot = null;
+          lastStreamTextSnapshot = null;
+          streamTextAccumulator.releaseRetainedText();
+        }
 
         const billing = sessionBillingInputs(session, provider, priorityServiceTierApplied);
         const costUpdateResult = await updateRequestCostFromUsage(
@@ -3323,33 +3395,6 @@ export class ProxyResponseHandler {
             );
           }
         }
-
-        // Anthropic 流式 thinking signature 模型检测(优先于明文 model 字段)。
-        // 经由 getBillingRequestMessage 读取：高并发模式下请求体已在门控提交后
-        // 释放为投影（投影保留了 thinking 配置），语义与读原树一致。
-        const currentRequestedModel = session.getCurrentModel();
-        const thinkingActuallyEnabled = isThinkingEnabled(session.getBillingRequestMessage() ?? {});
-        const anthropicModelDetection = resolveAnthropicStreamActualResponseModel({
-          providerType: provider.providerType,
-          requestedModel: currentRequestedModel,
-          thinkingEnabled: thinkingActuallyEnabled,
-          responseStreamText: allContent,
-        });
-        if (anthropicModelDetection.source) {
-          session.addSpecialSetting({
-            type: "thinking_signature_model_detection",
-            scope: "response",
-            hit: anthropicModelDetection.source === "fallback_no_signature_with_thinking",
-            source: anthropicModelDetection.source,
-            extractedModel: anthropicModelDetection.actualResponseModel,
-            signatureFound: anthropicModelDetection.source === "signature",
-            thinkingEnabled: thinkingActuallyEnabled,
-            requestedModel: currentRequestedModel,
-          });
-        }
-        const finalActualResponseModel = anthropicModelDetection.source
-          ? anthropicModelDetection.actualResponseModel
-          : extractActualResponseModelForProvider(provider.providerType, true, allContent);
 
         // 保存扩展信息（status code, tokens, provider chain）
         await updateMessageRequestDetails(messageContext.id, {

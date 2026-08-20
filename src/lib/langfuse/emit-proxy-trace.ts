@@ -98,6 +98,15 @@ function buildLangfuseSessionSnapshot(session: ProxySession): ProxySession {
 }
 
 /**
+ * Langfuse trace 是否启用（环境变量双钥匙判定）。
+ * emitProxyLangfuseTrace 的入口早退与调用方的文本保留决策（finalization
+ * 提前释放全量响应文本）共用此单一事实源，避免两处条件漂移。
+ */
+export function isLangfuseTraceEnabled(): boolean {
+  return !!(process.env.LANGFUSE_PUBLIC_KEY && process.env.LANGFUSE_SECRET_KEY);
+}
+
+/**
  * 异步发送代理请求的 Langfuse trace。
  *
  * 这里保持 fire-and-forget，避免观测系统故障影响代理响应。
@@ -106,7 +115,7 @@ export function emitProxyLangfuseTrace(
   session: ProxySession,
   data: EmitProxyLangfuseTraceData
 ): void {
-  if (!process.env.LANGFUSE_PUBLIC_KEY || !process.env.LANGFUSE_SECRET_KEY) return;
+  if (!isLangfuseTraceEnabled()) return;
 
   // 必须在异步 import 之前截断，避免动态加载/SDK 发送期间闭包继续强引用完整大响应。
   const responseText = truncateResponseTextForLangfuse(data.responseText);

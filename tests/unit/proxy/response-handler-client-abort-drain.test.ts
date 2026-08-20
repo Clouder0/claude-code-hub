@@ -39,6 +39,9 @@ vi.mock("@/lib/config/system-settings-cache", () => ({
 
 vi.mock("@/lib/langfuse/emit-proxy-trace", () => ({
   emitProxyLangfuseTrace: vi.fn(),
+  // emit 被 mock 后不再走真实 env 早退；finalization 的文本保留决策依赖
+  // 同一开关，mock 为开启使断言能读到 responseText
+  isLangfuseTraceEnabled: () => true,
 }));
 
 vi.mock("@/lib/logger", () => ({
