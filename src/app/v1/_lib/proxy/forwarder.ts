@@ -3035,8 +3035,11 @@ export class ProxyForwarder {
         } else {
           // scan-first 透传：原实现每次 attempt 都为剥离 "_" 前缀键重建整棵请求树
           // （多 MB body 下是可观的 CPU+GC 开销，且每次重试/换供应商重付）。
-          // 树中无私有键、且后续没有任何会改写 body 的步骤时，按引用透传——
-          // 序列化字节与重建路径完全一致；命中任一改写者即回退原重建路径。
+          // 树中无私有键、且本 attempt 内没有步骤会改写 body 时，用**顶层浅拷贝**
+          // 透传——spread 保持键序，序列化字节与重建路径逐字节一致；嵌套大数组
+          // 按引用共享（不深克隆，收益保留）。浅拷贝隔离的是跨 attempt 的顶层
+          // 改写者（ModelRedirector 在每次 doForward 开头原地写 message.model），
+          // 防止其污染上一个 attempt 已缓存的计费视图。
           const mayMutateDownstream = await forwardPreprocessingMayMutateBody(
             session,
             provider,
@@ -3046,7 +3049,7 @@ export class ProxyForwarder {
           const filteredMessage = (
             mayMutateDownstream || hasPrivateParameters(session.request.message)
               ? filterPrivateParameters(session.request.message)
-              : session.request.message
+              : { ...session.request.message }
           ) as Record<string, unknown>;
 
           // 将 metadata.user_id 注入放在私有参数过滤之后，避免受过滤逻辑影响。

@@ -155,7 +155,7 @@ describe("ProxyForwarder - private parameter scan-first passthrough", () => {
     mocks.hasFinalBodyFilters.mockImplementation(async () => false);
   });
 
-  it("干净树按引用透传：转发的字节与 JSON.stringify(message) 一致且不克隆", async () => {
+  it("干净树以浅拷贝透传：字节一致、嵌套共享无深克隆、顶层改写不污染计费视图", async () => {
     const provider = createCodexProvider();
     const session = createCodexSession();
     const message = {
@@ -173,8 +173,15 @@ describe("ProxyForwarder - private parameter scan-first passthrough", () => {
 
     expect(captured).toBe(JSON.stringify(message));
     expect(session.forwardedRequestBody).toBe(captured);
-    // 引用透传：billing 缓存与原始树是同一对象，没有重建副本
-    expect(session.getBillingRequestMessage()).toBe(message);
+
+    const billingView = session.getBillingRequestMessage() as Record<string, unknown>;
+    // 顶层是浅拷贝（隔离跨 attempt 的 ModelRedirector 顶层 model 改写）
+    expect(billingView).not.toBe(message);
+    // 嵌套结构按引用共享：没有整树深克隆
+    expect(billingView.input).toBe(message.input);
+    // 透传后对原树的顶层改写不影响已缓存的计费视图
+    message.model = "mutated-after-forward";
+    expect(billingView.model).toBe("gpt-5.6-sol");
   });
 
   it("含下划线键时仍走重建过滤：上游收不到私有键，原始树不被污染", async () => {
