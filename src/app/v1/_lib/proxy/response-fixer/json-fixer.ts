@@ -2,6 +2,9 @@ import type { FixResult } from "./types";
 
 const UTF8_DECODER = new TextDecoder();
 
+// 字符串扫描的有界窗口：窗口内未遇到引号/反斜杠才切换到原生 indexOf
+const STRING_SCAN_WINDOW = 256;
+
 function isWhitespace(byte: number): boolean {
   return byte === 0x20 || byte === 0x09 || byte === 0x0a || byte === 0x0d;
 }
@@ -58,35 +61,53 @@ export type JsonFixerConfig = {
  */
 export function hasRepairableArtifacts(data: Uint8Array, maxDepth: number): boolean {
   const stack: number[] = [];
-  let inString = false;
-  let escapeNext = false;
   let depth = 0;
   // 最近一个结构性（字符串外、非空白）字节，用于尾逗号/尾冒号检测
   let lastSignificant = -1;
+  const n = data.length;
+  let i = 0;
 
-  for (let i = 0; i < data.length; i += 1) {
+  while (i < n) {
     const byte = data[i];
 
-    if (escapeNext) {
-      escapeNext = false;
+    if (isWhitespace(byte)) {
+      i += 1;
       continue;
     }
-
-    if (inString) {
-      if (byte === 0x5c /* \ */) {
-        escapeNext = true;
-      } else if (byte === 0x22 /* " */) {
-        inString = false;
-        lastSignificant = byte;
-      }
-      continue;
-    }
-
-    if (isWhitespace(byte)) continue;
 
     if (byte === 0x22 /* " */) {
-      inString = true;
       lastSignificant = byte;
+      i += 1;
+      // 字符串扫描混合策略：先做有界逐字节窗口（短字符串调用开销最低），
+      // 窗口内未遇到终止符再切换原生 indexOf 跳跃（长字符串是大头时收益显著）。
+      for (;;) {
+        const windowEnd = Math.min(n, i + STRING_SCAN_WINDOW);
+        let quoteAt = -1;
+        let backslashAt = -1;
+        for (let j = i; j < windowEnd; j += 1) {
+          const b = data[j];
+          if (b === 0x22 /* " */) {
+            quoteAt = j;
+            break;
+          }
+          if (b === 0x5c /* \ */) {
+            backslashAt = j;
+            break;
+          }
+        }
+        if (quoteAt < 0 && backslashAt < 0) {
+          if (windowEnd >= n) return true; // 扫到末尾仍未闭合
+          quoteAt = data.indexOf(0x22 /* " */, i);
+          backslashAt = data.indexOf(0x5c /* \ */, i);
+          if (quoteAt < 0 && backslashAt < 0) return true; // 字符串未闭合
+        }
+        if (backslashAt < 0 || (quoteAt >= 0 && quoteAt < backslashAt)) {
+          i = quoteAt + 1; // 引号先到：字符串正常闭合
+          break;
+        }
+        if (backslashAt + 1 >= n) return true; // 末尾悬空转义
+        i = backslashAt + 2; // 吞掉转义字符
+      }
       continue;
     }
 
@@ -95,6 +116,7 @@ export function hasRepairableArtifacts(data: Uint8Array, maxDepth: number): bool
       if (depth > maxDepth) return true;
       stack.push(0x7d /* } */);
       lastSignificant = byte;
+      i += 1;
       continue;
     }
 
@@ -103,6 +125,7 @@ export function hasRepairableArtifacts(data: Uint8Array, maxDepth: number): bool
       if (depth > maxDepth) return true;
       stack.push(0x5d /* ] */);
       lastSignificant = byte;
+      i += 1;
       continue;
     }
 
@@ -113,14 +136,16 @@ export function hasRepairableArtifacts(data: Uint8Array, maxDepth: number): bool
       stack.pop();
       depth = Math.max(0, depth - 1);
       lastSignificant = byte;
+      i += 1;
       continue;
     }
 
     lastSignificant = byte;
+    i += 1;
   }
 
-  // EOF 痕迹：悬空转义 / 未闭合字符串 / 未闭合结构 / 尾冒号 / 尾逗号
-  if (escapeNext || inString || stack.length > 0) return true;
+  // EOF 痕迹：未闭合结构 / 尾冒号 / 尾逗号
+  if (stack.length > 0) return true;
   if (lastSignificant === 0x3a /* : */ || lastSignificant === 0x2c /* , */) return true;
 
   return false;
