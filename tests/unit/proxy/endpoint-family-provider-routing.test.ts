@@ -36,6 +36,12 @@ const ENDPOINT_PROVIDER_CASES = [
     expectedProviderType: "codex",
   },
   {
+    id: "codex-alpha-search",
+    path: "/v1/alpha/search",
+    requestedModel: "",
+    expectedProviderType: "codex",
+  },
+  {
     id: "response-resources",
     path: "/v1/responses/resp_123/input_items",
     requestedModel: "",

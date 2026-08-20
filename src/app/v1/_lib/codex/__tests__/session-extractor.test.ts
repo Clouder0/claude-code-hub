@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { extractCodexSessionId } from "../session-extractor";
+import { extractCodexAlphaSearchSessionId, extractCodexSessionId } from "../session-extractor";
 
 describe("Codex session extractor", () => {
   test("extracts from header session_id", () => {
@@ -153,5 +153,30 @@ describe("Codex session extractor", () => {
     const result = extractCodexSessionId(new Headers(), {});
     expect(result.sessionId).toBe(null);
     expect(result.source).toBe(null);
+  });
+
+  test("extracts alpha search identity only from top-level id", () => {
+    const id = "019b82ff-08ff-75a3-a203-7e10274fdbd8";
+
+    expect(extractCodexAlphaSearchSessionId({ id })).toEqual({
+      sessionId: id,
+      source: "body_alpha_search_id",
+    });
+    expect(extractCodexSessionId(new Headers(), { id })).toEqual({
+      sessionId: null,
+      source: null,
+    });
+  });
+
+  test.each([
+    {},
+    { id: "short" },
+    { id: 123 },
+    { id: "a".repeat(257) },
+  ])("rejects invalid alpha search identity %#", (body) => {
+    expect(extractCodexAlphaSearchSessionId(body)).toEqual({
+      sessionId: null,
+      source: null,
+    });
   });
 });

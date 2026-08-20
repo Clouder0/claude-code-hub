@@ -5,6 +5,9 @@ import { resolveKeyUserConcurrentSessionLimits } from "@/lib/rate-limit/concurre
 import { headersToSanitizedObject, SessionManager } from "@/lib/session-manager";
 import { SessionTracker } from "@/lib/session-tracker";
 import { completeCodexSessionIdentifiers } from "../codex/session-completer";
+import { extractCodexAlphaSearchSessionId } from "../codex/session-extractor";
+import { isAlphaSearchEndpointPath } from "./endpoint-paths";
+import { ProxyError } from "./errors";
 import type { ProxySession } from "./session";
 
 const CLIENT_HEADER_SNAPSHOT_BLOCKLIST = [
@@ -103,8 +106,14 @@ export class ProxySessionGuard {
         systemSettings.enableClaudeMetadataUserIdInjection ?? true;
       const requestMessage = session.request.message as Record<string, unknown>;
       const isCodexRequest = Array.isArray(requestMessage.input);
+      const isAlphaSearchRequest = isAlphaSearchEndpointPath(session.getManagedEndpoint());
 
-      if (!allowRawSessionContext && codexCompletionEnabled && isCodexRequest) {
+      if (
+        !isAlphaSearchRequest &&
+        !allowRawSessionContext &&
+        codexCompletionEnabled &&
+        isCodexRequest
+      ) {
         const completion = await completeCodexSessionIdentifiers({
           keyId,
           headers: session.headers,
@@ -133,11 +142,17 @@ export class ProxySessionGuard {
         systemSettings.interceptAnthropicWarmupRequests;
 
       // 1. 尝试从客户端提取 session_id（兼容 metadata.user_id / metadata.session_id）
-      const clientSessionId = SessionManager.extractClientSessionId(
-        session.request.message,
-        session.headers,
-        session.userAgent
-      );
+      const clientSessionId = isAlphaSearchRequest
+        ? extractCodexAlphaSearchSessionId(requestMessage).sessionId
+        : SessionManager.extractClientSessionId(
+            session.request.message,
+            session.headers,
+            session.userAgent
+          );
+
+      if (isAlphaSearchRequest && !clientSessionId) {
+        throw new ProxyError("Alpha Search requires a valid session id", 400);
+      }
 
       // 2. 获取 messages 数组
       const messages = session.getMessages();
@@ -276,6 +291,9 @@ export class ProxySessionGuard {
       );
     } catch (error) {
       logger.error("[ProxySessionGuard] Failed to assign session:", error);
+      if (isAlphaSearchEndpointPath(session.getManagedEndpoint()) && error instanceof ProxyError) {
+        throw error;
+      }
       // 降级：生成新 session（不阻塞请求）
       const fallbackSessionId = SessionManager.generateSessionId();
       session.setSessionId(fallbackSessionId);

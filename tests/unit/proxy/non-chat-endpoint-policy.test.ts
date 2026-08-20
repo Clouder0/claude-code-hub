@@ -53,4 +53,14 @@ describe("non-chat endpoint policy", () => {
     );
     expect(embeddingsPolicy.endpointPoolStrictness).toBe("inherit");
   });
+
+  test("alpha search does not inherit raw cross-provider fallback", () => {
+    expect(resolveEndpointPolicy(V1_ENDPOINT_PATHS.ALPHA_SEARCH)).toEqual(
+      expect.objectContaining({
+        kind: "alpha_search",
+        allowRawCrossProviderFallback: false,
+        providerSelection: "sticky_only",
+      })
+    );
+  });
 });

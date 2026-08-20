@@ -58,6 +58,7 @@ describe("T11: raw passthrough endpoint parity", () => {
       bypassSpecialSettings: true,
       bypassResponseRectifier: true,
       endpointPoolStrictness: "strict",
+      providerSelection: "normal",
     };
 
     expect(countTokensPolicy).toEqual(expectedPolicy);
@@ -198,6 +199,7 @@ describe("T13: non-target regression (default policy preserved)", () => {
     bypassSpecialSettings: false,
     bypassResponseRectifier: false,
     endpointPoolStrictness: "inherit",
+    providerSelection: "normal",
   };
 
   test("/v1/messages retains full default policy", () => {

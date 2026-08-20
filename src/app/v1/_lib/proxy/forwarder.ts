@@ -1727,7 +1727,7 @@ export class ProxyForwarder {
           }
 
           // ========== 成功分支 ==========
-          if (activeEndpoint.endpointId != null) {
+          if (shouldAccountCircuitBreaker && activeEndpoint.endpointId != null) {
             await recordEndpointSuccess(activeEndpoint.endpointId);
           }
 
@@ -1736,7 +1736,10 @@ export class ProxyForwarder {
           }
 
           // ⭐ 成功后绑定 session 到供应商（智能绑定策略）
-          if (session.sessionId) {
+          if (
+            session.sessionId &&
+            ProxyForwarder.getEndpointPolicy(session).providerSelection !== "sticky_only"
+          ) {
             // 使用智能绑定策略（故障转移优先 + 稳定性优化）
             const result = await SessionManager.updateSessionBindingSmart(
               session.sessionId,
@@ -1823,7 +1826,7 @@ export class ProxyForwarder {
             );
           }
 
-          if (activeEndpoint.endpointId != null) {
+          if (shouldAccountCircuitBreaker && activeEndpoint.endpointId != null) {
             if (isTimeoutError || errorCategory === ErrorCategory.SYSTEM_ERROR) {
               await recordEndpointFailure(activeEndpoint.endpointId, lastError);
             }
@@ -5184,7 +5187,12 @@ export class ProxyForwarder {
   }
 
   private static async clearSessionProviderBinding(session: ProxySession): Promise<void> {
-    if (!session.sessionId) return;
+    if (
+      !session.sessionId ||
+      ProxyForwarder.getEndpointPolicy(session).providerSelection === "sticky_only"
+    ) {
+      return;
+    }
     await SessionManager.clearSessionProvider(session.sessionId);
   }
 

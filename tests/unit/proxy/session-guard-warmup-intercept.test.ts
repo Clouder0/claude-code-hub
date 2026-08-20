@@ -15,6 +15,16 @@ const storeSessionInfoMock = vi.fn(async () => undefined);
 const generateSessionIdMock = vi.fn();
 
 const trackSessionMock = vi.fn(async () => undefined);
+const completeCodexSessionIdentifiersMock = vi.fn(async () => ({
+  applied: false,
+  action: "none" as const,
+  source: null,
+  sessionId: null,
+}));
+
+vi.mock("@/app/v1/_lib/codex/session-completer", () => ({
+  completeCodexSessionIdentifiers: completeCodexSessionIdentifiersMock,
+}));
 
 vi.mock("@/lib/config", () => ({
   getCachedSystemSettings: () => getCachedSystemSettingsMock(),
@@ -112,6 +122,9 @@ function createMockSession(overrides: Partial<ProxySession> = {}): ProxySession 
     getEndpointPolicy() {
       return resolveEndpointPolicy("/v1/messages");
     },
+    getManagedEndpoint() {
+      return "/v1/messages";
+    },
     isWarmupRequest() {
       return true;
     },
@@ -133,6 +146,39 @@ beforeEach(() => {
 });
 
 describe("ProxySessionGuard：warmup 拦截不应计入并发会话", () => {
+  test("Alpha Search 使用 top-level id，并把它交给现有 session 所有权链", async () => {
+    const ProxySessionGuard = await loadGuard();
+    const id = "019b82ff-08ff-75a3-a203-7e10274fdbd8";
+    const session = createMockSession({
+      request: { message: { id, input: [] }, model: "gpt-5" },
+      originalFormat: "response",
+      getManagedEndpoint: () => "/v1/alpha/search",
+      getEndpointPolicy: () => resolveEndpointPolicy("/v1/alpha/search"),
+      isWarmupRequest: () => false,
+    });
+
+    await ProxySessionGuard.ensure(session);
+
+    expect(getOrCreateSessionIdMock).toHaveBeenCalledWith(1, [], id);
+    expect(completeCodexSessionIdentifiersMock).not.toHaveBeenCalled();
+    expect(session.sessionId).toBe("session_assigned");
+  });
+
+  test("Alpha Search 非法 id 保留为 400，不得降级生成新 session", async () => {
+    const ProxySessionGuard = await loadGuard();
+    const session = createMockSession({
+      request: { message: { id: "short" }, model: "gpt-5" },
+      originalFormat: "response",
+      getManagedEndpoint: () => "/v1/alpha/search",
+      getEndpointPolicy: () => resolveEndpointPolicy("/v1/alpha/search"),
+      isWarmupRequest: () => false,
+    });
+
+    await expect(ProxySessionGuard.ensure(session)).rejects.toMatchObject({ statusCode: 400 });
+    expect(getOrCreateSessionIdMock).not.toHaveBeenCalled();
+    expect(generateSessionIdMock).not.toHaveBeenCalled();
+  });
+
   test("当 warmup 且开关开启时，不应调用 SessionTracker.trackSession", async () => {
     const ProxySessionGuard = await loadGuard();
     const session = createMockSession({ isWarmupRequest: () => true });

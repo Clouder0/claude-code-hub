@@ -5,6 +5,7 @@ export const V1_ENDPOINT_PATHS = {
   MESSAGES_COUNT_TOKENS: "/v1/messages/count_tokens",
   RESPONSES: "/v1/responses",
   RESPONSES_COMPACT: "/v1/responses/compact",
+  ALPHA_SEARCH: "/v1/alpha/search",
   CHAT_COMPLETIONS: "/v1/chat/completions",
   EMBEDDINGS: "/v1/embeddings",
   MODELS: "/v1/models",
@@ -15,6 +16,7 @@ export const STANDARD_ENDPOINT_PATHS = [
   V1_ENDPOINT_PATHS.MESSAGES_COUNT_TOKENS,
   V1_ENDPOINT_PATHS.RESPONSES,
   V1_ENDPOINT_PATHS.RESPONSES_COMPACT,
+  V1_ENDPOINT_PATHS.ALPHA_SEARCH,
   V1_ENDPOINT_PATHS.CHAT_COMPLETIONS,
   V1_ENDPOINT_PATHS.EMBEDDINGS,
   V1_ENDPOINT_PATHS.MODELS,
@@ -24,6 +26,7 @@ export const STRICT_STANDARD_ENDPOINT_PATHS = [
   V1_ENDPOINT_PATHS.MESSAGES,
   V1_ENDPOINT_PATHS.RESPONSES,
   V1_ENDPOINT_PATHS.RESPONSES_COMPACT,
+  V1_ENDPOINT_PATHS.ALPHA_SEARCH,
   V1_ENDPOINT_PATHS.CHAT_COMPLETIONS,
   V1_ENDPOINT_PATHS.EMBEDDINGS,
 ] as const;
@@ -55,6 +58,10 @@ export function isCountTokensEndpointPath(pathname: string): boolean {
 
 export function isResponseCompactEndpointPath(pathname: string): boolean {
   return normalizeEndpointPath(pathname) === V1_ENDPOINT_PATHS.RESPONSES_COMPACT;
+}
+
+export function isAlphaSearchEndpointPath(pathname: string): boolean {
+  return normalizeEndpointPath(pathname) === V1_ENDPOINT_PATHS.ALPHA_SEARCH;
 }
 
 export function toV1RoutePath(pathname: string): string {

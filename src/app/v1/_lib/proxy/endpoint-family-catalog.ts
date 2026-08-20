@@ -2,7 +2,7 @@ import { normalizeEndpointPath } from "./endpoint-paths";
 
 export type EndpointClientFormat = "response" | "openai" | "claude" | "gemini" | "gemini-cli";
 
-export type EndpointAccountingTier = "required_usage" | "optional_usage" | "none";
+export type EndpointAccountingTier = "required_usage" | "optional_usage" | "fixed_request" | "none";
 
 export interface EndpointFamily {
   readonly id: string;
@@ -101,6 +101,14 @@ const KNOWN_ENDPOINT_FAMILIES: readonly EndpointFamily[] = Object.freeze([
     modelRequired: false,
     rawPassthrough: true,
     match: (pathname) => pathname === "/v1/responses/compact",
+  },
+  {
+    id: "codex-alpha-search",
+    surface: "response",
+    accountingTier: "fixed_request",
+    modelRequired: false,
+    rawPassthrough: true,
+    match: (pathname) => pathname === "/v1/alpha/search",
   },
   {
     id: "response-execution",

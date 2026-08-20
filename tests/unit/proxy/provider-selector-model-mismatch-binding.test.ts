@@ -34,10 +34,15 @@ const rateLimitMocks = vi.hoisted(() => ({
   RateLimitService: {
     checkCostLimitsWithLease: vi.fn(async () => ({ allowed: true })),
     checkTotalCostLimit: vi.fn(async () => ({ allowed: true, current: 0 })),
+    checkAndTrackProviderSession: vi.fn(async () => ({ allowed: true, referenced: true })),
   },
 }));
 
 vi.mock("@/lib/rate-limit", () => rateLimitMocks);
+
+vi.mock("@/repository/provider-groups", () => ({
+  getGroupCostMultiplier: vi.fn(async () => 1.5),
+}));
 
 beforeEach(() => {
   vi.resetAllMocks();
@@ -90,6 +95,30 @@ function createOpusProvider(): Provider {
     totalCostResetAt: null,
     limitConcurrentSessions: 0,
   } as unknown as Provider;
+}
+
+function createCodexProvider(overrides: Partial<Provider> = {}): Provider {
+  return {
+    ...createOpusProvider(),
+    id: 1455,
+    name: "pirelay",
+    providerType: "codex",
+    ...overrides,
+  } as Provider;
+}
+
+function createAlphaSearchSession() {
+  return {
+    sessionId: "019b82ff-08ff-75a3-a203-7e10274fdbd8",
+    authState: { key: { id: 7, providerGroup: null }, user: { providerGroup: null } },
+    originalFormat: "response",
+    userAgent: "codex-cli",
+    getOriginalModel: () => null,
+    setProvider: vi.fn(),
+    addProviderToChain: vi.fn(),
+    recordProviderSessionRef: vi.fn(),
+    setGroupCostMultiplier: vi.fn(),
+  } as any;
 }
 
 describe("findReusable - model mismatch clears stale binding", () => {
@@ -238,5 +267,96 @@ describe("findReusable - model mismatch clears stale binding", () => {
     expect(sessionManagerMocks.SessionManager.clearSessionProvider).toHaveBeenCalledWith(
       "sess_variant"
     );
+  });
+});
+
+describe("alpha search sticky-only resolution", () => {
+  test("missing binding fails without clearing or searching the provider pool", async () => {
+    const { ProxyProviderResolver } = await import("@/app/v1/_lib/proxy/provider-selector");
+    const session = createAlphaSearchSession();
+
+    const response = await (ProxyProviderResolver as any).ensureStickyOnly(session);
+
+    expect(response.status).toBe(409);
+    expect(sessionManagerMocks.SessionManager.getSessionProvider).toHaveBeenCalledWith(
+      session.sessionId,
+      7
+    );
+    expect(sessionManagerMocks.SessionManager.clearSessionProvider).not.toHaveBeenCalled();
+    expect(providerRepositoryMocks.findAllProviders).not.toHaveBeenCalled();
+  });
+
+  test("unavailable bound provider fails in place without mutating its binding", async () => {
+    const { ProxyProviderResolver } = await import("@/app/v1/_lib/proxy/provider-selector");
+    const session = createAlphaSearchSession();
+    sessionManagerMocks.SessionManager.getSessionProvider.mockResolvedValueOnce(1455);
+    providerRepositoryMocks.findProviderById.mockResolvedValueOnce(
+      createCodexProvider({ isEnabled: false })
+    );
+
+    const response = await (ProxyProviderResolver as any).ensureStickyOnly(session);
+
+    expect(response.status).toBe(503);
+    expect(sessionManagerMocks.SessionManager.clearSessionProvider).not.toHaveBeenCalled();
+    expect(providerRepositoryMocks.findAllProviders).not.toHaveBeenCalled();
+    expect(session.setProvider).not.toHaveBeenCalled();
+  });
+
+  test("provider that disabled session reuse fails in place without mutating its binding", async () => {
+    const { ProxyProviderResolver } = await import("@/app/v1/_lib/proxy/provider-selector");
+    const session = createAlphaSearchSession();
+    const provider = createCodexProvider({ disableSessionReuse: true });
+    sessionManagerMocks.SessionManager.getSessionProvider.mockResolvedValueOnce(provider.id);
+    providerRepositoryMocks.findProviderById.mockResolvedValueOnce(provider);
+
+    const response = await (ProxyProviderResolver as any).ensureStickyOnly(session);
+
+    expect(response.status).toBe(503);
+    expect(sessionManagerMocks.SessionManager.clearSessionProvider).not.toHaveBeenCalled();
+    expect(providerRepositoryMocks.findAllProviders).not.toHaveBeenCalled();
+    expect(session.setProvider).not.toHaveBeenCalled();
+  });
+
+  test("selects the matching-key bound provider and retains normal limits", async () => {
+    const { ProxyProviderResolver } = await import("@/app/v1/_lib/proxy/provider-selector");
+    const session = createAlphaSearchSession();
+    const provider = createCodexProvider();
+    sessionManagerMocks.SessionManager.getSessionProvider.mockResolvedValueOnce(provider.id);
+    providerRepositoryMocks.findProviderById.mockResolvedValueOnce(provider);
+
+    const response = await (ProxyProviderResolver as any).ensureStickyOnly(session);
+
+    expect(response).toBeNull();
+    expect(session.setProvider).toHaveBeenCalledWith(provider);
+    expect(rateLimitMocks.RateLimitService.checkCostLimitsWithLease).toHaveBeenCalled();
+    expect(rateLimitMocks.RateLimitService.checkTotalCostLimit).toHaveBeenCalled();
+    expect(rateLimitMocks.RateLimitService.checkAndTrackProviderSession).toHaveBeenCalledWith(
+      provider.id,
+      session.sessionId,
+      0
+    );
+    expect(session.recordProviderSessionRef).toHaveBeenCalledWith(provider.id);
+    expect(session.setGroupCostMultiplier).toHaveBeenCalledWith(1.5);
+    expect(sessionManagerMocks.SessionManager.clearSessionProvider).not.toHaveBeenCalled();
+    expect(providerRepositoryMocks.findAllProviders).not.toHaveBeenCalled();
+  });
+
+  test("bound provider concurrency rejection does not trigger migration", async () => {
+    const { ProxyProviderResolver } = await import("@/app/v1/_lib/proxy/provider-selector");
+    const session = createAlphaSearchSession();
+    const provider = createCodexProvider();
+    sessionManagerMocks.SessionManager.getSessionProvider.mockResolvedValueOnce(provider.id);
+    providerRepositoryMocks.findProviderById.mockResolvedValueOnce(provider);
+    rateLimitMocks.RateLimitService.checkAndTrackProviderSession.mockResolvedValueOnce({
+      allowed: false,
+      referenced: false,
+    });
+
+    const response = await (ProxyProviderResolver as any).ensureStickyOnly(session);
+
+    expect(response.status).toBe(429);
+    expect(session.setProvider).not.toHaveBeenCalled();
+    expect(sessionManagerMocks.SessionManager.clearSessionProvider).not.toHaveBeenCalled();
+    expect(providerRepositoryMocks.findAllProviders).not.toHaveBeenCalled();
   });
 });

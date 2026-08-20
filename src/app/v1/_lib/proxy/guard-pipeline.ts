@@ -196,6 +196,8 @@ export class GuardPipelineBuilder {
     rawCrossProviderFallbackEnabled = policy.allowRawCrossProviderFallback
   ): GuardPipeline {
     switch (policy.guardPreset) {
+      case "alpha_search":
+        return GuardPipelineBuilder.build(ALPHA_SEARCH_PIPELINE);
       case "raw_passthrough":
         return GuardPipelineBuilder.build(
           rawCrossProviderFallbackEnabled ? RAW_SAFE_SESSION_PIPELINE : RAW_PASSTHROUGH_PIPELINE
@@ -250,6 +252,20 @@ export const RAW_SAFE_SESSION_PIPELINE: GuardConfig = {
     "probe",
     "session",
     "cyberBlock",
+    "provider",
+    "messageContext",
+  ],
+};
+
+export const ALPHA_SEARCH_PIPELINE: GuardConfig = {
+  steps: [
+    "auth",
+    "client",
+    "model",
+    "version",
+    "session",
+    "cyberBlock",
+    "rateLimit",
     "provider",
     "messageContext",
   ],

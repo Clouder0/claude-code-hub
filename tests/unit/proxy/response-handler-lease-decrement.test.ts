@@ -98,6 +98,7 @@ import { RateLimitService } from "@/lib/rate-limit";
 import { SessionTracker } from "@/lib/session-tracker";
 import {
   updateMessageRequestCost,
+  updateMessageRequestCostWithBreakdown,
   updateMessageRequestDetails,
   updateMessageRequestDuration,
 } from "@/repository/message";
@@ -648,5 +649,111 @@ describe("Lease Budget Decrement after trackCostToRedis", () => {
 
     // Verify decrement was attempted
     expect(RateLimitService.decrementLeaseBudget).toHaveBeenCalled();
+  });
+});
+
+describe("Alpha Search fixed-request billing", () => {
+  const createAlphaSession = () => {
+    const session = createSession({
+      originalModel: "gpt-5",
+      redirectedModel: "gpt-5",
+      sessionId: "019b82ff-08ff-75a3-a203-7e10274fdbd8",
+      messageId: 7001,
+      pathname: "/v1/alpha/search",
+      providerType: "codex",
+      originalFormat: "response",
+    });
+    Object.assign(session.provider!, { costMultiplier: 2 });
+    Object.assign(session, { getGroupCostMultiplier: () => 1.5 });
+    return session;
+  };
+
+  beforeEach(() => {
+    vi.mocked(updateMessageRequestCostWithBreakdown).mockImplementation(async (_id, costUsd) =>
+      String(costUsd)
+    );
+    vi.mocked(updateMessageRequestDetails).mockResolvedValue(undefined);
+    vi.mocked(updateMessageRequestDuration).mockResolvedValue(undefined);
+    vi.mocked(SessionManager.updateSessionUsage).mockResolvedValue(undefined);
+    vi.mocked(RateLimitService.trackCost).mockResolvedValue(undefined);
+    vi.mocked(RateLimitService.trackUserDailyCost).mockResolvedValue(undefined);
+    vi.mocked(RateLimitService.decrementLeaseBudget).mockResolvedValue({
+      success: true,
+      newRemaining: 10,
+    });
+    vi.mocked(SessionTracker.refreshSession).mockResolvedValue(undefined);
+  });
+
+  it("charges one completed 2xx operation and preserves the exact upstream response", async () => {
+    const session = createAlphaSession();
+    const body = new Uint8Array([0, 1, 2, 127, 128, 255]);
+    const upstream = new Response(body, {
+      status: 201,
+      statusText: "Created",
+      headers: { "content-type": "application/octet-stream", "x-upstream": "kept" },
+    });
+
+    const result = await ProxyResponseHandler.dispatch(session, upstream);
+
+    expect(result.status).toBe(201);
+    expect(result.statusText).toBe("Created");
+    expect(result.headers.get("x-upstream")).toBe("kept");
+    expect(new Uint8Array(await result.arrayBuffer())).toEqual(body);
+    expect(updateMessageRequestCostWithBreakdown).toHaveBeenCalledTimes(1);
+    const [requestId, settledCost, breakdown, settlement] = vi.mocked(
+      updateMessageRequestCostWithBreakdown
+    ).mock.calls[0];
+    expect(requestId).toBe(7001);
+    expect(String(settledCost)).toBe("0.03");
+    expect(breakdown).toBeUndefined();
+    expect(settlement).toEqual(
+      expect.objectContaining({
+        providerId: 99,
+        costMultiplier: 2,
+        groupCostMultiplier: 1.5,
+        inputTokens: 0,
+        outputTokens: 0,
+      })
+    );
+    expect(RateLimitService.trackCost).toHaveBeenCalledWith(
+      456,
+      99,
+      session.sessionId,
+      0.03,
+      expect.objectContaining({ billingEventId: "7001:alpha-search" })
+    );
+  });
+
+  it("does not charge a non-2xx response", async () => {
+    const session = createAlphaSession();
+
+    const result = await ProxyResponseHandler.dispatch(
+      session,
+      new Response('{"error":"upstream"}', { status: 503 })
+    );
+
+    expect(result.status).toBe(503);
+    expect(updateMessageRequestCostWithBreakdown).not.toHaveBeenCalled();
+    expect(RateLimitService.trackCost).not.toHaveBeenCalled();
+    expect(updateMessageRequestDetails).toHaveBeenCalledWith(
+      7001,
+      expect.objectContaining({ statusCode: 503, errorMessage: "HTTP 503" })
+    );
+  });
+
+  it("does not settle cost when the upstream body cannot be read completely", async () => {
+    const session = createAlphaSession();
+    const brokenBody = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array([1, 2, 3]));
+        controller.error(new Error("truncated"));
+      },
+    });
+
+    await expect(
+      ProxyResponseHandler.dispatch(session, new Response(brokenBody, { status: 200 }))
+    ).rejects.toThrow("truncated");
+    expect(updateMessageRequestCostWithBreakdown).not.toHaveBeenCalled();
+    expect(RateLimitService.trackCost).not.toHaveBeenCalled();
   });
 });

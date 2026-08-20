@@ -6,6 +6,7 @@ export type CodexSessionIdSource =
   | "body_prompt_cache_key"
   | "body_metadata_session_id"
   | "body_previous_response_id"
+  | "body_alpha_search_id"
   | null;
 
 export interface CodexSessionExtractionResult {
@@ -97,4 +98,18 @@ export function extractCodexSessionId(
   }
 
   return { sessionId: null, source: null };
+}
+
+/**
+ * Alpha Search carries the Responses session identity in its top-level `id`.
+ * Keep this endpoint-specific so an unrelated Codex payload cannot silently
+ * acquire new generic `id` semantics.
+ */
+export function extractCodexAlphaSearchSessionId(
+  requestBody: Record<string, unknown>
+): CodexSessionExtractionResult {
+  const sessionId = normalizeCodexSessionId(requestBody.id);
+  return sessionId
+    ? { sessionId, source: "body_alpha_search_id" }
+    : { sessionId: null, source: null };
 }

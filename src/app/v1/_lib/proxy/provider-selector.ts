@@ -138,6 +138,10 @@ export class ProxyProviderResolver {
       );
     }
 
+    if (session.getEndpointPolicy().providerSelection === "sticky_only") {
+      return await ProxyProviderResolver.ensureStickyOnly(session);
+    }
+
     // 动态尝试所有可用供应商（避免无限循环通过 excludedProviders 和 null 返回）
     const excludedProviders: number[] = [];
 
@@ -186,25 +190,7 @@ export class ProxyProviderResolver {
       session.setLastSelectionContext(context); // 保存用于后续记录
     }
 
-    // === Resolve group cost multiplier ===
-    // Fail soft: if the lookup throws (Redis/DB hiccup), fall back to 1.0 so
-    // request handling proceeds without billing disruption.
-    const effectiveGroup = getEffectiveProviderGroup(session);
-    if (effectiveGroup) {
-      try {
-        const multiplier = await getGroupCostMultiplier(effectiveGroup);
-        session.setGroupCostMultiplier(multiplier);
-      } catch (error) {
-        logger.warn(
-          "[ProviderResolver] Failed to resolve group cost multiplier, falling back to 1.0",
-          {
-            effectiveGroup,
-            error: error instanceof Error ? error.message : String(error),
-          }
-        );
-        session.setGroupCostMultiplier(1.0);
-      }
-    }
+    await ProxyProviderResolver.resolveGroupCostMultiplier(session);
 
     // === 故障转移循环 ===
     let attemptCount = 0;
@@ -444,6 +430,102 @@ export class ProxyProviderResolver {
     }
 
     return ProxyResponses.buildError(status, message, errorType, details);
+  }
+
+  private static async resolveGroupCostMultiplier(session: ProxySession): Promise<void> {
+    const effectiveGroup = getEffectiveProviderGroup(session);
+    if (!effectiveGroup) return;
+
+    try {
+      session.setGroupCostMultiplier(await getGroupCostMultiplier(effectiveGroup));
+    } catch (error) {
+      logger.warn(
+        "[ProviderResolver] Failed to resolve group cost multiplier, falling back to 1.0",
+        {
+          effectiveGroup,
+          error: error instanceof Error ? error.message : String(error),
+        }
+      );
+      session.setGroupCostMultiplier(1.0);
+    }
+  }
+
+  /** Resolve an Alpha Search provider without creating, clearing, or migrating its binding. */
+  private static async ensureStickyOnly(session: ProxySession): Promise<Response | null> {
+    const sessionId = session.sessionId;
+    const keyId = session.authState?.key?.id ?? null;
+    if (!sessionId || keyId == null) {
+      return ProxyResponses.buildError(409, "Alpha Search requires an existing session binding");
+    }
+
+    const providerId = await SessionManager.getSessionProvider(sessionId, keyId);
+    if (!providerId) {
+      return ProxyResponses.buildError(409, "Alpha Search requires an existing session binding");
+    }
+
+    const provider = await findProviderById(providerId);
+    const effectiveGroup = getEffectiveProviderGroup(session);
+    const requestedModel = session.getOriginalModel();
+    const systemTimezone = await resolveSystemTimezone();
+    const eligible =
+      !!provider?.isEnabled &&
+      !provider.disableSessionReuse &&
+      isProviderActiveNow(provider.activeTimeStart, provider.activeTimeEnd, systemTimezone) &&
+      (!session.originalFormat ||
+        checkFormatProviderTypeCompatibility(session.originalFormat, provider.providerType)) &&
+      (!requestedModel || providerSupportsModel(provider, requestedModel)) &&
+      (!effectiveGroup || checkProviderGroupMatch(provider.groupTag, effectiveGroup)) &&
+      isClientAllowedDetailed(session, provider.allowedClients ?? [], provider.blockedClients ?? [])
+        .allowed &&
+      !(await isCircuitOpen(provider.id)) &&
+      !(
+        provider.providerVendorId &&
+        provider.providerVendorId > 0 &&
+        (await isVendorTypeCircuitOpen(provider.providerVendorId, provider.providerType))
+      );
+
+    if (!provider || !eligible) {
+      return ProxyResponses.buildError(503, "Bound provider is unavailable for Alpha Search");
+    }
+
+    const [windowCost, totalCost] = await Promise.all([
+      RateLimitService.checkCostLimitsWithLease(provider.id, "provider", {
+        limit_5h_usd: provider.limit5hUsd,
+        limit_5h_reset_mode: provider.limit5hResetMode,
+        limit_daily_usd: provider.limitDailyUsd,
+        daily_reset_mode: provider.dailyResetMode,
+        daily_reset_time: provider.dailyResetTime,
+        limit_weekly_usd: provider.limitWeeklyUsd,
+        limit_monthly_usd: provider.limitMonthlyUsd,
+      }),
+      RateLimitService.checkTotalCostLimit(provider.id, "provider", provider.limitTotalUsd, {
+        resetAt: provider.totalCostResetAt,
+      }),
+    ]);
+    if (!windowCost.allowed || !totalCost.allowed) {
+      return ProxyResponses.buildError(429, "Bound provider cost limit exceeded");
+    }
+
+    const concurrency = await RateLimitService.checkAndTrackProviderSession(
+      provider.id,
+      sessionId,
+      provider.limitConcurrentSessions || 0
+    );
+    if (!concurrency.allowed) {
+      return ProxyResponses.buildError(429, "Bound provider concurrency limit exceeded");
+    }
+    if (concurrency.referenced) {
+      session.recordProviderSessionRef(provider.id);
+    }
+
+    session.setProvider(provider);
+    session.addProviderToChain(provider, {
+      reason: "session_reuse",
+      selectionMethod: "session_reuse",
+      circuitState: getCircuitState(provider.id),
+    });
+    await ProxyProviderResolver.resolveGroupCostMultiplier(session);
+    return null;
   }
 
   /**

@@ -179,6 +179,7 @@ function makeSession(clientAbortSignal: AbortSignal | null, stream: boolean): Pr
     endpointPolicy,
     isHeaderModified: () => false,
     getEndpointPolicy: () => endpointPolicy,
+    getManagedEndpoint: () => "/v1/chat/completions",
     getContext1mApplied: () => false,
     getGroupCostMultiplier: () => 1,
     getOriginalModel: () => "gpt-5.5",

@@ -1,11 +1,13 @@
 import { normalizeEndpointPath, V1_ENDPOINT_PATHS } from "./endpoint-paths";
 
-export type EndpointGuardPreset = "chat" | "raw_passthrough";
+export type EndpointGuardPreset = "chat" | "raw_passthrough" | "alpha_search";
 
 export type EndpointPoolStrictness = "inherit" | "strict";
 
+export type EndpointProviderSelection = "normal" | "sticky_only";
+
 export interface EndpointPolicy {
-  readonly kind: "default" | "raw_passthrough";
+  readonly kind: "default" | "raw_passthrough" | "alpha_search";
   readonly guardPreset: EndpointGuardPreset;
   readonly allowRetry: boolean;
   readonly allowProviderSwitch: boolean;
@@ -17,6 +19,7 @@ export interface EndpointPolicy {
   readonly bypassSpecialSettings: boolean;
   readonly bypassResponseRectifier: boolean;
   readonly endpointPoolStrictness: EndpointPoolStrictness;
+  readonly providerSelection: EndpointProviderSelection;
 }
 
 const DEFAULT_ENDPOINT_POLICY: EndpointPolicy = Object.freeze({
@@ -32,6 +35,7 @@ const DEFAULT_ENDPOINT_POLICY: EndpointPolicy = Object.freeze({
   bypassSpecialSettings: false,
   bypassResponseRectifier: false,
   endpointPoolStrictness: "inherit",
+  providerSelection: "normal",
 });
 
 const RAW_PASSTHROUGH_ENDPOINT_POLICY: EndpointPolicy = Object.freeze({
@@ -47,6 +51,23 @@ const RAW_PASSTHROUGH_ENDPOINT_POLICY: EndpointPolicy = Object.freeze({
   bypassSpecialSettings: true,
   bypassResponseRectifier: true,
   endpointPoolStrictness: "strict",
+  providerSelection: "normal",
+});
+
+const ALPHA_SEARCH_ENDPOINT_POLICY: EndpointPolicy = Object.freeze({
+  kind: "alpha_search",
+  guardPreset: "alpha_search",
+  allowRetry: false,
+  allowProviderSwitch: false,
+  allowRawCrossProviderFallback: false,
+  allowCircuitBreakerAccounting: false,
+  trackConcurrentRequests: true,
+  bypassRequestFilters: true,
+  bypassForwarderPreprocessing: true,
+  bypassSpecialSettings: true,
+  bypassResponseRectifier: true,
+  endpointPoolStrictness: "strict",
+  providerSelection: "sticky_only",
 });
 
 const rawPassthroughEndpointPathSet = new Set<string>([
@@ -59,7 +80,7 @@ export function isRawPassthroughEndpointPath(pathname: string): boolean {
 }
 
 export function isRawPassthroughEndpointPolicy(policy: EndpointPolicy): boolean {
-  return policy.kind === "raw_passthrough";
+  return policy.kind === "raw_passthrough" || policy.kind === "alpha_search";
 }
 
 export function isStrictEndpointPoolPolicy(policy: Pick<EndpointPolicy, "endpointPoolStrictness">) {
@@ -74,6 +95,10 @@ export function shouldEnforceStrictEndpointPoolPolicy(
 
 export function resolveEndpointPolicy(pathname: string): EndpointPolicy {
   const normalizedPath = normalizeEndpointPath(pathname);
+
+  if (normalizedPath === V1_ENDPOINT_PATHS.ALPHA_SEARCH) {
+    return ALPHA_SEARCH_ENDPOINT_POLICY;
+  }
 
   if (rawPassthroughEndpointPathSet.has(normalizedPath)) {
     return RAW_PASSTHROUGH_ENDPOINT_POLICY;

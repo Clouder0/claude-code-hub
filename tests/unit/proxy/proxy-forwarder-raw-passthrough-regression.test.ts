@@ -11,7 +11,25 @@ const mocks = vi.hoisted(() => ({
     getAgent: vi.fn(),
     markOriginUnhealthy: vi.fn(),
   })),
+  recordSuccess: vi.fn(),
+  clearSessionProvider: vi.fn(async () => undefined),
 }));
+
+vi.mock("@/lib/circuit-breaker", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/circuit-breaker")>()),
+  recordSuccess: mocks.recordSuccess,
+}));
+
+vi.mock("@/lib/session-manager", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/session-manager")>();
+  return {
+    ...actual,
+    SessionManager: {
+      ...actual.SessionManager,
+      clearSessionProvider: mocks.clearSessionProvider,
+    },
+  };
+});
 
 vi.mock("@/lib/config", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/config")>();
@@ -176,4 +194,55 @@ describe("ProxyForwarder raw passthrough regression", () => {
     expect(capturedHeaders?.get("connection")).toBeNull();
     expect(capturedHeaders?.get("transfer-encoding")).toBeNull();
   });
+
+  it("alpha search 错误路径不得清除既有 provider 绑定", async () => {
+    const session = createRawPassthroughSession('{"id":"019b82ff-08ff-75a3-a203-7e10274fdbd8"}');
+    Object.assign(session, {
+      sessionId: "019b82ff-08ff-75a3-a203-7e10274fdbd8",
+      endpointPolicy: resolveEndpointPolicy("/v1/alpha/search"),
+      getEndpointPolicy: vi.fn(() => resolveEndpointPolicy("/v1/alpha/search")),
+    });
+
+    await (ProxyForwarder as any).clearSessionProviderBinding(session);
+
+    expect(mocks.clearSessionProvider).not.toHaveBeenCalled();
+  });
+
+  it.skipIf(!process.env.CCH_PIRELAY_ALPHA_URL)(
+    "alpha search 可经真实本地 Pirelay 到达 fake upstream",
+    async () => {
+      const body = JSON.stringify({
+        id: "019b82ff-08ff-75a3-a203-7e10274fdbd8",
+        model: "gpt-5.5",
+        input: [],
+        commands: { search_query: [{ q: "cch pirelay blackbox" }] },
+        settings: { allowed_callers: ["direct"], external_web_access: true },
+        max_output_tokens: 2500,
+      });
+      const session = createRawPassthroughSession(body);
+      const policy = resolveEndpointPolicy("/v1/alpha/search");
+      Object.assign(session, {
+        requestUrl: new URL("https://proxy.example.com/v1/alpha/search"),
+        originalFormat: "response",
+        endpointPolicy: policy,
+        getEndpointPolicy: vi.fn(() => policy),
+      });
+      const provider = createProvider();
+      provider.url = process.env.CCH_PIRELAY_ALPHA_URL!;
+
+      const { doForward } = ProxyForwarder as unknown as {
+        doForward: (
+          session: ProxySession,
+          provider: Provider,
+          baseUrl: string
+        ) => Promise<Response>;
+      };
+      const response = await doForward(session, provider, provider.url);
+
+      expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toEqual(
+        expect.objectContaining({ output: "cch-pirelay-blackbox-ok" })
+      );
+    }
+  );
 });

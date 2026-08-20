@@ -3,6 +3,7 @@ import { getCachedSystemSettings } from "@/lib/config";
 import { logger } from "@/lib/logger";
 import { ProxyStatusTracker } from "@/lib/proxy-status-tracker";
 import { SessionTracker } from "@/lib/session-tracker";
+import { isAlphaSearchEndpointPath } from "./proxy/endpoint-paths";
 import { isRawPassthroughEndpointPolicy } from "./proxy/endpoint-policy";
 import { ProxyErrorHandler } from "./proxy/error-handler";
 import { attachSessionIdToErrorResponse } from "./proxy/error-session-id";
@@ -73,7 +74,10 @@ export async function handleProxyRequest(c: Context): Promise<Response> {
     }
 
     // Response API input rectifier: normalize non-array input before guard pipeline
-    if (session.originalFormat === "response") {
+    if (
+      session.originalFormat === "response" &&
+      !isAlphaSearchEndpointPath(session.getManagedEndpoint())
+    ) {
       await normalizeResponseInput(session);
     }
 

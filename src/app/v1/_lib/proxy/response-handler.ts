@@ -70,6 +70,7 @@ import { GeminiAdapter } from "../gemini/adapter";
 import type { GeminiResponse } from "../gemini/types";
 import { extractActualResponseModelForProvider } from "./actual-response-model";
 import { bindClientAbortListener } from "./client-abort-listener";
+import { isAlphaSearchEndpointPath } from "./endpoint-paths";
 import { isClientAbortError, isTransportError } from "./errors";
 import type { ProxySession } from "./session";
 import {
@@ -83,6 +84,7 @@ const STREAM_STATS_HEAD_BYTES = 1024 * 1024;
 const STREAM_STATS_TAIL_BYTES = STREAM_STATS_MAX_BUFFER_BYTES - STREAM_STATS_HEAD_BYTES;
 const STREAM_STATS_TAIL_CHUNKS = 8192;
 const STREAM_STATS_TRUNCATED_MARKER = "\n\n: [cch_truncated]\n\n";
+const ALPHA_SEARCH_BASE_COST_USD = new Decimal("0.01");
 
 type BoundedStreamTextSnapshot = {
   text: string;
@@ -1502,6 +1504,10 @@ async function finalizeDeferredStreamingFinalizationIfNeeded(
 
 export class ProxyResponseHandler {
   static async dispatch(session: ProxySession, response: Response): Promise<Response> {
+    if (isAlphaSearchEndpointPath(session.getManagedEndpoint())) {
+      return await ProxyResponseHandler.handleAlphaSearch(session, response);
+    }
+
     const snapshotSession = session as ProxySession & {
       detailSnapshotResponseBeforeSource?: Response | null;
     };
@@ -1536,6 +1542,107 @@ export class ProxyResponseHandler {
     }
 
     return await ProxyResponseHandler.handleStream(session, fixedResponse);
+  }
+
+  private static async handleAlphaSearch(
+    session: ProxySession,
+    response: Response
+  ): Promise<Response> {
+    const { messageContext, provider } = session;
+    if (!messageContext || !provider) {
+      throw new Error("Alpha Search response is missing its billing context");
+    }
+
+    let completeResponse: Response;
+    try {
+      const bytes = await response.arrayBuffer();
+      completeResponse = new Response(bytes, {
+        status: response.status,
+        statusText: response.statusText,
+        headers: response.headers,
+      });
+      const duration = Date.now() - session.startTime;
+      const success = response.status >= 200 && response.status < 300;
+      let costUsd: string | null = null;
+      if (success) {
+        const providerMultiplier = sanitizeMultiplier(provider.costMultiplier);
+        const groupMultiplier = sanitizeMultiplier(session.getGroupCostMultiplier());
+        const cost = ALPHA_SEARCH_BASE_COST_USD.times(providerMultiplier).times(groupMultiplier);
+        const settlement: MessageRequestBillingSettlement = {
+          providerId: provider.id,
+          model: session.getBillingModel() ?? undefined,
+          costMultiplier: providerMultiplier,
+          groupCostMultiplier: groupMultiplier,
+          providerChain: session.getProviderChain(),
+          specialSettings: session.getSpecialSettings() ?? [],
+          context1mApplied: false,
+          swapCacheTtlApplied: false,
+          inputTokens: 0,
+          observedInputTokens: 0,
+          outputTokens: 0,
+          cacheCreationInputTokens: 0,
+          cacheReadInputTokens: 0,
+          cacheCreation5mInputTokens: 0,
+          cacheCreation1hInputTokens: 0,
+          cacheWriteTokensReported: 0,
+          cacheWriteAccounting: "none",
+          cacheTtlApplied: null,
+        };
+        costUsd = await updateMessageRequestCostWithBreakdown(
+          messageContext.id,
+          cost,
+          undefined,
+          settlement
+        );
+        if (costUsd) {
+          await publishSettledCostToRedis(
+            session,
+            provider,
+            Number(cost.toString()),
+            `${messageContext.id}:alpha-search`
+          );
+        }
+      }
+
+      await updateMessageRequestDuration(messageContext.id, duration);
+      await updateMessageRequestDetails(messageContext.id, {
+        statusCode: response.status,
+        inputTokens: 0,
+        observedInputTokens: 0,
+        outputTokens: 0,
+        cacheCreationInputTokens: 0,
+        cacheReadInputTokens: 0,
+        cacheCreation5mInputTokens: 0,
+        cacheCreation1hInputTokens: 0,
+        cacheWriteTokensReported: 0,
+        cacheWriteAccounting: "none",
+        ttfbMs: session.ttfbMs ?? duration,
+        providerChain: session.getProviderChain(),
+        model: session.getBillingModel() ?? undefined,
+        providerId: provider.id,
+        context1mApplied: false,
+        swapCacheTtlApplied: false,
+        ...(success ? {} : { errorMessage: `HTTP ${response.status}` }),
+      });
+
+      if (session.sessionId && session.shouldTrackSessionObservability()) {
+        await SessionManager.updateSessionUsage(session.sessionId, {
+          requestSequence: session.requestSequence,
+          inputTokens: 0,
+          outputTokens: 0,
+          cacheCreationInputTokens: 0,
+          cacheReadInputTokens: 0,
+          ...(costUsd ? { costUsd } : {}),
+          status: success ? "completed" : "error",
+          statusCode: response.status,
+        });
+      }
+      ProxyStatusTracker.getInstance().endRequest(messageContext.user.id, messageContext.id);
+    } finally {
+      releaseSessionAgent(session);
+    }
+
+    return completeResponse;
   }
 
   private static async handleNonStream(
@@ -5244,11 +5351,32 @@ async function trackCostToRedis(
     );
     if (cost.lte(0)) return;
 
-    const costFloat = parseFloat(cost.toString());
-    const billingEventId = trackingOptions?.billingEventId ?? `${messageContext.id}:winner`;
+    await publishSettledCostToRedis(
+      trackingSession,
+      provider,
+      parseFloat(cost.toString()),
+      trackingOptions?.billingEventId ?? `${messageContext.id}:winner`
+    );
+  } catch (error) {
+    logger.error("[ResponseHandler] Failed to track cost to Redis, skipping", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
 
-    // 追踪到 Redis（使用 session.sessionId）
-    await RateLimitService.trackCost(key.id, provider.id, trackingSession.sessionId, costFloat, {
+async function publishSettledCostToRedis(
+  session: ProxySession,
+  provider: Provider,
+  cost: number,
+  billingEventId: string
+): Promise<void> {
+  const messageContext = session.messageContext;
+  const key = session.authState?.key;
+  const user = session.authState?.user;
+  if (!messageContext || !key || !user || !session.sessionId || cost <= 0) return;
+
+  try {
+    await RateLimitService.trackCost(key.id, provider.id, session.sessionId, cost, {
       userId: user.id,
       key5hUsd: key.limit5hUsd,
       keyDailyUsd: key.limitDailyUsd,
@@ -5269,11 +5397,9 @@ async function trackCostToRedis(
       createdAtMs: messageContext.createdAt.getTime(),
       billingEventId,
     });
-
-    // 新增：追踪用户层每日消费
     await RateLimitService.trackUserDailyCost(
       user.id,
-      costFloat,
+      cost,
       user.dailyResetTime,
       user.dailyResetMode,
       {
@@ -5282,54 +5408,48 @@ async function trackCostToRedis(
         billingEventId,
       }
     );
-
-    // Decrement lease budgets for all windows (fire-and-forget)
-    void Promise.all([
-      RateLimitService.decrementLeaseBudget(key.id, "key", "5h", costFloat, {
-        resetMode: key.limit5hResetMode,
-      }),
-      RateLimitService.decrementLeaseBudget(key.id, "key", "daily", costFloat, {
-        resetMode: key.dailyResetMode,
-      }),
-      RateLimitService.decrementLeaseBudget(key.id, "key", "weekly", costFloat),
-      RateLimitService.decrementLeaseBudget(key.id, "key", "monthly", costFloat),
-      RateLimitService.decrementLeaseBudget(user.id, "user", "5h", costFloat, {
-        resetMode: user.limit5hResetMode,
-      }),
-      RateLimitService.decrementLeaseBudget(user.id, "user", "daily", costFloat, {
-        resetMode: user.dailyResetMode,
-      }),
-      RateLimitService.decrementLeaseBudget(user.id, "user", "weekly", costFloat),
-      RateLimitService.decrementLeaseBudget(user.id, "user", "monthly", costFloat),
-      RateLimitService.decrementLeaseBudget(provider.id, "provider", "5h", costFloat, {
-        resetMode: provider.limit5hResetMode,
-      }),
-      RateLimitService.decrementLeaseBudget(provider.id, "provider", "daily", costFloat, {
-        resetMode: provider.dailyResetMode,
-      }),
-      RateLimitService.decrementLeaseBudget(provider.id, "provider", "weekly", costFloat),
-      RateLimitService.decrementLeaseBudget(provider.id, "provider", "monthly", costFloat),
-    ]).catch((error) => {
-      logger.warn("[ResponseHandler] Failed to decrement lease budgets:", {
-        error: error instanceof Error ? error.message : String(error),
-      });
-    });
-
-    // 刷新 session 时间戳（滑动窗口）
-    if (trackingSession.shouldTrackSessionObservability()) {
-      void SessionTracker.refreshSession(
-        trackingSession.sessionId,
-        key.id,
-        provider.id,
-        user.id
-      ).catch((error) => {
-        logger.error("[ResponseHandler] Failed to refresh session tracker:", error);
-      });
-    }
   } catch (error) {
-    logger.error("[ResponseHandler] Failed to track cost to Redis, skipping", {
+    logger.error("[ResponseHandler] Failed to track settled cost to Redis, skipping", {
       error: error instanceof Error ? error.message : String(error),
     });
+    return;
+  }
+
+  void Promise.all([
+    RateLimitService.decrementLeaseBudget(key.id, "key", "5h", cost, {
+      resetMode: key.limit5hResetMode,
+    }),
+    RateLimitService.decrementLeaseBudget(key.id, "key", "daily", cost, {
+      resetMode: key.dailyResetMode,
+    }),
+    RateLimitService.decrementLeaseBudget(key.id, "key", "weekly", cost),
+    RateLimitService.decrementLeaseBudget(key.id, "key", "monthly", cost),
+    RateLimitService.decrementLeaseBudget(user.id, "user", "5h", cost, {
+      resetMode: user.limit5hResetMode,
+    }),
+    RateLimitService.decrementLeaseBudget(user.id, "user", "daily", cost, {
+      resetMode: user.dailyResetMode,
+    }),
+    RateLimitService.decrementLeaseBudget(user.id, "user", "weekly", cost),
+    RateLimitService.decrementLeaseBudget(user.id, "user", "monthly", cost),
+    RateLimitService.decrementLeaseBudget(provider.id, "provider", "5h", cost, {
+      resetMode: provider.limit5hResetMode,
+    }),
+    RateLimitService.decrementLeaseBudget(provider.id, "provider", "daily", cost, {
+      resetMode: provider.dailyResetMode,
+    }),
+    RateLimitService.decrementLeaseBudget(provider.id, "provider", "weekly", cost),
+    RateLimitService.decrementLeaseBudget(provider.id, "provider", "monthly", cost),
+  ]).catch((error) => {
+    logger.warn("[ResponseHandler] Failed to decrement lease budgets", { error });
+  });
+
+  if (session.shouldTrackSessionObservability()) {
+    void SessionTracker.refreshSession(session.sessionId, key.id, provider.id, user.id).catch(
+      (error) => {
+        logger.error("[ResponseHandler] Failed to refresh session tracker:", error);
+      }
+    );
   }
 }
 

@@ -43,6 +43,13 @@ const FAMILY_SAMPLES = [
     modelRequired: false,
   },
   {
+    id: "codex-alpha-search",
+    path: "/v1/alpha/search",
+    format: "response",
+    accountingTier: "fixed_request",
+    modelRequired: false,
+  },
+  {
     id: "openai-chat-completions",
     path: "/v1/chat/completions",
     format: "openai",

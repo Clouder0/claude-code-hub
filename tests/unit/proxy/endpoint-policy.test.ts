@@ -27,6 +27,7 @@ describe("endpoint-policy", () => {
       bypassSpecialSettings: true,
       bypassResponseRectifier: true,
       endpointPoolStrictness: "strict",
+      providerSelection: "normal",
     });
   });
 
@@ -59,6 +60,28 @@ describe("endpoint-policy", () => {
       bypassSpecialSettings: false,
       bypassResponseRectifier: false,
       endpointPoolStrictness: "inherit",
+      providerSelection: "normal",
+    });
+  });
+
+  test("alpha search is strict sticky-only raw passthrough", () => {
+    const policy = resolveEndpointPolicy(V1_ENDPOINT_PATHS.ALPHA_SEARCH);
+
+    expect(isRawPassthroughEndpointPolicy(policy)).toBe(true);
+    expect(policy).toEqual({
+      kind: "alpha_search",
+      guardPreset: "alpha_search",
+      allowRetry: false,
+      allowProviderSwitch: false,
+      allowRawCrossProviderFallback: false,
+      allowCircuitBreakerAccounting: false,
+      trackConcurrentRequests: true,
+      bypassRequestFilters: true,
+      bypassForwarderPreprocessing: true,
+      bypassSpecialSettings: true,
+      bypassResponseRectifier: true,
+      endpointPoolStrictness: "strict",
+      providerSelection: "sticky_only",
     });
   });
 
