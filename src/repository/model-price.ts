@@ -45,7 +45,12 @@ export interface PaginatedResult<T> {
  * 3. aliases 命中候选名
  */
 export async function findLatestPriceByModel(modelName: string): Promise<ModelPrice | null> {
-  const cached = getCachedLatestPrice(modelName);
+  // 缓存键统一 trim：写侧失效一律传 trim 后的模型名（actions 归一化），
+  // 读侧入参可能带空白（request.model 是客户端输入）——不归一化会让
+  // 未 trim 键下的缓存逃过写失效，最多陈旧一个 TTL 窗口。与 fallback
+  // 查询内部的 trim 语义一致。
+  const cacheKey = modelName.trim();
+  const cached = getCachedLatestPrice(cacheKey);
   if (cached) {
     return cached.value;
   }
@@ -56,7 +61,7 @@ export async function findLatestPriceByModel(modelName: string): Promise<ModelPr
     return null;
   }
 
-  setCachedLatestPrice(modelName, value);
+  setCachedLatestPrice(cacheKey, value);
   return value;
 }
 

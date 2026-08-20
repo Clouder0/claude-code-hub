@@ -49,5 +49,6 @@ export function invalidateLatestPriceCache(modelName?: string): void {
     latestPriceCache.clear();
     return;
   }
-  latestPriceCache.delete(modelName);
+  // 与 findLatestPriceByModel 的缓存键归一化保持一致
+  latestPriceCache.delete(modelName.trim());
 }

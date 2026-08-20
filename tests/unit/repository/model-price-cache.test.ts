@@ -106,3 +106,32 @@ describe("invalidateLatestPriceCache write invalidation", () => {
     expect(dbMocks.state.queryCount).toBe(8);
   });
 });
+
+describe("cache key normalization", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    dbMocks.state.queryCount = 0;
+    resetModelPriceCacheForTests();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  test("untrimmed reader keys are invalidated by trimmed writer invalidation", async () => {
+    // 读者用带空白的模型名（客户端输入未归一化），写侧失效传 trim 后名称
+    await findLatestPriceByModel("  gpt-5.6-sol  ");
+    expect(dbMocks.state.queryCount).toBe(2);
+
+    invalidateLatestPriceCache("gpt-5.6-sol");
+    await findLatestPriceByModel("  gpt-5.6-sol  ");
+    // 命中同一缓存键：失效生效，重新查询
+    expect(dbMocks.state.queryCount).toBe(4);
+  });
+
+  test("trimmed and untrimmed readers share one cache entry", async () => {
+    await findLatestPriceByModel("gpt-5.6-sol");
+    await findLatestPriceByModel("  gpt-5.6-sol  ");
+    expect(dbMocks.state.queryCount).toBe(2);
+  });
+});
