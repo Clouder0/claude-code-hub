@@ -1,4 +1,4 @@
-import { isSessionCyberBlocked } from "@/lib/security/cyber-containment";
+import { findSessionBlockPolicy } from "@/lib/security/policy-containment";
 import { ProxyAuthenticator } from "./auth-guard";
 import { ProxyClientGuard } from "./client-guard";
 import type { EndpointPolicy } from "./endpoint-policy";
@@ -35,7 +35,7 @@ export type GuardStepKey =
   | "version"
   | "probe"
   | "session"
-  | "cyberBlock"
+  | "policyBlock"
   | "warmup"
   | "requestFilter"
   | "sensitive"
@@ -97,18 +97,19 @@ const Steps: Record<GuardStepKey, GuardStep> = {
       return null;
     },
   },
-  cyberBlock: {
-    name: "cyberBlock",
+  policyBlock: {
+    name: "policyBlock",
     async execute(session) {
       if (!session.sessionId) return null;
-      if (await isSessionCyberBlocked(session.sessionId)) {
+      const blockedPolicy = await findSessionBlockPolicy(session.sessionId);
+      if (blockedPolicy) {
         return ProxyResponses.buildError(
           400,
           "该会话因触发上游安全策略已被拦截。",
           "invalid_request_error",
           undefined,
           undefined,
-          { code: "cyber_policy" }
+          { code: blockedPolicy }
         );
       }
       return null;
@@ -229,7 +230,7 @@ export const CHAT_PIPELINE: GuardConfig = {
     "version",
     "probe",
     "session",
-    "cyberBlock",
+    "policyBlock",
     "warmup",
     "requestFilter",
     "rateLimit",
@@ -251,7 +252,7 @@ export const RAW_SAFE_SESSION_PIPELINE: GuardConfig = {
     "version",
     "probe",
     "session",
-    "cyberBlock",
+    "policyBlock",
     "provider",
     "messageContext",
   ],
@@ -264,7 +265,7 @@ export const ALPHA_SEARCH_PIPELINE: GuardConfig = {
     "model",
     "version",
     "session",
-    "cyberBlock",
+    "policyBlock",
     "rateLimit",
     "provider",
     "messageContext",

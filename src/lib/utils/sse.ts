@@ -67,16 +67,17 @@ export function parseSSEData(sseText: string): ParsedSSEEvent[] {
 }
 
 /**
- * 流式 finalization 消费者（cyber 信号 / usage / service_tier / prompt_cache_key）
- * 读取的每个字段都位于以下字面 JSON key 之下，因此 data 文本不含任何标记子串的事件
- * 不可能贡献结果，可安全跳过 JSON.parse（保留原始字符串 data；消费者对 string data
- * 本就有 `typeof !== "object"` 跳过逻辑）。
+ * 流式 finalization 消费者（策略封锁信号（cyber/bio）/ usage / service_tier /
+ * prompt_cache_key）读取的每个字段都位于以下字面 JSON key 之下，因此 data 文本
+ * 不含任何标记子串的事件不可能贡献结果，可安全跳过 JSON.parse（保留原始字符串
+ * data；消费者对 string data 本就有 `typeof !== "object"` 跳过逻辑）。
  */
 const SSE_FINALIZATION_MARKERS = [
   "usage",
   "service_tier",
   "prompt_cache_key",
   "cyber_policy",
+  "bio_policy",
   "safety_buffering",
 ] as const;
 

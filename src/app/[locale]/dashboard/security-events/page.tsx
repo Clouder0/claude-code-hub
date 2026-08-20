@@ -13,6 +13,7 @@ import {
 } from "@/components/ui/table";
 import { Link, redirect } from "@/i18n/routing";
 import { getSession } from "@/lib/auth";
+import { isPolicyRejectionType } from "@/lib/security/security-signals";
 import { formatDate } from "@/lib/utils/date-format";
 import {
   findRecentSecurityEvents,
@@ -153,10 +154,14 @@ export default async function SecurityEventsPage({
                         {formatDate(event.createdAt, "yyyy-MM-dd HH:mm:ss", locale)}
                       </TableCell>
                       <TableCell>
-                        <Badge variant={event.type === "cyber_policy" ? "destructive" : "outline"}>
+                        <Badge
+                          variant={isPolicyRejectionType(event.type) ? "destructive" : "outline"}
+                        >
                           {event.type === "cyber_policy"
                             ? t("types.cyberPolicy")
-                            : t("types.safetyCheck")}
+                            : event.type === "bio_policy"
+                              ? t("types.bioPolicy")
+                              : t("types.safetyCheck")}
                         </Badge>
                       </TableCell>
                       <TableCell>{event.userName}</TableCell>

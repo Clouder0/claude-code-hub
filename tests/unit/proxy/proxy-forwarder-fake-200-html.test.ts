@@ -22,7 +22,7 @@ const mocks = vi.hoisted(() => {
     // ErrorCategory.PROVIDER_ERROR
     categorizeErrorAsync: vi.fn(async () => 0),
     recordSecurityEventBestEffort: vi.fn(async () => {}),
-    containCyberPolicy: vi.fn(async () => {}),
+    containPolicyRejection: vi.fn(async () => {}),
     loggerWarn: vi.fn(),
   };
 });
@@ -76,8 +76,8 @@ vi.mock("@/lib/security/security-event-recorder", () => ({
   recordSecurityEventBestEffort: mocks.recordSecurityEventBestEffort,
 }));
 
-vi.mock("@/lib/security/cyber-containment", () => ({
-  containCyberPolicy: mocks.containCyberPolicy,
+vi.mock("@/lib/security/policy-containment", () => ({
+  containPolicyRejection: mocks.containPolicyRejection,
 }));
 
 vi.mock("@/app/v1/_lib/proxy/provider-selector", () => ({
@@ -95,7 +95,7 @@ vi.mock("@/app/v1/_lib/proxy/errors", async (importOriginal) => {
 });
 
 import { ProxyForwarder } from "@/app/v1/_lib/proxy/forwarder";
-import { ProxyError } from "@/app/v1/_lib/proxy/errors";
+import { ALL_PROVIDERS_UNAVAILABLE_MESSAGE, ProxyError } from "@/app/v1/_lib/proxy/errors";
 import { resetFake200SseDiagnosticLogRateLimitForTests } from "@/app/v1/_lib/proxy/fake-200-observability";
 import { ProxySession } from "@/app/v1/_lib/proxy/session";
 import { peekDeferredStreamingFinalization } from "@/app/v1/_lib/proxy/stream-finalization";
@@ -253,7 +253,8 @@ describe("ProxyForwarder - fake 200 HTML body", () => {
     expect(mocks.recordFailure).not.toHaveBeenCalled();
     expect(mocks.recordSecurityEventBestEffort).toHaveBeenCalledTimes(1);
     expect(mocks.recordSecurityEventBestEffort).toHaveBeenCalledWith(7, 123, "cyber_safety_check");
-    expect(mocks.containCyberPolicy).toHaveBeenCalledTimes(1);
+    expect(mocks.containPolicyRejection).toHaveBeenCalledTimes(1);
+    expect(mocks.containPolicyRejection).toHaveBeenCalledWith(expect.anything(), "cyber_policy");
     expect(session.provider?.id).toBe(provider1.id);
     expect(session.getProviderChain()).toEqual(
       expect.arrayContaining([
@@ -295,8 +296,153 @@ describe("ProxyForwarder - fake 200 HTML body", () => {
     expect(fetchWithoutAutoDecode).toHaveBeenCalledTimes(1);
     expect(mocks.pickRandomProviderWithExclusion).not.toHaveBeenCalled();
     expect(mocks.recordFailure).not.toHaveBeenCalled();
-    expect(mocks.containCyberPolicy).toHaveBeenCalledTimes(1);
+    expect(mocks.containPolicyRejection).toHaveBeenCalledTimes(1);
+    expect(mocks.containPolicyRejection).toHaveBeenCalledWith(expect.anything(), "cyber_policy");
     expect(session.provider?.id).toBe(provider1.id);
+  });
+
+  test("bio policy response.failed is not retried or switched to another provider", async () => {
+    const provider1 = createProvider({
+      id: 1,
+      name: "bio-policy-a",
+      providerType: "codex",
+      maxRetryAttempts: 1,
+      firstByteTimeoutStreamingMs: 0,
+    });
+    const provider2 = createProvider({ id: 2, name: "bio-policy-b", providerType: "codex" });
+    const session = createSession();
+    session.requestUrl = new URL("https://example.com/v1/responses");
+    session.endpointPolicy = resolveEndpointPolicy("/v1/responses");
+    session.originalFormat = "openai";
+    session.request.message = { model: "gpt-5.6", input: "hello", stream: true };
+    session.messageContext = { id: 223, user: { id: 8 } } as ProxySession["messageContext"];
+    session.setProvider(provider1);
+
+    const realErrors = await vi.importActual<typeof import("@/app/v1/_lib/proxy/errors")>(
+      "@/app/v1/_lib/proxy/errors"
+    );
+    mocks.categorizeErrorAsync.mockImplementation(realErrors.categorizeErrorAsync);
+    mocks.pickRandomProviderWithExclusion.mockResolvedValue(provider2);
+    const body =
+      'data: {"type":"response.failed","response":{"error":{"code":"bio_policy","message":"This content was flagged for possible biological risk."}}}\n\n';
+    const fetchWithoutAutoDecode = vi.spyOn(ProxyForwarder as never, "fetchWithoutAutoDecode");
+    fetchWithoutAutoDecode.mockResolvedValueOnce(
+      new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } })
+    );
+
+    await expect(ProxyForwarder.send(session)).rejects.toMatchObject({ statusCode: 400 });
+
+    expect(fetchWithoutAutoDecode).toHaveBeenCalledTimes(1);
+    expect(mocks.pickRandomProviderWithExclusion).not.toHaveBeenCalled();
+    expect(mocks.recordFailure).not.toHaveBeenCalled();
+    expect(mocks.containPolicyRejection).toHaveBeenCalledTimes(1);
+    expect(mocks.containPolicyRejection).toHaveBeenCalledWith(expect.anything(), "bio_policy");
+    expect(session.provider?.id).toBe(provider1.id);
+    expect(session.getProviderChain()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: provider1.id,
+          reason: "client_error_non_retryable",
+          statusCode: 400,
+        }),
+      ])
+    );
+  });
+
+  test("HTTP bio policy error is not retried or switched to another provider", async () => {
+    const provider1 = createProvider({ id: 1, name: "bio-policy-http-a", providerType: "codex" });
+    const provider2 = createProvider({ id: 2, name: "bio-policy-http-b", providerType: "codex" });
+    const session = createSession();
+    session.requestUrl = new URL("https://example.com/v1/responses");
+    session.endpointPolicy = resolveEndpointPolicy("/v1/responses");
+    session.originalFormat = "openai";
+    session.request.message = { model: "gpt-5.6", input: "hello", stream: false };
+    session.messageContext = { id: 224, user: { id: 8 } } as ProxySession["messageContext"];
+    session.setProvider(provider1);
+
+    const realErrors = await vi.importActual<typeof import("@/app/v1/_lib/proxy/errors")>(
+      "@/app/v1/_lib/proxy/errors"
+    );
+    mocks.categorizeErrorAsync.mockImplementation(realErrors.categorizeErrorAsync);
+    mocks.pickRandomProviderWithExclusion.mockResolvedValue(provider2);
+    const fetchWithoutAutoDecode = vi.spyOn(ProxyForwarder as never, "fetchWithoutAutoDecode");
+    fetchWithoutAutoDecode.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          error: {
+            code: "bio_policy",
+            message: "This content was flagged for possible biological risk.",
+          },
+        }),
+        {
+          status: 400,
+          headers: { "content-type": "application/json" },
+        }
+      )
+    );
+
+    await expect(ProxyForwarder.send(session)).rejects.toMatchObject({ statusCode: 400 });
+
+    expect(fetchWithoutAutoDecode).toHaveBeenCalledTimes(1);
+    expect(mocks.pickRandomProviderWithExclusion).not.toHaveBeenCalled();
+    expect(mocks.recordFailure).not.toHaveBeenCalled();
+    expect(mocks.containPolicyRejection).toHaveBeenCalledTimes(1);
+    expect(mocks.containPolicyRejection).toHaveBeenCalledWith(expect.anything(), "bio_policy");
+    expect(session.provider?.id).toBe(provider1.id);
+  });
+
+  test("hedge path contains bio policy rejection and preserves the upstream terminal error", async () => {
+    const provider1 = createProvider({
+      id: 1,
+      name: "bio-hedge-a",
+      providerType: "codex",
+      maxRetryAttempts: 1,
+      // > 0 且 stream=true：请求走 sendStreamingWithHedge 而非普通重试循环
+      firstByteTimeoutStreamingMs: 30_000,
+    });
+    const provider2 = createProvider({
+      id: 2,
+      name: "bio-hedge-b",
+      providerType: "codex",
+      firstByteTimeoutStreamingMs: 30_000,
+    });
+    const session = createSession();
+    session.requestUrl = new URL("https://example.com/v1/responses");
+    session.endpointPolicy = resolveEndpointPolicy("/v1/responses");
+    session.originalFormat = "openai";
+    session.request.message = { model: "gpt-5.6", input: "hello", stream: true };
+    session.messageContext = { id: 323, user: { id: 9 } } as ProxySession["messageContext"];
+    session.setProvider(provider1);
+
+    const realErrors = await vi.importActual<typeof import("@/app/v1/_lib/proxy/errors")>(
+      "@/app/v1/_lib/proxy/errors"
+    );
+    mocks.categorizeErrorAsync.mockImplementation(realErrors.categorizeErrorAsync);
+    mocks.pickRandomProviderWithExclusion.mockResolvedValue(provider2);
+    const body =
+      'data: {"type":"response.failed","response":{"error":{"code":"bio_policy","message":"This content was flagged for possible biological risk."}}}\n\n';
+    const fetchWithoutAutoDecode = vi.spyOn(ProxyForwarder as never, "fetchWithoutAutoDecode");
+    fetchWithoutAutoDecode.mockResolvedValueOnce(
+      new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } })
+    );
+
+    const rejection = await ProxyForwarder.send(session).catch((thrown) => thrown as ProxyError);
+
+    // 终态必须是上游拒绝派生的错误（400 + bio_policy matcher + 结构化 body），
+    // 不能被替换成 "所有供应商暂时不可用" 的合成错误。fake-200 路径的
+    // ProxyError.message 保留检测码（与 cyber 在基线上的行为一致）。
+    expect(rejection).toBeInstanceOf(ProxyError);
+    expect(rejection.statusCode).toBe(400);
+    expect(rejection.upstreamError).toMatchObject({
+      statusCodeInferenceMatcherId: "bio_policy",
+      rawBody: expect.stringContaining('"code":"bio_policy"'),
+    });
+    expect(rejection.message).not.toBe(ALL_PROVIDERS_UNAVAILABLE_MESSAGE);
+    expect(fetchWithoutAutoDecode).toHaveBeenCalledTimes(1);
+    expect(mocks.pickRandomProviderWithExclusion).not.toHaveBeenCalled();
+    expect(mocks.recordFailure).not.toHaveBeenCalled();
+    expect(mocks.containPolicyRejection).toHaveBeenCalledTimes(1);
+    expect(mocks.containPolicyRejection).toHaveBeenCalledWith(expect.anything(), "bio_policy");
   });
 
   test("200 + text/html 的 HTML 页面应视为失败并切换供应商", async () => {

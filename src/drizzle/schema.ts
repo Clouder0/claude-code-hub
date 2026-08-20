@@ -22,7 +22,7 @@ import type { FilterOperation } from "@/lib/request-filter-types";
 import type { IpExtractionConfig } from "@/types/ip-extraction";
 import type { AuditCategory } from "@/types/audit-log";
 import type { CacheWriteAccounting } from "@/lib/billing/openai-usage-accounting";
-import type { CyberSecurityEventType } from "@/lib/security/cyber-security-signals";
+import type { SecurityEventType } from "@/lib/security/security-signals";
 
 // Enums
 export const dailyResetModeEnum = pgEnum('daily_reset_mode', ['fixed', 'rolling']);
@@ -648,7 +648,8 @@ export const securityEvents = pgTable('security_event', {
   messageRequestId: integer('message_request_id').references(() => messageRequest.id, {
     onDelete: 'set null',
   }),
-  type: varchar('type', { length: 32 }).notNull().$type<CyberSecurityEventType>(),
+  // varchar 而非 pg enum：新增策略码（如 bio_policy）只需扩展 TS 闭合类型，无需迁移。
+  type: varchar('type', { length: 32 }).notNull().$type<SecurityEventType>(),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 }, (table) => ({
   securityEventsRequestTypeUniqueIdx: uniqueIndex('idx_security_event_request_type_unique').on(
