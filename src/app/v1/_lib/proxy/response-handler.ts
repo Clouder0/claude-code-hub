@@ -3199,9 +3199,11 @@ export class ProxyResponseHandler {
           }
         }
 
-        // Anthropic 流式 thinking signature 模型检测(优先于明文 model 字段)
+        // Anthropic 流式 thinking signature 模型检测(优先于明文 model 字段)。
+        // 经由 getBillingRequestMessage 读取：高并发模式下请求体已在门控提交后
+        // 释放为投影（投影保留了 thinking 配置），语义与读原树一致。
         const currentRequestedModel = session.getCurrentModel();
-        const thinkingActuallyEnabled = isThinkingEnabled(session.request.message);
+        const thinkingActuallyEnabled = isThinkingEnabled(session.getBillingRequestMessage() ?? {});
         const anthropicModelDetection = resolveAnthropicStreamActualResponseModel({
           providerType: provider.providerType,
           requestedModel: currentRequestedModel,

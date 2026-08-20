@@ -42,6 +42,46 @@ import {
 export type { ProxySessionCreationOptions } from "./request-retention";
 
 /**
+ * 释放后的 request.message 占位符：冻结空对象。直接读取（应仅存在于
+ * 释放前的代码路径）得到空对象而非崩溃；真实消费者走 getBillingRequestMessage()。
+ */
+const RELEASED_REQUEST_BODY_MESSAGE: Record<string, unknown> = Object.freeze({}) as Record<
+  string,
+  unknown
+>;
+
+/**
+ * 计费投影保留的顶层标量字段（浅拷贝）。大数组/长文本（input/messages/
+ * instructions/tools/system）全部丢弃——它们是内存大头，且提交后无人读取。
+ */
+const REQUEST_BODY_PROJECTION_KEYS = [
+  "model",
+  "stream",
+  "service_tier",
+  "prompt_cache_key",
+  "max_tokens",
+  "temperature",
+  "top_p",
+  "reasoning_effort",
+] as const;
+
+function buildRequestBodyProjection(message: Record<string, unknown>): Record<string, unknown> {
+  const projection: Record<string, unknown> = {};
+  for (const key of REQUEST_BODY_PROJECTION_KEYS) {
+    const value = message[key];
+    if (value !== undefined) {
+      projection[key] = value;
+    }
+  }
+  // thinking 配置是很小的对象（开关 + 预算数字），流式收尾的
+  // isThinkingEnabled（Anthropic 实际模型检测）仍需读取它。
+  if (message.thinking !== undefined && message.thinking !== null) {
+    projection.thinking = message.thinking;
+  }
+  return projection;
+}
+
+/**
  * Classification of an auth failure, used to decide whether to record the
  * failure against the brute-force rate limiter.
  *
@@ -132,6 +172,9 @@ export class ProxySession {
   private forwardedRequestMessageSource: string | null = null;
   private forwardedRequestMessage: Record<string, unknown> | null = null;
 
+  // 门控提交后是否已释放请求体（见 releaseRequestBodyAfterCommit）。
+  private requestBodyReleased = false;
+
   /**
    * Record the forwarded body together with the object it was serialized from.
    * Billing reads via getForwardedRequestMessage() then hit the cached object instead of
@@ -139,6 +182,11 @@ export class ProxySession {
    * forwarder serializes immediately before this call and never touches it again).
    */
   setForwardedRequestBody(bodyString: string, message: Record<string, unknown>): void {
+    if (this.requestBodyReleased) {
+      throw new Error(
+        "setForwardedRequestBody called after releaseRequestBodyAfterCommit: the request body was released at gate commit and no re-forward path may exist"
+      );
+    }
     this.forwardedRequestBody = bodyString;
     this.forwardedRequestMessageSource = bodyString;
     this.forwardedRequestMessage = message;
@@ -159,6 +207,48 @@ export class ProxySession {
     this.forwardedRequestBody = source.forwardedRequestBody;
     this.forwardedRequestMessageSource = source.forwardedRequestMessageSource;
     this.forwardedRequestMessage = source.forwardedRequestMessage;
+    // 正常时序中 winner sync 早于门控提交；若发生 copy 到已释放目标，
+    // 以拷贝来的活跃对为准，解除 released 状态避免 getter 返回过期投影。
+    this.requestBodyReleased = false;
+  }
+
+  isRequestBodyReleased(): boolean {
+    return this.requestBodyReleased;
+  }
+
+  /**
+   * 流式门控提交语义内容后释放请求体（2026-08-20 内存优化）。
+   *
+   * 前提（调用方必须保证）：streamGateCommitMarker.verdict === "content"——
+   * 首个语义内容字节已转发给客户端，所有重试路径（transport 错误、非 2xx、
+   * 门控 fake-200 throw）已在提交前退出，此后重试在结构上不可能。
+   *
+   * 释放内容：原始解析树（request.message）、过滤后副本与序列化字符串
+   * （forwardedRequestBody 及其缓存解码）。中位 107k-token 上下文下这三者
+   * 合计约 2-4.5MB/流，而流的 90%+ 生命周期在提交之后——这是每流驻留内存
+   * 与 GC 分配压力的主要来源。
+   *
+   * 保留内容：计费投影（标量字段 + thinking 配置）。提交后的消费者
+   * （getBillingModel / getRequestedCodexServiceTier / langfuse 预览 /
+   * isThinkingEnabled）全部经由 getBillingRequestMessage() 读投影。
+   * request.model / request.log 等既有标量字段不受影响。
+   */
+  releaseRequestBodyAfterCommit(): void {
+    if (this.requestBodyReleased) return;
+    const source =
+      this.forwardedRequestMessage ??
+      ((this.request.message as Record<string, unknown> | null) &&
+      Object.keys(this.request.message as object).length > 0
+        ? (this.request.message as Record<string, unknown>)
+        : null);
+    const projection = source ? buildRequestBodyProjection(source) : {};
+    this.requestBodyReleased = true;
+    this.forwardedRequestBody = null;
+    this.forwardedRequestMessageSource = null;
+    this.forwardedRequestMessage = projection;
+    // request 本身是 readonly，但其字段可变：就地清空大对象引用。
+    this.request.message = RELEASED_REQUEST_BODY_MESSAGE;
+    this.request.buffer = undefined;
   }
 
   // Session ID（用于会话粘性和并发限流）
@@ -801,8 +891,15 @@ export class ProxySession {
    *
    * Request filters intentionally operate on a detached body, so session.request.message may
    * describe the pre-filter request. Billing must use the serialized upstream body instead.
+   *
+   * After releaseRequestBodyAfterCommit() this returns the billing projection
+   * (scalar fields + thinking config) instead of the full tree.
    */
   getForwardedRequestMessage(): Record<string, unknown> | null {
+    if (this.requestBodyReleased) {
+      return this.forwardedRequestMessage;
+    }
+
     const source = this.forwardedRequestBody;
     if (!source) {
       return null;

@@ -1515,6 +1515,18 @@ export class ProxyForwarder {
           // 把最终成功/失败结算延迟到 ResponseHandler：等 SSE 正常结束后再基于最终 body 补充检查并更新内部状态。
           if (isSSE) {
             const streamGateCommitMarker = consumeStreamingResponseCommitMarker(response);
+
+            // 门控已提交语义内容（verdict=content）且高并发模式：所有重试路径
+            // 已在提交前退出，请求体此后只剩计费投影消费者——释放原文树与
+            // 序列化字符串（每流 2-4.5MB 的驻留内存与 GC 分配大头）。
+            // legacy/shadow 门控不带 content marker，不释放（保守边界）。
+            if (
+              streamGateCommitMarker?.verdict === "content" &&
+              session.isHighConcurrencyModeEnabled()
+            ) {
+              session.releaseRequestBodyAfterCommit();
+            }
+
             setDeferredStreamingFinalization(session, {
               providerId: currentProvider.id,
               providerName: currentProvider.name,
