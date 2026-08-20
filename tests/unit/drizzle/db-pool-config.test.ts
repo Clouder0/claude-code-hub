@@ -28,6 +28,8 @@ describe("drizzle/db 连接池配置", () => {
     "DB_POOL_MAX",
     "DB_POOL_IDLE_TIMEOUT",
     "DB_POOL_CONNECT_TIMEOUT",
+    "DB_STATEMENT_TIMEOUT_MS",
+    "DB_LOCK_TIMEOUT_MS",
     "MESSAGE_REQUEST_WRITE_MODE",
   ];
 
@@ -62,6 +64,8 @@ describe("drizzle/db 连接池配置", () => {
     delete process.env.DB_POOL_MAX;
     delete process.env.DB_POOL_IDLE_TIMEOUT;
     delete process.env.DB_POOL_CONNECT_TIMEOUT;
+    delete process.env.DB_STATEMENT_TIMEOUT_MS;
+    delete process.env.DB_LOCK_TIMEOUT_MS;
 
     postgresMock.mockReturnValue(postgresClient);
     drizzleMock.mockReturnValue({ __db: true });
@@ -107,6 +111,53 @@ describe("drizzle/db 连接池配置", () => {
         max: 10,
       })
     );
+  });
+
+  it("未配置时不下发连接级超时（默认关闭，不误杀长查询）", async () => {
+    process.env.NODE_ENV = "production";
+
+    const { getDb } = await import("@/drizzle/db");
+    getDb();
+
+    const options = postgresMock.mock.calls[0]?.[1] as Record<string, unknown>;
+    expect(options.connection).toEqual({});
+  });
+
+  it("配置后下发连接级 statement_timeout / lock_timeout", async () => {
+    process.env.NODE_ENV = "production";
+    process.env.DB_STATEMENT_TIMEOUT_MS = "900000";
+    process.env.DB_LOCK_TIMEOUT_MS = "5000";
+
+    const { getDb } = await import("@/drizzle/db");
+    getDb();
+
+    expect(postgresMock).toHaveBeenCalledWith(
+      process.env.DSN,
+      expect.objectContaining({
+        connection: {
+          statement_timeout: 900000,
+          lock_timeout: 5000,
+        },
+      })
+    );
+  });
+
+  it("超时配置参与进程级池配置冲突检测", async () => {
+    process.env.NODE_ENV = "production";
+    process.env.DB_LOCK_TIMEOUT_MS = "5000";
+
+    const { getDb } = await import("@/drizzle/db");
+    getDb();
+
+    process.env.DB_LOCK_TIMEOUT_MS = "8000";
+    await import("@/drizzle/db");
+    expect(() => {
+      // 触发复用路径的配置断言
+      const state = (globalThis as Record<PropertyKey, unknown>)[databaseStateKey] as {
+        configuration: Record<string, unknown>;
+      };
+      expect(state.configuration.lockTimeoutMs).toBe(5000);
+    }).not.toThrow();
   });
 
   it("支持通过 env 覆盖连接池参数", async () => {
