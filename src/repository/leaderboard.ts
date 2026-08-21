@@ -654,7 +654,6 @@ async function findProviderLeaderboardWithTimezone(
   const eventOutputTokens = sql<number>`provider_billing_event.output_tokens`;
   const eventCacheCreationTokens = sql<number>`provider_billing_event.cache_creation_input_tokens`;
   const eventCacheReadTokens = sql<number>`provider_billing_event.cache_read_input_tokens`;
-  const eventCreatedAt = sql`provider_billing_event.created_at`;
   const eventSuccessRate = sql<number | null>`
     count(CASE WHEN provider_billing_event.success_rate_outcome = 'success' THEN 1 END)::double precision
     / NULLIF(
@@ -680,10 +679,11 @@ async function findProviderLeaderboardWithTimezone(
     )::double precision,
     0::double precision
   )`;
-  const whereConditions = [
-    buildDateCondition(period, timezone, dateRange, eventCreatedAt),
-    providerType ? eq(providers.providerType, providerType) : undefined,
-  ];
+  // The period window is already enforced inside the event CTE via
+  // ledgerCreatedAtCondition; both winner and hedge-loser events inherit the
+  // ledger row's created_at, so re-filtering on event created_at would only
+  // duplicate the predicate on every aggregated row.
+  const whereConditions = [providerType ? eq(providers.providerType, providerType) : undefined];
 
   const totalRequestsExpr = sql<number>`count(*)::double precision`;
   const totalCostExpr = sql<string>`COALESCE(sum(${eventCost}), 0)`;
@@ -702,49 +702,60 @@ async function findProviderLeaderboardWithTimezone(
     avgCostPerMillionTokens: totalTokens > 0 ? (totalCost * 1_000_000) / totalTokens : null,
   });
 
-  const rankings = await db
-    .select({
-      providerId: eventProviderId,
-      providerName: providers.name,
-      totalRequests: totalRequestsExpr,
-      totalCost: totalCostExpr,
-      totalTokens: totalTokensExpr,
-      successRate: eventSuccessRate,
-      avgTtfbMs: eventAvgTtfbMs,
-      avgTokensPerSecond: eventAvgTokensPerSecond,
-    })
-    .from(providerBillingEvents)
-    .innerJoin(
-      providers,
-      and(sql`${eventProviderId} = ${providers.id}`, isNull(providers.deletedAt))
-    )
-    .where(
-      and(...whereConditions.filter((c): c is NonNullable<(typeof whereConditions)[number]> => !!c))
-    )
-    .groupBy(eventProviderId, providers.name)
-    .orderBy(desc(totalCostExpr));
+  const providersJoin = and(sql`${eventProviderId} = ${providers.id}`, isNull(providers.deletedAt));
+  const whereClause = and(
+    ...whereConditions.filter((c): c is NonNullable<(typeof whereConditions)[number]> => !!c)
+  );
 
-  const baseEntries: ProviderLeaderboardEntry[] = rankings.map((entry) => {
+  const mapProviderEntry = (entry: {
+    providerId: number;
+    providerName: string;
+    totalRequests: number;
+    totalCost: string;
+    totalTokens: number;
+    successRate: number | null;
+    avgTtfbMs: number | null;
+    avgTokensPerSecond: number | null;
+  }): ProviderLeaderboardEntry => {
     const totalCost = parseFloat(entry.totalCost);
-    const totalRequests = entry.totalRequests;
-    const totalTokens = entry.totalTokens;
-    const avgCosts = computeAvgCosts(totalCost, totalRequests, totalTokens);
+    const avgCosts = computeAvgCosts(totalCost, entry.totalRequests, entry.totalTokens);
     return {
       providerId: entry.providerId,
       providerName: entry.providerName,
-      totalRequests,
+      totalRequests: entry.totalRequests,
       totalCost,
-      totalTokens,
+      totalTokens: entry.totalTokens,
       successRate: clampRatio01Nullable(entry.successRate),
       avgTtfbMs: entry.avgTtfbMs ?? 0,
       avgTokensPerSecond: entry.avgTokensPerSecond ?? 0,
       ...avgCosts,
     };
-  });
+  };
 
-  if (!includeModelStats) return baseEntries;
+  if (!includeModelStats) {
+    const rankings = await db
+      .select({
+        providerId: eventProviderId,
+        providerName: providers.name,
+        totalRequests: totalRequestsExpr,
+        totalCost: totalCostExpr,
+        totalTokens: totalTokensExpr,
+        successRate: eventSuccessRate,
+        avgTtfbMs: eventAvgTtfbMs,
+        avgTokensPerSecond: eventAvgTokensPerSecond,
+      })
+      .from(providerBillingEvents)
+      .innerJoin(providers, providersJoin)
+      .where(whereClause)
+      .groupBy(eventProviderId, providers.name)
+      .orderBy(desc(totalCostExpr));
 
-  // Model breakdown per provider
+    return rankings.map(mapProviderEntry);
+  }
+
+  // Model breakdown per provider. Provider-level rows (modelGrain = 1) and
+  // per-model rows (modelGrain = 0) come out of ONE GROUPING SETS pass over
+  // the event CTE — the previous shape executed the full CTE twice.
   const systemSettings = await getSystemSettings();
   const billingModelSource = systemSettings.billingModelSource;
   const rawModelField =
@@ -752,11 +763,14 @@ async function findProviderLeaderboardWithTimezone(
       ? sql<string>`COALESCE(provider_billing_event.original_model, provider_billing_event.model)`
       : sql<string>`COALESCE(provider_billing_event.model, provider_billing_event.original_model)`;
   const modelField = sql<string>`NULLIF(TRIM(${rawModelField}), '')`;
+  const modelGrainExpr = sql<number>`GROUPING(${modelField})`;
 
-  const modelRows = await db
+  const rows = await db
     .select({
       providerId: eventProviderId,
+      providerName: providers.name,
       model: modelField,
+      modelGrain: modelGrainExpr,
       totalRequests: totalRequestsExpr,
       totalCost: totalCostExpr,
       totalTokens: totalTokensExpr,
@@ -765,30 +779,31 @@ async function findProviderLeaderboardWithTimezone(
       avgTokensPerSecond: eventAvgTokensPerSecond,
     })
     .from(providerBillingEvents)
-    .innerJoin(
-      providers,
-      and(sql`${eventProviderId} = ${providers.id}`, isNull(providers.deletedAt))
+    .innerJoin(providers, providersJoin)
+    .where(whereClause)
+    .groupBy(
+      sql`GROUPING SETS ((${eventProviderId}, ${providers.name}), (${eventProviderId}, ${modelField}))`
     )
-    .where(
-      and(...whereConditions.filter((c): c is NonNullable<(typeof whereConditions)[number]> => !!c))
-    )
-    .groupBy(eventProviderId, modelField)
-    .orderBy(desc(totalCostExpr), desc(sql`count(*)`));
+    .orderBy(desc(modelGrainExpr), desc(totalCostExpr), desc(sql`count(*)`));
 
+  const baseEntries: ProviderLeaderboardEntry[] = [];
   const modelStatsByProvider = new Map<number, ModelProviderStat[]>();
-  for (const row of modelRows) {
+  const basisDisclosureRequired = billingModelSource !== "original";
+
+  for (const row of rows) {
+    if (row.modelGrain === 1) {
+      baseEntries.push(mapProviderEntry(row));
+      continue;
+    }
     if (!row.model) continue;
     const totalCost = parseFloat(row.totalCost);
-    const totalRequests = row.totalRequests;
-    const totalTokens = row.totalTokens;
-    const avgCosts = computeAvgCosts(totalCost, totalRequests, totalTokens);
+    const avgCosts = computeAvgCosts(totalCost, row.totalRequests, row.totalTokens);
     const stats = modelStatsByProvider.get(row.providerId) ?? [];
-    const basisDisclosureRequired = billingModelSource !== "original";
     stats.push({
       model: row.model,
-      totalRequests,
+      totalRequests: row.totalRequests,
       totalCost,
-      totalTokens,
+      totalTokens: row.totalTokens,
       successRate: basisDisclosureRequired ? null : clampRatio01Nullable(row.successRate),
       avgTtfbMs: row.avgTtfbMs ?? 0,
       avgTokensPerSecond: row.avgTokensPerSecond ?? 0,

@@ -26,6 +26,30 @@ function joinConditions(conditions: SQL[]): SQL {
   return sql.join(conditions, sql` AND `);
 }
 
+// Narrow projection consumed by every aggregate surface (winner branch, loser
+// expansion, and outer cost/token/success aggregates). `ledger.*` previously
+// dragged cost_breakdown / special_settings jsonb and a dozen unused columns
+// through the CTE materialization. Extend this list only after checking every
+// embedding surface listed on buildProviderBillingEventsQuery.
+const LEDGER_EVENT_ROW_COLUMNS = sql`
+  ledger.request_id,
+  ledger.created_at,
+  ledger.user_id,
+  ledger.key,
+  ledger.model,
+  ledger.original_model,
+  ledger.success_rate_outcome,
+  ledger.ttfb_ms,
+  ledger.duration_ms,
+  ledger.cost_usd,
+  ledger.input_tokens,
+  ledger.output_tokens,
+  ledger.cache_creation_input_tokens,
+  ledger.cache_read_input_tokens,
+  ledger.final_provider_id,
+  ledger.hedge_losers
+`;
+
 type ProviderMatchKind = "all" | "winner" | "loser";
 
 export function buildRawLoserCandidates(
@@ -242,14 +266,14 @@ export function buildProviderBillingEventsQuery(
   const ledgerRows = (() => {
     if (options.providerId === undefined) {
       return sql`
-        SELECT ledger.*, 'all'::text AS provider_match_kind
+        SELECT ${LEDGER_EVENT_ROW_COLUMNS}, 'all'::text AS provider_match_kind
         FROM usage_ledger AS ledger
         WHERE ${joinConditions(rowConditions)}
       `;
     }
 
     return sql`
-      SELECT ledger.*, 'winner'::text AS provider_match_kind
+      SELECT ${LEDGER_EVENT_ROW_COLUMNS}, 'winner'::text AS provider_match_kind
       FROM usage_ledger AS ledger
       WHERE ${joinConditions(rowConditions)}
         AND ledger.final_provider_id = ${options.providerId}

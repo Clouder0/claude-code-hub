@@ -270,11 +270,15 @@ describe("Provider Leaderboard Model Breakdown", () => {
   });
 
   it("includes modelStats when includeModelStats=true and excludes empty model names", async () => {
+    // Merged GROUPING SETS pass: provider-level rows (modelGrain=1) come first,
+    // per-model rows (modelGrain=0) follow, both cost-desc — one query total.
     chainMocks = [
       createChainMock([
         {
           providerId: 1,
           providerName: "provider-a",
+          model: null,
+          modelGrain: 1,
           totalRequests: 100,
           totalCost: "10.0",
           totalTokens: 1000,
@@ -285,6 +289,8 @@ describe("Provider Leaderboard Model Breakdown", () => {
         {
           providerId: 2,
           providerName: "provider-b",
+          model: null,
+          modelGrain: 1,
           totalRequests: 50,
           totalCost: "5.0",
           totalTokens: 500,
@@ -292,11 +298,11 @@ describe("Provider Leaderboard Model Breakdown", () => {
           avgTtfbMs: 300,
           avgTokensPerSecond: 40,
         },
-      ]),
-      createChainMock([
         {
           providerId: 1,
+          providerName: null,
           model: "model-a",
+          modelGrain: 0,
           totalRequests: 60,
           totalCost: "6.0",
           totalTokens: 600,
@@ -306,7 +312,9 @@ describe("Provider Leaderboard Model Breakdown", () => {
         },
         {
           providerId: 1,
+          providerName: null,
           model: "model-b",
+          modelGrain: 0,
           totalRequests: 40,
           totalCost: "4.0",
           totalTokens: 400,
@@ -316,7 +324,9 @@ describe("Provider Leaderboard Model Breakdown", () => {
         },
         {
           providerId: 2,
+          providerName: null,
           model: "",
+          modelGrain: 0,
           totalRequests: 1,
           totalCost: "0.1",
           totalTokens: 10,
@@ -326,7 +336,9 @@ describe("Provider Leaderboard Model Breakdown", () => {
         },
         {
           providerId: 2,
+          providerName: null,
           model: "model-c",
+          modelGrain: 0,
           totalRequests: 50,
           totalCost: "5.0",
           totalTokens: 500,
@@ -340,6 +352,8 @@ describe("Provider Leaderboard Model Breakdown", () => {
     const { findDailyProviderLeaderboard } = await import("@/repository/leaderboard");
     const result = await findDailyProviderLeaderboard(undefined, true);
 
+    // Single scan: the CTE-backed aggregate must run exactly one query.
+    expect(mockSelect).toHaveBeenCalledTimes(1);
     expect(result).toHaveLength(2);
 
     const p1 = result.find((r) => r.providerId === 1);
@@ -363,6 +377,8 @@ describe("Provider Leaderboard Model Breakdown", () => {
         {
           providerId: 1,
           providerName: "provider-a",
+          model: null,
+          modelGrain: 1,
           totalRequests: 10,
           totalCost: "1.0",
           totalTokens: 100,
@@ -370,11 +386,11 @@ describe("Provider Leaderboard Model Breakdown", () => {
           avgTtfbMs: 100,
           avgTokensPerSecond: 10,
         },
-      ]),
-      createChainMock([
         {
           providerId: 1,
+          providerName: null,
           model: "redirected-model",
+          modelGrain: 0,
           totalRequests: 10,
           totalCost: "1.0",
           totalTokens: 100,

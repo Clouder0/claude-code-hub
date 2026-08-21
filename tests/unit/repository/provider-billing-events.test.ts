@@ -192,7 +192,11 @@ describe("buildProviderBillingEventsQuery", () => {
   it("splits provider winners and losers into indexable branches without double-emitting events", () => {
     const sql = normalizeSql(compile({ providerId: 42 }).sql);
 
-    expect(sql).toContain("SELECT ledger.*, 'winner'::text AS provider_match_kind");
+    expect(sql).toContain("SELECT ledger.request_id, ledger.created_at, ledger.user_id");
+    expect(sql).toContain(
+      "ledger.cache_read_input_tokens, ledger.final_provider_id, ledger.hedge_losers , 'winner'::text AS provider_match_kind"
+    );
+    expect(sql).toContain("AS provider_match_kind FROM usage_ledger AS ledger");
     expect(sql).toContain("AND ledger.final_provider_id = $3");
     expect(sql).toContain("'winner'::text AS provider_match_kind, item.value");
     expect(sql).toContain("AND ledger.final_provider_id = $6");
@@ -202,6 +206,19 @@ describe("buildProviderBillingEventsQuery", () => {
     expect(sql).toContain("ledger.hedge_losers @> $10::jsonb");
     expect(sql).toContain("WHERE ledger.provider_match_kind IN ('all', 'winner')");
     expect(sql).toContain("WHERE provider_match_kind IN ('all', 'loser')");
+  });
+
+  it("projects only the columns consumed by aggregate surfaces", () => {
+    for (const sqlText of [compile().sql, compile({ providerId: 42 }).sql]) {
+      const sql = normalizeSql(sqlText);
+      expect(sql).not.toContain("ledger.*");
+      expect(sql).not.toContain("cost_breakdown");
+      expect(sql).not.toContain("special_settings");
+      expect(sql).not.toContain("observed_input_tokens");
+      expect(sql).not.toContain("client_ip");
+      expect(sql).toContain("ledger.hedge_losers");
+      expect(sql).toContain("ledger.final_provider_id");
+    }
   });
 
   it("omits optional filters when none are supplied", () => {
