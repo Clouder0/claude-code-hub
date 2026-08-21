@@ -1899,4 +1899,51 @@ run("usage ledger integration", () => {
     const result = await findUsageLogs({ userId, page: 1, pageSize: 5 });
     expect(Array.isArray(result.logs)).toBe(true);
   });
+
+  test("usage logs summary/rows split composes identically to findUsageLogsWithDetails", async () => {
+    const key = nextKey("summary-rows-split");
+    const userId = nextUserId();
+    const providerId = nextProviderId();
+
+    await insertMessageRequestRow({
+      key,
+      userId,
+      providerId,
+      model: "split-model",
+      statusCode: 200,
+      costUsd: "0.020000000000000",
+      inputTokens: 30,
+      outputTokens: 10,
+      createdAt: new Date(),
+    });
+    await insertMessageRequestRow({
+      key: nextKey("summary-rows-split-2"),
+      userId,
+      providerId,
+      model: "split-model",
+      statusCode: 500,
+      costUsd: "0.030000000000000",
+      inputTokens: 5,
+      outputTokens: 5,
+      createdAt: new Date(),
+    });
+
+    const { findUsageLogsSummary, findUsageLogsRows, findUsageLogsWithDetails } = await import(
+      "@/repository/usage-logs"
+    );
+
+    const filters = { userId, page: 1, pageSize: 10 } as const;
+    const [summaryPart, rowsPart, combined] = await Promise.all([
+      findUsageLogsSummary(filters),
+      findUsageLogsRows(filters),
+      findUsageLogsWithDetails(filters),
+    ]);
+
+    expect(summaryPart.total).toBe(combined.total);
+    expect(summaryPart.summary).toEqual(combined.summary);
+    expect(rowsPart.logs).toEqual(combined.logs);
+    expect(summaryPart.total).toBeGreaterThanOrEqual(2);
+    expect(summaryPart.summary.totalRequests).toBeGreaterThanOrEqual(2);
+    expect(summaryPart.summary.totalCost).toBeCloseTo(0.05, 10);
+  });
 });

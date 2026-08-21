@@ -64,6 +64,8 @@ export interface VirtualizedLogsTableFilters {
   sessionId?: string;
   startTime?: number;
   endTime?: number;
+  /** 显式请求全部时间（绕过默认 7 天窗口） */
+  allTime?: boolean;
   statusCode?: number;
   excludeStatusCode200?: boolean;
   model?: string;

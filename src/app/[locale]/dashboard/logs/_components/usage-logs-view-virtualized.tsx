@@ -24,7 +24,11 @@ import { formatCurrency } from "@/lib/utils/currency";
 import type { Key } from "@/types/key";
 import type { ProviderDisplay } from "@/types/provider";
 import type { BillingModelSource, SystemSettings } from "@/types/system-config";
-import { buildLogsUrlQuery, parseLogsUrlFilters } from "../_utils/logs-query";
+import {
+  applyDefaultLogsTimeWindow,
+  buildLogsUrlQuery,
+  parseLogsUrlFilters,
+} from "../_utils/logs-query";
 import { ColumnVisibilityDropdown } from "./column-visibility-dropdown";
 import { UsageLogsFilters } from "./usage-logs-filters";
 import { UsageLogsStatsPanel } from "./usage-logs-stats-panel";
@@ -164,6 +168,7 @@ function UsageLogsViewContent({
       sessionId: _params.get("sessionId") ?? undefined,
       startTime: _params.get("startTime") ?? undefined,
       endTime: _params.get("endTime") ?? undefined,
+      allTime: _params.get("allTime") ?? undefined,
       statusCode: _params.get("statusCode") ?? undefined,
       model: _params.get("model") ?? undefined,
       actualResponseModelMismatch: _params.get("actualResponseModelMismatch") ?? undefined,
@@ -172,8 +177,10 @@ function UsageLogsViewContent({
       page: _params.get("page") ?? undefined,
     });
 
-    return parsed;
-  }, [_params]);
+    // 默认窗口：URL 未带时间且未显式全部时间时展示"最近 7 天"
+    //（picker 显示选中态）；server 端对 API 直调强制同一策略。
+    return applyDefaultLogsTimeWindow(parsed, serverTimeZone);
+  }, [_params, serverTimeZone]);
 
   const { data: overviewData } = useQuery<OverviewData>({
     queryKey: ["overview-data"],

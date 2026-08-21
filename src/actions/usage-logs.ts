@@ -9,6 +9,7 @@ import {
 import { logger } from "@/lib/logger";
 import { readLiveChainBatch } from "@/lib/redis/live-chain-store";
 import { RedisKVStore } from "@/lib/redis/redis-kv-store";
+import { getUsageLogsSummaryWithCache } from "@/lib/redis/usage-logs-summary-cache";
 import { buildCsvHeaderLine, buildCsvRows, CSV_BOM } from "@/lib/usage-logs/export/csv";
 import { createSummaryAccumulator } from "@/lib/usage-logs/export/summary";
 import { assembleUsageLogsXlsx, buildDetailRowXml } from "@/lib/usage-logs/export/xlsx";
@@ -17,8 +18,8 @@ import { resolveSystemTimezone } from "@/lib/utils/timezone";
 import {
   findUsageLogSessionIdSuggestions,
   findUsageLogsBatch,
+  findUsageLogsRows,
   findUsageLogsStats,
-  findUsageLogsWithDetails,
   getUsedEndpoints,
   getUsedModels,
   getUsedStatusCodes,
@@ -29,6 +30,22 @@ import {
   type UsageLogsResult,
 } from "@/repository/usage-logs";
 import type { ActionResult } from "./types";
+
+/**
+ * 日志查询的默认时间窗口：startTime 缺省且未显式 allTime 时只查最近 7 天。
+ * 无界聚合（count + 6×SUM）对 message_request 全表代价过高；7 天覆盖绝大多数
+ * 排查场景，需要全量时由 UI"全部时间"或 API allTime=true 显式请求。
+ */
+const DEFAULT_USAGE_LOGS_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+
+function applyDefaultUsageLogsTimeWindow<T extends { startTime?: number; allTime?: boolean }>(
+  filters: T
+): T {
+  if (filters.startTime === undefined && !filters.allTime) {
+    return { ...filters, startTime: Date.now() - DEFAULT_USAGE_LOGS_WINDOW_MS };
+  }
+  return filters;
+}
 
 /**
  * 筛选器选项缓存
@@ -163,13 +180,11 @@ async function buildUsageLogsExport(
     progress: Pick<UsageLogsExportStatus, "processedRows" | "totalRows" | "progressPercent">
   ) => Promise<void> | void
 ): Promise<string> {
-  const initialResult = await findUsageLogsWithDetails({ ...filters, page: 1, pageSize: 1 });
-  let estimatedTotalRows = initialResult.total;
-
-  if (estimatedTotalRows === 0) {
-    const stats = await findUsageLogsStats(filters);
-    estimatedTotalRows = stats.totalRequests;
-  }
+  // 与页面查询同一默认窗口策略：未显式 allTime 且无 startTime 时导出最近 7 天。
+  filters = applyDefaultUsageLogsTimeWindow(filters);
+  const initialResult = await findUsageLogsRows({ ...filters, page: 1, pageSize: 1 });
+  const summary = await getUsageLogsSummaryWithCache(filters);
+  let estimatedTotalRows = Math.max(summary.total, initialResult.logs.length);
 
   // Both formats stream batch-by-batch into string buffers (CSV lines / XLSX row
   // XML + an incremental summary) so the full UsageLogRow[] is never retained.
@@ -317,12 +332,23 @@ export async function getUsageLogs(
 
     // 如果不是 admin，强制过滤为当前用户
     const finalFilters: UsageLogFilters = hasAdminAuthority(session)
-      ? filters
-      : { ...filters, userId: session.user.id };
+      ? applyDefaultUsageLogsTimeWindow(filters)
+      : applyDefaultUsageLogsTimeWindow({ ...filters, userId: session.user.id });
 
-    const result = await findUsageLogsWithDetails(finalFilters);
+    // Summary 走 60s 微缓存（翻页不重扫聚合），行列表永远实时。
+    const [summaryPart, rowsPart] = await Promise.all([
+      getUsageLogsSummaryWithCache(finalFilters),
+      findUsageLogsRows(finalFilters),
+    ]);
 
-    return { ok: true, data: result };
+    return {
+      ok: true,
+      data: {
+        logs: rowsPart.logs,
+        total: summaryPart.total,
+        summary: summaryPart.summary,
+      },
+    };
   } catch (error) {
     logger.error("获取使用日志失败:", error);
     const message = error instanceof Error ? error.message : "获取使用日志失败";
@@ -656,10 +682,10 @@ export async function getUsageLogsStats(
       return { ok: false, error: "未登录" };
     }
 
-    // 如果不是 admin，强制过滤为当前用户
+    // 如果不是 admin，强制过滤为当前用户；同样应用默认 7 天窗口。
     const finalFilters: Omit<UsageLogFilters, "page" | "pageSize"> = hasAdminAuthority(session)
-      ? filters
-      : { ...filters, userId: session.user.id };
+      ? applyDefaultUsageLogsTimeWindow(filters)
+      : applyDefaultUsageLogsTimeWindow({ ...filters, userId: session.user.id });
 
     const stats = await findUsageLogsStats(finalFilters);
 
