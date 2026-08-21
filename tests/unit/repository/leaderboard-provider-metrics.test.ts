@@ -428,11 +428,15 @@ describe("Provider Cache Hit Rate Model Breakdown", () => {
   });
 
   it("includes modelStats field on cache-hit leaderboard entries", async () => {
+    // Merged GROUPING SETS pass: provider rows (modelGrain=1) then model rows
+    // (modelGrain=0) — one query total (the old shape always ran two scans).
     chainMocks = [
       createChainMock([
         {
           providerId: 1,
           providerName: "cache-provider",
+          model: null,
+          modelGrain: 1,
           totalRequests: 50,
           totalCost: "2.5",
           cacheReadTokens: 10000,
@@ -440,11 +444,11 @@ describe("Provider Cache Hit Rate Model Breakdown", () => {
           totalInputTokens: 20000,
           cacheHitRate: 0.5,
         },
-      ]),
-      createChainMock([
         {
           providerId: 1,
+          providerName: null,
           model: "claude-3-opus",
+          modelGrain: 0,
           totalRequests: 30,
           cacheReadTokens: 8000,
           totalInputTokens: 15000,
@@ -452,7 +456,9 @@ describe("Provider Cache Hit Rate Model Breakdown", () => {
         },
         {
           providerId: 1,
+          providerName: null,
           model: "claude-3-sonnet",
+          modelGrain: 0,
           totalRequests: 20,
           cacheReadTokens: 2000,
           totalInputTokens: 5000,
@@ -464,6 +470,7 @@ describe("Provider Cache Hit Rate Model Breakdown", () => {
     const { findDailyProviderCacheHitRateLeaderboard } = await import("@/repository/leaderboard");
     const result = await findDailyProviderCacheHitRateLeaderboard();
 
+    expect(mockSelect).toHaveBeenCalledTimes(1);
     expect(result).toHaveLength(1);
     const entry = result[0];
     expect(entry).toHaveProperty("modelStats");
@@ -478,6 +485,8 @@ describe("Provider Cache Hit Rate Model Breakdown", () => {
         {
           providerId: 1,
           providerName: "high-cache",
+          model: null,
+          modelGrain: 1,
           totalRequests: 50,
           totalCost: "2.5",
           cacheReadTokens: 15000,
@@ -488,6 +497,8 @@ describe("Provider Cache Hit Rate Model Breakdown", () => {
         {
           providerId: 2,
           providerName: "low-cache",
+          model: null,
+          modelGrain: 1,
           totalRequests: 30,
           totalCost: "1.0",
           cacheReadTokens: 2000,
@@ -496,7 +507,6 @@ describe("Provider Cache Hit Rate Model Breakdown", () => {
           cacheHitRate: 0.2,
         },
       ]),
-      createChainMock([]),
     ];
 
     const { findDailyProviderCacheHitRateLeaderboard } = await import("@/repository/leaderboard");
@@ -512,6 +522,8 @@ describe("Provider Cache Hit Rate Model Breakdown", () => {
         {
           providerId: 1,
           providerName: "provider-a",
+          model: null,
+          modelGrain: 1,
           totalRequests: 50,
           totalCost: "2.5",
           cacheReadTokens: 10000,
@@ -519,11 +531,11 @@ describe("Provider Cache Hit Rate Model Breakdown", () => {
           totalInputTokens: 20000,
           cacheHitRate: 0.5,
         },
-      ]),
-      createChainMock([
         {
           providerId: 1,
+          providerName: null,
           model: "claude-3-opus",
+          modelGrain: 0,
           totalRequests: 30,
           cacheReadTokens: 8000,
           totalInputTokens: 15000,
@@ -531,7 +543,9 @@ describe("Provider Cache Hit Rate Model Breakdown", () => {
         },
         {
           providerId: 1,
+          providerName: null,
           model: "",
+          modelGrain: 0,
           totalRequests: 5,
           cacheReadTokens: 100,
           totalInputTokens: 500,
@@ -539,7 +553,9 @@ describe("Provider Cache Hit Rate Model Breakdown", () => {
         },
         {
           providerId: 1,
+          providerName: null,
           model: "claude-3-sonnet",
+          modelGrain: 0,
           totalRequests: 15,
           cacheReadTokens: 1900,
           totalInputTokens: 4500,
@@ -571,6 +587,8 @@ describe("Provider Cache Hit Rate Model Breakdown", () => {
         {
           providerId: 1,
           providerName: "full-provider",
+          model: null,
+          modelGrain: 1,
           totalRequests: 50,
           totalCost: "2.5",
           cacheReadTokens: 10000,
@@ -579,7 +597,6 @@ describe("Provider Cache Hit Rate Model Breakdown", () => {
           cacheHitRate: 0.5,
         },
       ]),
-      createChainMock([]),
     ];
 
     const { findDailyProviderCacheHitRateLeaderboard } = await import("@/repository/leaderboard");
@@ -604,6 +621,8 @@ describe("Provider Cache Hit Rate Model Breakdown", () => {
         {
           providerId: 1,
           providerName: "provider-alpha",
+          model: null,
+          modelGrain: 1,
           totalRequests: 50,
           totalCost: "2.5",
           cacheReadTokens: 10000,
@@ -614,6 +633,8 @@ describe("Provider Cache Hit Rate Model Breakdown", () => {
         {
           providerId: 2,
           providerName: "provider-beta",
+          model: null,
+          modelGrain: 1,
           totalRequests: 30,
           totalCost: "1.0",
           cacheReadTokens: 5000,
@@ -621,11 +642,11 @@ describe("Provider Cache Hit Rate Model Breakdown", () => {
           totalInputTokens: 10000,
           cacheHitRate: 0.5,
         },
-      ]),
-      createChainMock([
         {
           providerId: 1,
+          providerName: null,
           model: "model-a",
+          modelGrain: 0,
           totalRequests: 30,
           cacheReadTokens: 6000,
           totalInputTokens: 12000,
@@ -633,7 +654,9 @@ describe("Provider Cache Hit Rate Model Breakdown", () => {
         },
         {
           providerId: 1,
+          providerName: null,
           model: "model-b",
+          modelGrain: 0,
           totalRequests: 20,
           cacheReadTokens: 4000,
           totalInputTokens: 8000,
@@ -641,7 +664,9 @@ describe("Provider Cache Hit Rate Model Breakdown", () => {
         },
         {
           providerId: 2,
+          providerName: null,
           model: "model-c",
+          modelGrain: 0,
           totalRequests: 30,
           cacheReadTokens: 5000,
           totalInputTokens: 10000,

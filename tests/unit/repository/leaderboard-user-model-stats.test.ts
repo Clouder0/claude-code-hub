@@ -139,27 +139,33 @@ describe("User Leaderboard Model Stats", () => {
   });
 
   it("includes modelStats when includeModelStats=true", async () => {
+    // Merged GROUPING SETS pass: user rows (modelGrain=1) first, model rows
+    // (modelGrain=0) after — one query total.
     chainMocks = [
       createChainMock([
         {
           userId: 1,
           userName: "alice",
+          model: null,
+          modelGrain: 1,
           totalRequests: 100,
           totalCost: "10.0",
           totalTokens: 50000,
         },
-      ]),
-      createChainMock([
         {
           userId: 1,
+          userName: null,
           model: "claude-sonnet-4",
+          modelGrain: 0,
           totalRequests: 60,
           totalCost: "6.0",
           totalTokens: 30000,
         },
         {
           userId: 1,
+          userName: null,
           model: "claude-opus-4",
+          modelGrain: 0,
           totalRequests: 40,
           totalCost: "4.0",
           totalTokens: 20000,
@@ -170,6 +176,7 @@ describe("User Leaderboard Model Stats", () => {
     const { findDailyLeaderboard } = await import("@/repository/leaderboard");
     const result = await findDailyLeaderboard(undefined, true);
 
+    expect(mockSelect).toHaveBeenCalledTimes(1);
     expect(result).toHaveLength(1);
     expect(result[0].modelStats).toBeDefined();
     expect(result[0].modelStats).toHaveLength(2);
@@ -185,22 +192,26 @@ describe("User Leaderboard Model Stats", () => {
         {
           userId: 1,
           userName: "bob",
+          model: null,
+          modelGrain: 1,
           totalRequests: 50,
           totalCost: "5.0",
           totalTokens: 25000,
         },
-      ]),
-      createChainMock([
         {
           userId: 1,
+          userName: null,
           model: "claude-sonnet-4",
+          modelGrain: 0,
           totalRequests: 30,
           totalCost: "3.0",
           totalTokens: 15000,
         },
         {
           userId: 1,
+          userName: null,
           model: null,
+          modelGrain: 0,
           totalRequests: 20,
           totalCost: "2.0",
           totalTokens: 10000,
@@ -265,6 +276,8 @@ describe("User Leaderboard Model Stats", () => {
         {
           userId: 1,
           userName: "alice",
+          model: null,
+          modelGrain: 1,
           totalRequests: 80,
           totalCost: "8.0",
           totalTokens: 40000,
@@ -272,29 +285,35 @@ describe("User Leaderboard Model Stats", () => {
         {
           userId: 2,
           userName: "bob",
+          model: null,
+          modelGrain: 1,
           totalRequests: 50,
           totalCost: "5.0",
           totalTokens: 25000,
         },
-      ]),
-      createChainMock([
         {
           userId: 1,
+          userName: null,
           model: "claude-sonnet-4",
+          modelGrain: 0,
           totalRequests: 50,
           totalCost: "5.0",
           totalTokens: 25000,
         },
         {
           userId: 1,
+          userName: null,
           model: "claude-opus-4",
+          modelGrain: 0,
           totalRequests: 30,
           totalCost: "3.0",
           totalTokens: 15000,
         },
         {
           userId: 2,
+          userName: null,
           model: "claude-haiku-3.5",
+          modelGrain: 0,
           totalRequests: 50,
           totalCost: "5.0",
           totalTokens: 25000,
@@ -305,6 +324,7 @@ describe("User Leaderboard Model Stats", () => {
     const { findDailyLeaderboard } = await import("@/repository/leaderboard");
     const result = await findDailyLeaderboard(undefined, true);
 
+    expect(mockSelect).toHaveBeenCalledTimes(1);
     expect(result).toHaveLength(2);
 
     const alice = result.find((r) => r.userId === 1);
@@ -325,22 +345,26 @@ describe("User Leaderboard Model Stats", () => {
         {
           userId: 1,
           userName: "alice",
+          model: null,
+          modelGrain: 1,
           totalRequests: 100,
           totalCost: "15.0",
           totalTokens: 75000,
         },
-      ]),
-      createChainMock([
         {
           userId: 1,
+          userName: null,
           model: "expensive-model",
+          modelGrain: 0,
           totalRequests: 30,
           totalCost: "10.0",
           totalTokens: 30000,
         },
         {
           userId: 1,
+          userName: null,
           model: "cheap-model",
+          modelGrain: 0,
           totalRequests: 70,
           totalCost: "5.0",
           totalTokens: 45000,
@@ -420,6 +444,8 @@ describe("User Cache Hit Rate Leaderboard", () => {
         {
           userId: 1,
           userName: "alice",
+          model: null,
+          modelGrain: 1,
           totalRequests: 30,
           totalCost: "3.0",
           cacheReadTokens: 600,
@@ -427,11 +453,11 @@ describe("User Cache Hit Rate Leaderboard", () => {
           totalInputTokens: 1000,
           cacheHitRate: 0.6,
         },
-      ]),
-      createChainMock([
         {
           userId: 1,
+          userName: null,
           model: "claude-sonnet-4",
+          modelGrain: 0,
           totalRequests: 20,
           cacheReadTokens: 500,
           totalInputTokens: 700,
@@ -439,7 +465,9 @@ describe("User Cache Hit Rate Leaderboard", () => {
         },
         {
           userId: 1,
+          userName: null,
           model: null,
+          modelGrain: 0,
           totalRequests: 10,
           cacheReadTokens: 100,
           totalInputTokens: 300,
@@ -451,6 +479,7 @@ describe("User Cache Hit Rate Leaderboard", () => {
     const { findDailyUserCacheHitRateLeaderboard } = await import("@/repository/leaderboard");
     const result = await findDailyUserCacheHitRateLeaderboard(undefined, true);
 
+    expect(mockSelect).toHaveBeenCalledTimes(1);
     expect(result).toHaveLength(1);
     expect(result[0].modelStats).toHaveLength(2);
     expect(result[0].modelStats?.[0].model).toBe("claude-sonnet-4");

@@ -1724,6 +1724,80 @@ run("usage ledger integration", () => {
         }),
       ]);
     });
+
+    test("provider leaderboard merged pass excludes blank models and honors the providerType filter", async () => {
+      const claudeProviderId = nextProviderId();
+      const openaiProviderId = nextProviderId();
+      const userId = nextUserId();
+      const [vendor] = await db
+        .insert(providerVendors)
+        .values({
+          websiteDomain: `${KEY_PREFIX}-grouping-sets.example`,
+          displayName: "grouping-sets-test",
+        })
+        .returning({ id: providerVendors.id });
+      if (!vendor) throw new Error("failed to insert provider vendor test row");
+
+      await db.insert(providers).values([
+        {
+          id: claudeProviderId,
+          name: `${KEY_PREFIX}-claude-type`,
+          url: "https://claude-type.example/v1",
+          key: "sk-claude-type",
+          providerVendorId: vendor.id,
+          providerType: "claude",
+        },
+        {
+          id: openaiProviderId,
+          name: `${KEY_PREFIX}-openai-type`,
+          url: "https://openai-type.example/v1",
+          key: "sk-openai-type",
+          providerVendorId: vendor.id,
+          providerType: "openai-compatible",
+        },
+      ]);
+
+      await insertMessageRequestRow({
+        key: nextKey("grouping-sets-claude"),
+        userId,
+        providerId: claudeProviderId,
+        model: "claude-sonnet-4",
+        statusCode: 200,
+        costUsd: "0.300000000000000",
+        inputTokens: 100,
+        outputTokens: 20,
+        createdAt: new Date(),
+      });
+      // Blank model on the openai-compatible provider: it must still count in
+      // the provider-level grain while producing NO modelStats row
+      // (NULLIF(TRIM(model)) collapses it to NULL).
+      await insertMessageRequestRow({
+        key: nextKey("grouping-sets-blank-model"),
+        userId,
+        providerId: openaiProviderId,
+        model: "   ",
+        statusCode: 200,
+        costUsd: "0.100000000000000",
+        inputTokens: 10,
+        outputTokens: 5,
+        createdAt: new Date(),
+      });
+
+      const leaderboard = await findDailyProviderLeaderboard(undefined, true);
+      const claude = leaderboard.find((entry) => entry.providerId === claudeProviderId);
+      const openai = leaderboard.find((entry) => entry.providerId === openaiProviderId);
+
+      expect(claude).toMatchObject({ totalRequests: 1, totalCost: 0.3 });
+      expect(claude?.modelStats).toHaveLength(1);
+      expect(claude?.modelStats?.[0]?.model).toBe("claude-sonnet-4");
+
+      expect(openai).toMatchObject({ totalRequests: 1, totalCost: 0.1 });
+      expect(openai?.modelStats).toEqual([]);
+
+      const claudeOnly = await findDailyProviderLeaderboard("claude");
+      expect(claudeOnly.find((entry) => entry.providerId === claudeProviderId)).toBeDefined();
+      expect(claudeOnly.find((entry) => entry.providerId === openaiProviderId)).toBeUndefined();
+    });
   });
 
   describe("ledger-only mode", () => {
