@@ -37,7 +37,6 @@ vi.mock("@/lib/utils/timezone", () => ({
 
 const statisticsMock = {
   sumKeyTotalCost: vi.fn(async () => 0),
-  sumUserCostToday: vi.fn(async () => 0),
   sumUserTotalCost: vi.fn(async () => 0),
   sumKeyCostInTimeRange: vi.fn(async () => 0),
   sumProviderCostInTimeRange: vi.fn(async () => 0),

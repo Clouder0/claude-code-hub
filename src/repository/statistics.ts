@@ -309,7 +309,7 @@ export async function getUserStatisticsFromDB(
       u.id AS user_id,
       u.name AS user_name,
       ${bucketExpr} AS bucket,
-      COUNT(usage_ledger.id) AS api_calls,
+      COUNT(*) AS api_calls,
       COALESCE(SUM(usage_ledger.cost_usd), 0) AS total_cost
     FROM users u
     LEFT JOIN usage_ledger ON u.id = usage_ledger.user_id
@@ -362,7 +362,7 @@ export async function getKeyStatisticsFromDB(
       k.id AS key_id,
       k.name AS key_name,
       ${bucketExpr} AS bucket,
-      COUNT(usage_ledger.id) AS api_calls,
+      COUNT(*) AS api_calls,
       COALESCE(SUM(usage_ledger.cost_usd), 0) AS total_cost
     FROM keys k
     LEFT JOIN usage_ledger ON usage_ledger.key = k.key
@@ -422,7 +422,7 @@ export async function getMixedStatisticsFromDB(
       k.id AS key_id,
       k.name AS key_name,
       ${bucketExpr} AS bucket,
-      COUNT(usage_ledger.id) AS api_calls,
+      COUNT(*) AS api_calls,
       COALESCE(SUM(usage_ledger.cost_usd), 0) AS total_cost
     FROM keys k
     LEFT JOIN usage_ledger ON usage_ledger.key = k.key
@@ -439,7 +439,7 @@ export async function getMixedStatisticsFromDB(
   const othersQuery = sql`
     SELECT
       ${bucketExpr} AS bucket,
-      COUNT(usage_ledger.id) AS api_calls,
+      COUNT(*) AS api_calls,
       COALESCE(SUM(usage_ledger.cost_usd), 0) AS total_cost
     FROM usage_ledger
     WHERE usage_ledger.user_id <> ${userId}
@@ -470,31 +470,6 @@ export async function getMixedStatisticsFromDB(
       timezone
     ) as unknown as DatabaseStatRow[],
   };
-}
-
-/**
- * 查询用户今日总消费（所有 Key 的消费总和）
- * 用于用户层每日限额检查（Redis 降级）
- *
- * DEPRECATED: 该函数使用简单的日期比较，不考虑用户的 dailyResetTime 配置。
- * 请使用 sumUserCostInTimeRange() 配合 getTimeRangeForPeriodWithMode() 来获取正确的时间范围。
- *
- * @deprecated 使用 sumUserCostInTimeRange() 替代
- */
-export async function sumUserCostToday(userId: number): Promise<number> {
-  const timezone = await resolveSystemTimezone();
-
-  const query = sql`
-    SELECT COALESCE(SUM(usage_ledger.cost_usd), 0) AS total_cost
-    FROM usage_ledger
-    WHERE usage_ledger.user_id = ${userId}
-      AND (usage_ledger.created_at AT TIME ZONE ${timezone})::date = (CURRENT_TIMESTAMP AT TIME ZONE ${timezone})::date
-      AND ${LEDGER_BILLING_CONDITION}
-  `;
-
-  const result = await db.execute(query);
-  const row = Array.from(result)[0] as { total_cost?: string | number } | undefined;
-  return Number(row?.total_cost || 0);
 }
 
 /**
