@@ -746,7 +746,11 @@ describe("availability-service", () => {
     // getCurrentProviderStatus 同样使用 status_code IS NOT NULL 终态边界，
     // 让短窗口查询也能直接命中部分索引并避免误判"请求中"。
     expectStatusCodeOnlyFinalizedBoundary(queryText);
-    expect(queryText).toContain("fn_compute_message_request_success_rate_outcome");
+    // success/failure 分类读触发器维护的 success_rate_outcome 存储列，
+    // 与桶化查询对齐；不再逐行调用 fn_compute_message_request_success_rate_outcome。
+    expect(queryText).not.toContain("fn_compute_message_request_success_rate_outcome");
+    expect(queryText).toContain(`"message_request"."success_rate_outcome" = 'success'`);
+    expect(queryText).toContain(`"message_request"."success_rate_outcome" = 'failure'`);
     expect(queryText).toContain(">= now() - (15 * interval '1 minute')");
     expect(queryText).toContain("<= now()");
     expect(queryText).toContain("count(*) filter");

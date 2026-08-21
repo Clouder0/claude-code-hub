@@ -1,9 +1,10 @@
-import { logger } from "@/lib/logger";
 import {
-  queryProviderAvailability,
   type AvailabilityQueryOptions,
   type AvailabilityQueryResult,
+  getCurrentProviderStatus,
+  queryProviderAvailability,
 } from "@/lib/availability";
+import { logger } from "@/lib/logger";
 import { getRedisClient } from "./client";
 
 /**
@@ -84,19 +85,19 @@ export async function getAvailabilityWithCache(
           .catch((err: unknown) =>
             logger.warn("[AvailabilityCache] Failed to write cache", { cacheKey, error: err })
           );
-        await redis
-          .setex(lastKey, LAST_TTL, JSON.stringify(data))
-          .catch((err: unknown) =>
-            logger.warn("[AvailabilityCache] Failed to write last snapshot", {
-              lastKey,
-              error: err,
-            })
-          );
+        await redis.setex(lastKey, LAST_TTL, JSON.stringify(data)).catch((err: unknown) =>
+          logger.warn("[AvailabilityCache] Failed to write last snapshot", {
+            lastKey,
+            error: err,
+          })
+        );
         return data;
       } finally {
-        await redis.del(lockKey).catch((err: unknown) =>
-          logger.warn("[AvailabilityCache] Failed to release lock", { lockKey, error: err })
-        );
+        await redis
+          .del(lockKey)
+          .catch((err: unknown) =>
+            logger.warn("[AvailabilityCache] Failed to release lock", { lockKey, error: err })
+          );
       }
     }
 
@@ -119,5 +120,50 @@ export async function getAvailabilityWithCache(
       error: error instanceof Error ? error.message : String(error),
     });
     return await queryProviderAvailability(options);
+  }
+}
+
+/**
+ * /api/availability/current 的轻量微缓存。
+ *
+ * 与 24h 桶化查询不同：current 查询只扫 15 分钟窗口且读触发器维护的
+ * success_rate_outcome 列（索引覆盖、亚秒级），所以不需要锁或
+ * stale-while-revalidate——那套机制是为分钟级查询设计的。这里只做
+ * 30 秒量化 + 60 秒 TTL 的 plain cache，把管理面板的重复轮询挡掉；
+ * 量化保证相对窗口（NOW()-15m）在键上的稳定性。
+ * Fail-open：Redis 不可用 -> 直接查询。
+ */
+const CURRENT_STATUS_QUANT_MS = 30 * 1000;
+const CURRENT_STATUS_TTL = 60;
+
+type CurrentProviderStatus = Awaited<ReturnType<typeof getCurrentProviderStatus>>;
+
+export async function getCurrentProviderStatusWithCache(): Promise<CurrentProviderStatus> {
+  const redis = getRedisClient();
+  if (!redis) {
+    return await getCurrentProviderStatus();
+  }
+
+  const bucket = Math.floor(Date.now() / CURRENT_STATUS_QUANT_MS);
+  const cacheKey = `availability:current:v1:${bucket}`;
+
+  try {
+    const cached = await redis.get(cacheKey);
+    if (cached) {
+      return JSON.parse(cached) as CurrentProviderStatus;
+    }
+
+    const data = await getCurrentProviderStatus();
+    await redis
+      .setex(cacheKey, CURRENT_STATUS_TTL, JSON.stringify(data))
+      .catch((err: unknown) =>
+        logger.warn("[AvailabilityCache] Failed to write current cache", { cacheKey, error: err })
+      );
+    return data;
+  } catch (error) {
+    logger.warn("[AvailabilityCache] Redis error on current status, fallback to direct query", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return await getCurrentProviderStatus();
   }
 }

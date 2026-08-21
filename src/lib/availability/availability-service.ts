@@ -167,20 +167,6 @@ function isAvailabilitySuccessStatusCode(statusCode: number): boolean {
   );
 }
 
-function buildRequestOutcomeSql(
-  blockedByExpression: SQLWrapper,
-  statusCodeExpression: SQLWrapper,
-  errorMessageExpression: SQLWrapper,
-  providerChainExpression: SQLWrapper
-) {
-  return sql`fn_compute_message_request_success_rate_outcome(
-    ${blockedByExpression},
-    ${statusCodeExpression},
-    ${errorMessageExpression},
-    ${providerChainExpression}
-  )`;
-}
-
 function buildAvailabilitySuccessOutcomeCondition(outcomeExpression: SQLWrapper) {
   return sql`${outcomeExpression} = 'success'`;
 }
@@ -596,25 +582,15 @@ export async function getCurrentProviderStatus(): Promise<
     buildAvailabilityFinalizedCondition()
   );
 
+  // Read the trigger-maintained success_rate_outcome column instead of calling
+  // fn_compute_message_request_success_rate_outcome per row (twice per row via
+  // the green/red FILTERs) — same rationale as the bucketed query above.
+  const outcomeColumn = messageRequest.successRateOutcome;
   const aggregateQuery = sql<AggregatedCurrentProviderStatusRow>`
     SELECT
       ${messageRequest.providerId} AS "providerId",
-      COUNT(*) FILTER (WHERE ${buildAvailabilitySuccessOutcomeCondition(
-        buildRequestOutcomeSql(
-          messageRequest.blockedBy,
-          messageRequest.statusCode,
-          messageRequest.errorMessage,
-          messageRequest.providerChain
-        )
-      )})::int AS "greenCount",
-      COUNT(*) FILTER (WHERE ${buildAvailabilityFailureOutcomeCondition(
-        buildRequestOutcomeSql(
-          messageRequest.blockedBy,
-          messageRequest.statusCode,
-          messageRequest.errorMessage,
-          messageRequest.providerChain
-        )
-      )})::int AS "redCount",
+      COUNT(*) FILTER (WHERE ${buildAvailabilitySuccessOutcomeCondition(outcomeColumn)})::int AS "greenCount",
+      COUNT(*) FILTER (WHERE ${buildAvailabilityFailureOutcomeCondition(outcomeColumn)})::int AS "redCount",
       MAX(${messageRequest.createdAt}) AS "lastRequestAt"
     FROM ${messageRequest}
     WHERE ${requestConditions}

@@ -7,7 +7,7 @@
 
 import { type NextRequest, NextResponse } from "next/server";
 import { getSession } from "@/lib/auth";
-import { getCurrentProviderStatus } from "@/lib/availability";
+import { getCurrentProviderStatusWithCache } from "@/lib/redis/availability-cache";
 
 /**
  * GET /api/availability/current
@@ -20,7 +20,7 @@ export async function GET(_request: NextRequest) {
   }
 
   try {
-    const result = await getCurrentProviderStatus();
+    const result = await getCurrentProviderStatusWithCache();
     return NextResponse.json(result);
   } catch (error) {
     console.error("Current availability API error:", error);
