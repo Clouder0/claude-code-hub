@@ -1,23 +1,16 @@
 import { sql } from "drizzle-orm";
 import { usageLedger } from "@/drizzle/schema";
-import { NON_BILLING_ENDPOINTS } from "@/lib/utils/performance-formatter";
-
-const NON_BILLING_LEDGER_ENDPOINT_CONDITION = sql`(
-  ${usageLedger.endpoint} IS NULL
-  OR LOWER(REGEXP_REPLACE(${usageLedger.endpoint}, '/+$', '')) NOT IN (
-    ${sql.join(
-      NON_BILLING_ENDPOINTS.map((endpoint) => sql`${endpoint}`),
-      sql`, `
-    )}
-  )
-)`;
 
 /**
- * 只统计未被阻断的请求。
- * Warmup 行在触发器层面已过滤，不会进入 usage_ledger，
- * 此外 count_tokens / compact 虽写 message_request，但不得进入 billable ledger。
+ * 只统计可计费请求。
+ *
+ * 历史实现是 blocked_by IS NULL + endpoint 非计费端点排除的 REGEXP_REPLACE
+ * 表达式：不可索引、进不了任何部分索引谓词，所有账单聚合都要逐行求值 +
+ * 堆回取。自 0116 起该判定以 usage_ledger.is_billable 存储列形式由写入
+ * 触发器维护（表达式逐字等价，历史行已在线回填并三重验证），读侧翻转
+ * 为单列引用后，WHERE is_billable 的部分覆盖索引即可服务全部聚合。
  */
-export const LEDGER_BILLING_CONDITION = sql`(${usageLedger.blockedBy} IS NULL AND ${NON_BILLING_LEDGER_ENDPOINT_CONDITION})`;
+export const LEDGER_BILLING_CONDITION = sql`${usageLedger.isBillable}`;
 
 /**
  * 非计费查询中排除被阻断请求的别名条件（语义更清晰）。

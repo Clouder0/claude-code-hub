@@ -31,20 +31,14 @@ describe("buildProviderBillingEventsQuery", () => {
     const query = compile({ providerId: 42, userId: 9, startTime, endTime });
 
     expect(query.params).toEqual([
-      "/v1/messages/count_tokens",
-      "/v1/responses/compact",
       startTime.toISOString(),
       endTime.toISOString(),
       9,
       42,
-      "/v1/messages/count_tokens",
-      "/v1/responses/compact",
       startTime.toISOString(),
       endTime.toISOString(),
       9,
       42,
-      "/v1/messages/count_tokens",
-      "/v1/responses/compact",
       startTime.toISOString(),
       endTime.toISOString(),
       9,
@@ -60,21 +54,23 @@ describe("buildProviderBillingEventsQuery", () => {
       INTEGER_TEXT_PATTERN,
       42,
     ]);
-    expect(query.sql).toContain("ledger.created_at >= $3::timestamptz");
+    expect(query.sql).toContain("ledger.is_billable");
+    expect(query.sql).not.toContain("REGEXP_REPLACE");
+    expect(query.sql).toContain("ledger.created_at >= $1::timestamptz");
+    expect(query.sql).toContain("ledger.created_at >= $5::timestamptz");
     expect(query.sql).toContain("ledger.created_at >= $9::timestamptz");
-    expect(query.sql).toContain("ledger.created_at >= $15::timestamptz");
-    expect(query.sql).toContain("ledger.created_at < $4::timestamptz");
+    expect(query.sql).toContain("ledger.created_at < $2::timestamptz");
+    expect(query.sql).toContain("ledger.created_at < $6::timestamptz");
     expect(query.sql).toContain("ledger.created_at < $10::timestamptz");
-    expect(query.sql).toContain("ledger.created_at < $16::timestamptz");
     expect(query.sql).not.toContain("ledger.created_at <=");
-    expect(query.sql).toContain("ledger.user_id = $5");
-    expect(query.sql).toContain("ledger.final_provider_id = $6");
+    expect(query.sql).toContain("ledger.user_id = $3");
+    expect(query.sql).toContain("ledger.final_provider_id = $4");
+    expect(query.sql).toContain("ledger.user_id = $7");
+    expect(query.sql).toContain("ledger.final_provider_id = $8");
     expect(query.sql).toContain("ledger.user_id = $11");
-    expect(query.sql).toContain("ledger.final_provider_id = $12");
-    expect(query.sql).toContain("ledger.user_id = $17");
-    expect(query.sql).toContain("ledger.hedge_losers @> $18::jsonb");
-    expect(query.sql).toContain("ledger.hedge_losers @> $19::jsonb");
-    expect(query.sql).toContain("WHERE provider_id = $28");
+    expect(query.sql).toContain("ledger.hedge_losers @> $12::jsonb");
+    expect(query.sql).toContain("ledger.hedge_losers @> $13::jsonb");
+    expect(query.sql).toContain("WHERE provider_id = $22");
     expect(query.sql).not.toContain(startTime.toISOString());
     expect(query.sql).not.toContain('[{"providerId":42}]');
     expect(query.sql).not.toContain('[{"providerId":"42"}]');
@@ -86,12 +82,18 @@ describe("buildProviderBillingEventsQuery", () => {
     const query = compile({ startTimeSql, ledgerCreatedAtCondition, userId: 9 });
 
     expect(normalizeSql(query.sql)).toContain(
-      "ledger.created_at >= (SELECT last7_start FROM bounds) AND ledger.created_at < (SELECT period_end FROM bounds) AND ledger.user_id = $3"
+      "ledger.is_billable AND ledger.created_at >= (SELECT last7_start FROM bounds) AND ledger.created_at < (SELECT period_end FROM bounds) AND ledger.user_id = $1"
     );
-    expect(query.params.slice(0, 3)).toEqual([
-      "/v1/messages/count_tokens",
-      "/v1/responses/compact",
+    expect(query.params).toEqual([
       9,
+      INTEGER_TEXT_PATTERN,
+      INTEGER_TEXT_PATTERN,
+      DECIMAL_TEXT_PATTERN,
+      MAX_STORED_COST,
+      INTEGER_TEXT_PATTERN,
+      INTEGER_TEXT_PATTERN,
+      INTEGER_TEXT_PATTERN,
+      INTEGER_TEXT_PATTERN,
     ]);
     expect(() =>
       compile({
@@ -105,16 +107,12 @@ describe("buildProviderBillingEventsQuery", () => {
     const query = compile();
     const sql = normalizeSql(query.sql);
 
-    expect(sql).toContain("ledger.blocked_by IS NULL");
-    expect(sql).toContain("LOWER(REGEXP_REPLACE(ledger.endpoint, '/+$', '')) NOT IN ( $1, $2 )");
+    expect(sql).toContain("ledger.is_billable");
+    expect(sql).not.toContain("REGEXP_REPLACE");
     expect(sql).toContain(
       "CASE WHEN jsonb_typeof(ledger.hedge_losers) = 'array' THEN ledger.hedge_losers ELSE '[]'::jsonb END"
     );
     expect(sql).toContain("WHERE jsonb_typeof(item.value) = 'object'");
-    expect(query.params.slice(0, 2)).toEqual([
-      "/v1/messages/count_tokens",
-      "/v1/responses/compact",
-    ]);
   });
 
   it("treats missing legacy billing status as settled and excludes every other status", () => {
@@ -197,13 +195,14 @@ describe("buildProviderBillingEventsQuery", () => {
       "ledger.cache_read_input_tokens, ledger.final_provider_id, ledger.hedge_losers, 'winner'::text AS provider_match_kind"
     );
     expect(sql).toContain("AS provider_match_kind FROM usage_ledger AS ledger");
-    expect(sql).toContain("AND ledger.final_provider_id = $3");
+    expect(sql).toContain("ledger.is_billable");
+    expect(sql).toContain("AND ledger.final_provider_id = $1");
     expect(sql).toContain("'winner'::text AS provider_match_kind, item.value");
-    expect(sql).toContain("AND ledger.final_provider_id = $6");
+    expect(sql).toContain("AND ledger.final_provider_id = $2");
     expect(sql).toContain("AND ledger.hedge_losers IS NOT NULL UNION ALL");
     expect(sql).toContain("'loser'::text AS provider_match_kind, item.value");
-    expect(sql).toContain("ledger.hedge_losers @> $9::jsonb");
-    expect(sql).toContain("ledger.hedge_losers @> $10::jsonb");
+    expect(sql).toContain("ledger.hedge_losers @> $3::jsonb");
+    expect(sql).toContain("ledger.hedge_losers @> $4::jsonb");
     expect(sql).toContain("WHERE ledger.provider_match_kind IN ('all', 'winner')");
     expect(sql).toContain("WHERE provider_match_kind IN ('all', 'loser')");
   });
@@ -231,8 +230,6 @@ describe("buildProviderBillingEventsQuery", () => {
     expect(query.sql).not.toContain("ledger.user_id =");
     expect(query.sql).toContain("WHERE TRUE");
     expect(query.params).toEqual([
-      "/v1/messages/count_tokens",
-      "/v1/responses/compact",
       INTEGER_TEXT_PATTERN,
       INTEGER_TEXT_PATTERN,
       DECIMAL_TEXT_PATTERN,
@@ -253,12 +250,14 @@ describe("buildProviderBillingTotalQuery", () => {
     expect(sql).toContain(
       "SELECT COALESCE(SUM(GREATEST(COALESCE(ledger.cost_usd, 0), 0)), 0) AS cost_usd FROM usage_ledger AS ledger"
     );
-    expect(sql).toContain("AND ledger.final_provider_id = $3");
-    expect(sql).toContain("AND ledger.final_provider_id = $6");
+    expect(sql).toContain("ledger.is_billable");
+    expect(sql).not.toContain("REGEXP_REPLACE");
+    expect(sql).toContain("AND ledger.final_provider_id = $1");
+    expect(sql).toContain("AND ledger.final_provider_id = $2");
     expect(sql).toContain("AND ledger.hedge_losers IS NOT NULL UNION ALL");
-    expect(sql).toContain("ledger.hedge_losers @> $9::jsonb");
-    expect(sql).toContain("ledger.hedge_losers @> $10::jsonb");
-    expect(sql).toContain("AND provider_id = $19");
+    expect(sql).toContain("ledger.hedge_losers @> $3::jsonb");
+    expect(sql).toContain("ledger.hedge_losers @> $4::jsonb");
+    expect(sql).toContain("AND provider_id = $13");
   });
 
   it("clamps loser deductions per winner request before adding provider-loser cost", () => {

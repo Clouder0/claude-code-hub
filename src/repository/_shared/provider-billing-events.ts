@@ -1,6 +1,5 @@
 import type { SQL } from "drizzle-orm";
 import { sql } from "drizzle-orm";
-import { NON_BILLING_ENDPOINTS } from "@/lib/utils/performance-formatter";
 
 export interface ProviderBillingEventQueryOptions {
   providerId?: number;
@@ -220,18 +219,9 @@ function buildLedgerRowConditions(options: ProviderBillingEventQueryOptions): SQ
     throw new Error("Provider billing events accept only one start-time boundary");
   }
 
-  const conditions: SQL[] = [
-    sql`ledger.blocked_by IS NULL`,
-    sql`(
-      ledger.endpoint IS NULL
-      OR LOWER(REGEXP_REPLACE(ledger.endpoint, '/+$', '')) NOT IN (
-        ${sql.join(
-          NON_BILLING_ENDPOINTS.map((endpoint) => sql`${endpoint}`),
-          sql`, `
-        )}
-      )
-    )`,
-  ];
+  // Same stored billable decision the read-side LEDGER_BILLING_CONDITION now
+  // uses (0116): one boolean, partial-index friendly, no per-row regex.
+  const conditions: SQL[] = [sql`ledger.is_billable`];
 
   if (options.startTime) {
     conditions.push(sql`ledger.created_at >= ${options.startTime.toISOString()}::timestamptz`);

@@ -39,9 +39,14 @@ const sharedBillingConsumerSources = [
 
 describe("non-chat endpoint non-billing parity", () => {
   it("fallback success for target raw endpoints does not create billable ledger usage", () => {
-    expect(ledgerConditionsSource).toContain("NON_BILLING_ENDPOINTS");
+    // The read-side condition now references the stored is_billable column;
+    // endpoint-list parity moved to the write side (trigger + backfill).
     expect(ledgerConditionsSource).toContain("LEDGER_BILLING_CONDITION");
-    expect(ledgerConditionsSource).toContain("NOT IN");
+    expect(ledgerConditionsSource).toContain("usageLedger.isBillable");
+    expect(ledgerConditionsSource).not.toContain("LOWER(REGEXP_REPLACE");
+    for (const endpoint of NON_BILLING_ENDPOINTS) {
+      expect(triggerSqlSource).toContain(`'${endpoint}'`);
+    }
   });
 
   it("formatter treats count tokens and compact as non-billing endpoints", () => {
