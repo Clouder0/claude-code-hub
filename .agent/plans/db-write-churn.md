@@ -1,6 +1,10 @@
 # CCH DB 写路径降 churn：单语句 finalize + ledger 触发器 WHEN 守卫
 
-Status: Implemented + locally verified (2026-08-21)；待 canary 灰度部署。
+Status: **DEPLOYED TO PRODUCTION** 2026-08-21（镜像 fa6ed97a-write-churn =
+sha256:f665190fb21d50a05a62c1bcc74f8bb0970e00fdacb4bf33e70f454f790f7b40，
+hostdzire-us A/B 全量）。实测验收：mr/ledger upd-ins 比 2.28→1.06（-54%）、
+容器内存 -25%、延迟零回归。含 0115 迁移与 journal 补账（count=116）。
+部署记录：cops repo `notes/2026-08-21-hostdzire-cch-fa6ed97a-rollout.md`。
 Branch: `codex/db-write-churn`（基于 `codex/compaction-v2` @ 5d0ec232；
 与 `codex/perf-bundle-a` 独立并行，其落地后需合流）。
 
