@@ -194,7 +194,7 @@ describe("buildProviderBillingEventsQuery", () => {
 
     expect(sql).toContain("SELECT ledger.request_id, ledger.created_at, ledger.user_id");
     expect(sql).toContain(
-      "ledger.cache_read_input_tokens, ledger.final_provider_id, ledger.hedge_losers , 'winner'::text AS provider_match_kind"
+      "ledger.cache_read_input_tokens, ledger.final_provider_id, ledger.hedge_losers, 'winner'::text AS provider_match_kind"
     );
     expect(sql).toContain("AS provider_match_kind FROM usage_ledger AS ledger");
     expect(sql).toContain("AND ledger.final_provider_id = $3");

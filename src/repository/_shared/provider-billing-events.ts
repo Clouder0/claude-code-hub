@@ -30,25 +30,31 @@ function joinConditions(conditions: SQL[]): SQL {
 // expansion, and outer cost/token/success aggregates). `ledger.*` previously
 // dragged cost_breakdown / special_settings jsonb and a dozen unused columns
 // through the CTE materialization. Extend this list only after checking every
-// embedding surface listed on buildProviderBillingEventsQuery.
-const LEDGER_EVENT_ROW_COLUMNS = sql`
-  ledger.request_id,
-  ledger.created_at,
-  ledger.user_id,
-  ledger.key,
-  ledger.model,
-  ledger.original_model,
-  ledger.success_rate_outcome,
-  ledger.ttfb_ms,
-  ledger.duration_ms,
-  ledger.cost_usd,
-  ledger.input_tokens,
-  ledger.output_tokens,
-  ledger.cache_creation_input_tokens,
-  ledger.cache_read_input_tokens,
-  ledger.final_provider_id,
-  ledger.hedge_losers
-`;
+// embedding surface — the projection-guard unit test enforces that consumers
+// never reference event columns outside the CTE output contract.
+export const LEDGER_EVENT_ROW_COLUMN_NAMES = [
+  "request_id",
+  "created_at",
+  "user_id",
+  "key",
+  "model",
+  "original_model",
+  "success_rate_outcome",
+  "ttfb_ms",
+  "duration_ms",
+  "cost_usd",
+  "input_tokens",
+  "output_tokens",
+  "cache_creation_input_tokens",
+  "cache_read_input_tokens",
+  "final_provider_id",
+  "hedge_losers",
+] as const;
+
+const LEDGER_EVENT_ROW_COLUMNS = sql.join(
+  LEDGER_EVENT_ROW_COLUMN_NAMES.map((name) => sql.raw(`ledger.${name}`)),
+  sql`, `
+);
 
 type ProviderMatchKind = "all" | "winner" | "loser";
 

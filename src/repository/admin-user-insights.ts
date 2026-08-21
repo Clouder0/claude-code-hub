@@ -61,20 +61,19 @@ async function buildSystemTimezoneDateConditions(startDate?: string, endDate?: s
   return conditions;
 }
 
-function buildProviderEventDateConditions(
+function buildLedgerEventDateConditions(
   startDate: string | undefined,
   endDate: string | undefined,
-  timezone: string,
-  createdAtColumn: SQL = sql`provider_billing_event.created_at`
+  timezone: string
 ): SQL[] {
   const conditions: SQL[] = [];
 
   if (startDate) {
-    conditions.push(sql`${createdAtColumn} >= (${startDate}::date AT TIME ZONE ${timezone})`);
+    conditions.push(sql`ledger.created_at >= (${startDate}::date AT TIME ZONE ${timezone})`);
   }
   if (endDate) {
     conditions.push(
-      sql`${createdAtColumn} < ((${endDate}::date + INTERVAL '1 day') AT TIME ZONE ${timezone})`
+      sql`ledger.created_at < ((${endDate}::date + INTERVAL '1 day') AT TIME ZONE ${timezone})`
     );
   }
 
@@ -142,13 +141,10 @@ export async function getUserModelBreakdown(
 
   if (filters?.providerId) {
     const timezone = await resolveSystemTimezone();
-    const eventDateConditions = buildProviderEventDateConditions(startDate, endDate, timezone);
-    const ledgerDateConditions = buildProviderEventDateConditions(
-      startDate,
-      endDate,
-      timezone,
-      sql`ledger.created_at`
-    );
+    // The date window is enforced once, inside the event CTE (both winner and
+    // hedge-loser events inherit the ledger row's created_at); filtering the
+    // outer query on provider_billing_event.created_at duplicated it.
+    const ledgerDateConditions = buildLedgerEventDateConditions(startDate, endDate, timezone);
     const eventModelField =
       billingModelSource === "original"
         ? sql<string>`NULLIF(TRIM(COALESCE(provider_billing_event.original_model, provider_billing_event.model)), '')`
@@ -156,7 +152,6 @@ export async function getUserModelBreakdown(
     const eventConditions = [
       sql`provider_billing_event.user_id = ${userId}`,
       sql`provider_billing_event.provider_id = ${filters.providerId}`,
-      ...eventDateConditions,
     ];
     if (filters.keyId) {
       eventConditions.push(
@@ -234,14 +229,10 @@ export async function getUserProviderBreakdown(
   filters?: { keyId?: number; model?: string }
 ): Promise<AdminUserProviderBreakdownItem[]> {
   const timezone = await resolveSystemTimezone();
-  const eventDateConditions = buildProviderEventDateConditions(startDate, endDate, timezone);
-  const ledgerDateConditions = buildProviderEventDateConditions(
-    startDate,
-    endDate,
-    timezone,
-    sql`ledger.created_at`
-  );
-  const conditions = [sql`provider_billing_event.user_id = ${userId}`, ...eventDateConditions];
+  // Same as getUserModelBreakdown: the CTE already carries the date window on
+  // ledger rows; the outer event-level predicates were duplicates.
+  const ledgerDateConditions = buildLedgerEventDateConditions(startDate, endDate, timezone);
+  const conditions = [sql`provider_billing_event.user_id = ${userId}`];
 
   if (filters?.keyId) {
     conditions.push(
