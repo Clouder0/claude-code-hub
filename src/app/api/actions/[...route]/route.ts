@@ -1134,6 +1134,7 @@ const { route: getUsageLogsRoute, handler: getUsageLogsHandler } = createActionR
       statusCode: z.number().optional(),
       excludeStatusCode200: z.boolean().optional(),
       minRetryCount: z.number().int().nonnegative().optional(),
+      allTime: z.boolean().optional(),
       pageSize: z.number().int().positive().max(100).default(50).optional(),
       page: z.number().int().positive().default(1).optional(),
     }),

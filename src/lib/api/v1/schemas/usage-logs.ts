@@ -31,6 +31,9 @@ export const UsageLogsQuerySchema = z.object({
   minRetryCount: z.coerce.number().int().min(0).optional().describe("Minimum retry count."),
   startTime: NumberQuerySchema.describe("Start timestamp in milliseconds."),
   endTime: NumberQuerySchema.describe("End timestamp in milliseconds."),
+  allTime: BooleanQuerySchema.describe(
+    "Explicitly request the full history instead of the default 7-day window (applies when startTime is absent)."
+  ),
 });
 
 export const UsageLogsExportCreateSchema = UsageLogsQuerySchema.omit({
