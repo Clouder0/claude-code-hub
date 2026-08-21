@@ -11,6 +11,7 @@ export default createTestRunnerConfig({
     "tests/integration/ledger-consistency.test.ts",
     "tests/integration/usage-ledger.test.ts",
     "tests/integration/usage-ledger-trigger-guard.test.ts",
+    "tests/integration/usage-ledger-is-billable.test.ts",
     "tests/integration/my-usage-imported-ledger.test.ts",
   ],
   api: {

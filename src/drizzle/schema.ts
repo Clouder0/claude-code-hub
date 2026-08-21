@@ -1088,6 +1088,10 @@ export const usageLedger = pgTable('usage_ledger', {
   isSuccess: boolean('is_success').notNull().default(false),
   successRateOutcome: varchar('success_rate_outcome', { length: 16 }),
   blockedBy: varchar('blocked_by', { length: 50 }),
+  // Stored billable decision mirroring the legacy blocked_by+endpoint billing
+  // condition; written by fn_upsert_usage_ledger, backfilled online, readers
+  // flip to it only after the backfill is verified.
+  isBillable: boolean('is_billable'),
   costUsd: numeric('cost_usd', { precision: 21, scale: 15 }).default('0'),
   costMultiplier: numeric('cost_multiplier', { precision: 10, scale: 4 }),
   groupCostMultiplier: numeric('group_cost_multiplier', { precision: 10, scale: 4 }),

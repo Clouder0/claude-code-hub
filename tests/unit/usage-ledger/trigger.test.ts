@@ -8,6 +8,10 @@ const migration0109Sql = readFileSync(
   "utf-8"
 );
 const migrationSql = readFileSync(resolve(process.cwd(), "drizzle/0110_brief_synch.sql"), "utf-8");
+const migration0116Sql = readFileSync(
+  resolve(process.cwd(), "drizzle/0116_usage_ledger_is_billable.sql"),
+  "utf-8"
+);
 
 function extractFinalProviderResolver(source: string): string {
   const match = source.match(
@@ -87,7 +91,7 @@ describe("fn_upsert_usage_ledger trigger SQL", () => {
   });
 
   it("keeps the generated migration trigger function byte-for-byte aligned", () => {
-    expect(extractUpsertFunction(migrationSql)).toBe(extractUpsertFunction(sql));
+    expect(extractUpsertFunction(migration0116Sql)).toBe(extractUpsertFunction(sql));
   });
 
   it("keeps the final-provider resolver aligned across canonical SQL and both migrations", () => {

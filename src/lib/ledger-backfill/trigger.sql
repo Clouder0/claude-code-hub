@@ -218,10 +218,12 @@ BEGIN
   IF NEW.blocked_by = 'warmup' THEN
     -- If a ledger row already exists (row was originally non-warmup), mark it as warmup
     -- and sync the latest actual_response_model so audit stays consistent across tables.
+    -- Warmup rows are never billable: clear the stored flag in the same transition.
     UPDATE usage_ledger
     SET blocked_by = 'warmup',
         success_rate_outcome = v_success_rate_outcome,
-        actual_response_model = NEW.actual_response_model
+        actual_response_model = NEW.actual_response_model,
+        is_billable = false
     WHERE request_id = NEW.id;
     RETURN NEW;
   END IF;
@@ -243,7 +245,7 @@ BEGIN
   INSERT INTO usage_ledger (
     request_id, user_id, key, provider_id, final_provider_id,
     model, original_model, actual_response_model, endpoint, api_type, session_id,
-    status_code, is_success, success_rate_outcome, blocked_by,
+    status_code, is_success, success_rate_outcome, blocked_by, is_billable,
     cost_usd, cost_multiplier, group_cost_multiplier,
     cost_breakdown,
     input_tokens, observed_input_tokens, output_tokens,
@@ -257,6 +259,11 @@ BEGIN
     NEW.id, NEW.user_id, NEW.key, NEW.provider_id, v_final_provider_id,
     NEW.model, NEW.original_model, NEW.actual_response_model, NEW.endpoint, NEW.api_type, NEW.session_id,
     NEW.status_code, v_is_success, v_success_rate_outcome, NEW.blocked_by,
+    (NEW.blocked_by IS NULL AND (
+       NEW.endpoint IS NULL
+       OR LOWER(REGEXP_REPLACE(NEW.endpoint, '/+$', '')) NOT IN
+          ('/v1/messages/count_tokens', '/v1/responses/compact')
+     )),
     NEW.cost_usd, NEW.cost_multiplier, NEW.group_cost_multiplier,
     NEW.cost_breakdown,
     NEW.input_tokens, NEW.observed_input_tokens, NEW.output_tokens,
@@ -282,6 +289,7 @@ BEGIN
     is_success = EXCLUDED.is_success,
     success_rate_outcome = EXCLUDED.success_rate_outcome,
     blocked_by = EXCLUDED.blocked_by,
+    is_billable = EXCLUDED.is_billable,
     cost_usd = EXCLUDED.cost_usd,
     cost_multiplier = EXCLUDED.cost_multiplier,
     group_cost_multiplier = EXCLUDED.group_cost_multiplier,

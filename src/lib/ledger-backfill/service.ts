@@ -69,7 +69,9 @@ export async function backfillUsageLedger(
   throw lastError;
 }
 
-async function runBackfillTransaction(mode: LedgerBackfillMode): Promise<BackfillUsageLedgerSummary> {
+async function runBackfillTransaction(
+  mode: LedgerBackfillMode
+): Promise<BackfillUsageLedgerSummary> {
   const startTime = Date.now();
   const LOCK_KEY = 20260101;
 
@@ -188,6 +190,11 @@ async function runBackfillTransaction(mode: LedgerBackfillMode): Promise<Backfil
             mr.ttfb_ms,
             mr.client_ip,
             mr.created_at,
+            (mr.blocked_by IS NULL AND (
+               mr.endpoint IS NULL
+               OR LOWER(REGEXP_REPLACE(mr.endpoint, '/+$', '')) NOT IN
+                  ('/v1/messages/count_tokens', '/v1/responses/compact')
+             )) AS is_billable,
             ul.request_id AS existing_request_id
           FROM message_request mr
           CROSS JOIN LATERAL (
@@ -214,7 +221,7 @@ async function runBackfillTransaction(mode: LedgerBackfillMode): Promise<Backfil
           INSERT INTO usage_ledger (
             request_id, user_id, key, provider_id, final_provider_id,
             model, original_model, actual_response_model, endpoint, api_type, session_id,
-            status_code, is_success, success_rate_outcome, blocked_by,
+            status_code, is_success, success_rate_outcome, blocked_by, is_billable,
             cost_usd, cost_multiplier, group_cost_multiplier, cost_breakdown,
             input_tokens, observed_input_tokens, output_tokens,
             cache_write_tokens_reported, cache_write_accounting,
@@ -240,6 +247,7 @@ async function runBackfillTransaction(mode: LedgerBackfillMode): Promise<Backfil
             batch.is_success,
             batch.success_rate_outcome,
             batch.blocked_by,
+            batch.is_billable,
             batch.cost_usd,
             batch.cost_multiplier,
             batch.group_cost_multiplier,
