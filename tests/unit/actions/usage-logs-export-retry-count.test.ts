@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 const getSessionMock = vi.fn();
 const findUsageLogsWithDetailsMock = vi.fn();
+const findUsageLogsRowsMock = vi.fn();
 const findUsageLogsBatchMock = vi.fn();
 const findUsageLogsStatsMock = vi.fn();
 const exportStatusStore = new Map<string, unknown>();
@@ -63,12 +64,24 @@ vi.mock("@/lib/redis/redis-kv-store", () => ({
   },
 }));
 
+vi.mock("@/lib/redis/usage-logs-summary-cache", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/redis/usage-logs-summary-cache")>();
+  return {
+    ...actual,
+    getUsageLogsSummaryWithCache: vi.fn(async (filters: unknown) => {
+      const resolved = await findUsageLogsWithDetailsMock(filters);
+      return { total: resolved?.total ?? 0, summary: resolved?.summary ?? {} };
+    }),
+  };
+});
+
 vi.mock("@/repository/usage-logs", () => {
   return {
     findUsageLogSessionIdSuggestions: vi.fn(async () => []),
     findUsageLogsBatch: findUsageLogsBatchMock,
     findUsageLogsStats: findUsageLogsStatsMock,
     findUsageLogsWithDetails: findUsageLogsWithDetailsMock,
+    findUsageLogsRows: findUsageLogsRowsMock,
     getUsedEndpoints: vi.fn(async () => []),
     getUsedModels: vi.fn(async () => []),
     getUsedStatusCodes: vi.fn(async () => []),
@@ -164,6 +177,7 @@ describe("Usage logs CSV export retryCount", () => {
     exportStatusStore.clear();
     exportCsvStore.clear();
     getSessionMock.mockResolvedValue({ user: { id: 1, role: "admin" } });
+    findUsageLogsRowsMock.mockResolvedValue({ logs: [] });
     findUsageLogsWithDetailsMock.mockResolvedValue({
       logs: [],
       total: 0,
@@ -178,6 +192,7 @@ describe("Usage logs CSV export retryCount", () => {
   });
 
   test("exportUsageLogs: Retry Count 应对齐 getRetryCount（hedge race 为 0）", async () => {
+    findUsageLogsRowsMock.mockResolvedValue({ logs: [] });
     findUsageLogsWithDetailsMock.mockResolvedValue({
       logs: [],
       total: 3,
@@ -288,6 +303,7 @@ describe("Usage logs CSV export retryCount", () => {
   });
 
   test("exportUsageLogs: 按批次全量导出，并拦截前导空白公式注入", async () => {
+    findUsageLogsRowsMock.mockResolvedValue({ logs: [] });
     findUsageLogsWithDetailsMock.mockResolvedValue({
       logs: [],
       total: 3,
@@ -335,6 +351,7 @@ describe("Usage logs CSV export retryCount", () => {
 
   test("startUsageLogsExport: 异步导出任务完成后可轮询并下载", async () => {
     vi.useFakeTimers();
+    findUsageLogsRowsMock.mockResolvedValue({ logs: [] });
     findUsageLogsWithDetailsMock.mockResolvedValue({
       logs: [],
       total: 1,

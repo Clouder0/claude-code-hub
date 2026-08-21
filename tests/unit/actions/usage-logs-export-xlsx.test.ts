@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 const getSessionMock = vi.fn();
 const findUsageLogsWithDetailsMock = vi.fn();
+const findUsageLogsRowsMock = vi.fn();
 const findUsageLogsBatchMock = vi.fn();
 const findUsageLogsStatsMock = vi.fn();
 const exportStatusStore = new Map<string, unknown>();
@@ -47,11 +48,23 @@ vi.mock("@/lib/redis/redis-kv-store", () => ({
   },
 }));
 
+vi.mock("@/lib/redis/usage-logs-summary-cache", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/redis/usage-logs-summary-cache")>();
+  return {
+    ...actual,
+    getUsageLogsSummaryWithCache: vi.fn(async (filters: unknown) => {
+      const resolved = await findUsageLogsWithDetailsMock(filters);
+      return { total: resolved?.total ?? 0, summary: resolved?.summary ?? {} };
+    }),
+  };
+});
+
 vi.mock("@/repository/usage-logs", () => ({
   findUsageLogSessionIdSuggestions: vi.fn(async () => []),
   findUsageLogsBatch: findUsageLogsBatchMock,
   findUsageLogsStats: findUsageLogsStatsMock,
   findUsageLogsWithDetails: findUsageLogsWithDetailsMock,
+  findUsageLogsRows: findUsageLogsRowsMock,
   getUsedEndpoints: vi.fn(async () => []),
   getUsedModels: vi.fn(async () => []),
   getUsedStatusCodes: vi.fn(async () => []),
@@ -103,6 +116,7 @@ describe("Usage logs XLSX export", () => {
     exportStatusStore.clear();
     exportResultStore.clear();
     getSessionMock.mockResolvedValue({ user: { id: 1, role: "admin" } });
+    findUsageLogsRowsMock.mockResolvedValue({ logs: [] });
     findUsageLogsWithDetailsMock.mockResolvedValue({ logs: [], total: 1, summary: summary(1) });
     findUsageLogsBatchMock.mockResolvedValue({ logs: [], nextCursor: null, hasMore: false });
     findUsageLogsStatsMock.mockResolvedValue(summary());

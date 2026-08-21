@@ -4,6 +4,7 @@ const mocks = vi.hoisted(() => ({
   getSession: vi.fn(),
   hasAdminAuthority: vi.fn(),
   findUsageLogsWithDetails: vi.fn(),
+  findUsageLogsRows: vi.fn(),
   findUsageLogsBatch: vi.fn(),
   findUsageLogsStats: vi.fn(),
   findUsageLogSessionIdSuggestions: vi.fn(),
@@ -19,6 +20,7 @@ vi.mock("@/lib/auth", () => ({
 
 vi.mock("@/repository/usage-logs", () => ({
   findUsageLogsWithDetails: mocks.findUsageLogsWithDetails,
+  findUsageLogsRows: mocks.findUsageLogsRows,
   findUsageLogsBatch: mocks.findUsageLogsBatch,
   findUsageLogsStats: mocks.findUsageLogsStats,
   findUsageLogSessionIdSuggestions: mocks.findUsageLogSessionIdSuggestions,
@@ -31,11 +33,22 @@ vi.mock("@/lib/redis/live-chain-store", () => ({
   readLiveChainBatch: vi.fn(async () => new Map()),
 }));
 
+vi.mock("@/lib/redis/usage-logs-summary-cache", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/redis/usage-logs-summary-cache")>();
+  return {
+    ...actual,
+    getUsageLogsSummaryWithCache: vi.fn(async (filters: unknown) =>
+      mocks.findUsageLogsWithDetails(filters)
+    ),
+  };
+});
+
 describe("usage log effective authorization", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.hasAdminAuthority.mockReturnValue(false);
     mocks.findUsageLogsWithDetails.mockResolvedValue({ logs: [], total: 0, summary: {} });
+    mocks.findUsageLogsRows.mockResolvedValue({ logs: [] });
     mocks.findUsageLogsBatch.mockResolvedValue({ logs: [], nextCursor: null, hasMore: false });
     mocks.findUsageLogsStats.mockResolvedValue({ totalRequests: 0 });
     mocks.findUsageLogSessionIdSuggestions.mockResolvedValue([]);
@@ -60,9 +73,7 @@ describe("usage log effective authorization", () => {
       keyId: 7,
     });
 
-    expect(mocks.findUsageLogsWithDetails).toHaveBeenCalledWith(
-      expect.objectContaining({ userId: 44 })
-    );
+    expect(mocks.findUsageLogsRows).toHaveBeenCalledWith(expect.objectContaining({ userId: 44 }));
     expect(mocks.findUsageLogsBatch).toHaveBeenCalledWith(expect.objectContaining({ userId: 44 }));
     expect(mocks.findUsageLogsStats).toHaveBeenCalledWith(expect.objectContaining({ userId: 44 }));
     expect(mocks.findUsageLogSessionIdSuggestions).toHaveBeenCalledWith(
@@ -105,9 +116,7 @@ describe("usage log effective authorization", () => {
     await actions.getUsageLogs({ userId: 99, page: 1 } as never);
     await actions.getModelList();
 
-    expect(mocks.findUsageLogsWithDetails).toHaveBeenCalledWith(
-      expect.objectContaining({ userId: 99 })
-    );
+    expect(mocks.findUsageLogsRows).toHaveBeenCalledWith(expect.objectContaining({ userId: 99 }));
     expect(mocks.getUsedModels).toHaveBeenCalledWith(undefined);
   });
 });
