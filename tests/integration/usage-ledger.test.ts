@@ -1725,6 +1725,121 @@ run("usage ledger integration", () => {
       ]);
     });
 
+    test("provider leaderboard hedge gate: fast path equals the full attribution CTE", async () => {
+      const winnerProviderId = nextProviderId();
+      const loserProviderId = nextProviderId();
+      const userId = nextUserId();
+      const [vendor] = await db
+        .insert(providerVendors)
+        .values({
+          websiteDomain: `${KEY_PREFIX}-hedge-gate.example`,
+          displayName: "hedge-gate-test",
+        })
+        .returning({ id: providerVendors.id });
+      if (!vendor) throw new Error("failed to insert provider vendor test row");
+
+      await db.insert(providers).values([
+        {
+          id: winnerProviderId,
+          name: `${KEY_PREFIX}-gate-winner`,
+          url: "https://gate-winner.example/v1",
+          key: "sk-gate-winner",
+          providerVendorId: vendor.id,
+          providerType: "claude",
+        },
+        {
+          id: loserProviderId,
+          name: `${KEY_PREFIX}-gate-loser`,
+          url: "https://gate-loser.example/v1",
+          key: "sk-gate-loser",
+          providerVendorId: vendor.id,
+          providerType: "claude",
+        },
+      ]);
+
+      await insertMessageRequestRow({
+        key: nextKey("hedge-gate-plain"),
+        userId,
+        providerId: winnerProviderId,
+        model: "gate-model",
+        statusCode: 200,
+        costUsd: "0.300000000000000",
+        inputTokens: 100,
+        outputTokens: 20,
+        cacheCreationInputTokens: 10,
+        cacheReadInputTokens: 5,
+        createdAt: new Date(),
+      });
+
+      const { __resetHedgeLoserGateCacheForTests, __setHedgeLoserGateCacheForTests } = await import(
+        "@/repository/_shared/provider-billing-events"
+      );
+
+      // Earlier suites in this file may have left hedge-loser rows, so the
+      // GLOBAL gate state is not deterministic here. The contract under test
+      // is routing + equivalence: force each gate value and require both
+      // paths to agree exactly for a provider whose requests carry no losers.
+      __setHedgeLoserGateCacheForTests(false);
+      const fastResult = await findDailyProviderLeaderboard(undefined, true);
+
+      __setHedgeLoserGateCacheForTests(true);
+      try {
+        const fullResult = await findDailyProviderLeaderboard(undefined, true);
+        const pick = (rows: typeof fastResult, id: number) =>
+          rows.find((entry) => entry.providerId === id);
+        const fastWinner = pick(fastResult, winnerProviderId);
+        const fullWinner = pick(fullResult, winnerProviderId);
+        expect(fastWinner).toBeDefined();
+        expect(fullWinner).toBeDefined();
+        expect(fastWinner?.totalRequests).toBe(fullWinner?.totalRequests);
+        expect(fastWinner?.totalCost).toBeCloseTo(fullWinner?.totalCost ?? 0, 12);
+        expect(fastWinner?.totalTokens).toBe(fullWinner?.totalTokens);
+        expect(fastWinner?.modelStats).toEqual(fullWinner?.modelStats);
+      } finally {
+        __resetHedgeLoserGateCacheForTests();
+      }
+
+      // Natural probe: a real billed loser row must be visible to the gate.
+      await db.execute(sql`
+        UPDATE usage_ledger
+        SET hedge_losers = jsonb_build_array(jsonb_build_object(
+          'providerId', ${loserProviderId}::int,
+          'providerName', 'gate-loser',
+          'attemptNumber', 1,
+          'costUsd', '0.100000000000000',
+          'billingStatus', 'settled',
+          'inputTokens', 10,
+          'outputTokens', 5,
+          'cacheCreationInputTokens', 0,
+          'cacheReadInputTokens', 0
+        ))
+        WHERE request_id = (
+          SELECT id FROM message_request
+          WHERE key LIKE ${`${KEY_PREFIX}-hedge-gate-plain%`}
+          ORDER BY id DESC LIMIT 1
+        )
+      `);
+      __resetHedgeLoserGateCacheForTests();
+      try {
+        const { anyHedgeLoserRowsExist } = await import(
+          "@/repository/_shared/provider-billing-events"
+        );
+        // Other suites may also have loser rows; the probe must at minimum
+        // see THIS freshly inserted one.
+        expect(await anyHedgeLoserRowsExist()).toBe(true);
+      } finally {
+        await db.execute(sql`
+          UPDATE usage_ledger SET hedge_losers = NULL
+          WHERE request_id = (
+            SELECT id FROM message_request
+            WHERE key LIKE ${`${KEY_PREFIX}-hedge-gate-plain%`}
+            ORDER BY id DESC LIMIT 1
+          )
+        `);
+        __resetHedgeLoserGateCacheForTests();
+      }
+    });
+
     test("provider leaderboard merged pass excludes blank models and honors the providerType filter", async () => {
       const claudeProviderId = nextProviderId();
       const openaiProviderId = nextProviderId();

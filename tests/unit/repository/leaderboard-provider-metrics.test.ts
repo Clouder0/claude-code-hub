@@ -38,6 +38,15 @@ vi.mock("@/drizzle/db", () => ({
   },
 }));
 
+vi.mock("@/repository/_shared/provider-billing-events", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("@/repository/_shared/provider-billing-events")>();
+  return {
+    ...actual,
+    anyHedgeLoserRowsExist: vi.fn(async () => false),
+  };
+});
+
 vi.mock("@/drizzle/schema", () => ({
   usageLedger: {
     providerId: "providerId",

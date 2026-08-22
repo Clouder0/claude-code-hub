@@ -11,7 +11,10 @@ import {
   LEDGER_SUCCESS_RATE_COUNTABLE_CONDITION,
   LEDGER_SUCCESS_RATE_SUCCESS_CONDITION,
 } from "./_shared/ledger-conditions";
-import { buildProviderBillingEventsQuery } from "./_shared/provider-billing-events";
+import {
+  anyHedgeLoserRowsExist,
+  buildProviderBillingEventsQuery,
+} from "./_shared/provider-billing-events";
 import { getSystemSettings } from "./system-config";
 
 const clampRatio01 = (value: number | null | undefined) => Math.min(Math.max(value ?? 0, 0), 1);
@@ -661,9 +664,35 @@ async function findProviderLeaderboardWithTimezone(
     dateRange,
     sql`ledger.created_at`
   );
-  const providerBillingEvents = sql`(
-    ${buildProviderBillingEventsQuery({ ledgerCreatedAtCondition: ledgerDateCondition })}
-  ) AS provider_billing_event`;
+  // Hedge-loser gate: while no billed loser row exists anywhere in the
+  // ledger (this deployment has never enabled provider racing), the full
+  // attribution CTE degenerates to the ledger rows themselves. The thin
+  // subquery below keeps the exact provider_billing_event shape the outer
+  // aggregate consumes while letting the planner push it into the widened
+  // partial covering index (index-only). The first real loser row flips
+  // the gate within its TTL and this falls back to the full CTE.
+  const providerBillingEvents = (await anyHedgeLoserRowsExist())
+    ? sql`(
+        ${buildProviderBillingEventsQuery({ ledgerCreatedAtCondition: ledgerDateCondition })}
+      ) AS provider_billing_event`
+    : sql`(
+        SELECT
+          ledger.final_provider_id AS provider_id,
+          ledger.created_at,
+          ledger.model,
+          ledger.original_model,
+          ledger.success_rate_outcome,
+          ledger.ttfb_ms,
+          ledger.duration_ms,
+          ledger.cost_usd,
+          COALESCE(ledger.input_tokens, 0) AS input_tokens,
+          COALESCE(ledger.output_tokens, 0) AS output_tokens,
+          COALESCE(ledger.cache_creation_input_tokens, 0) AS cache_creation_input_tokens,
+          COALESCE(ledger.cache_read_input_tokens, 0) AS cache_read_input_tokens
+        FROM usage_ledger AS ledger
+        WHERE ${ledgerDateCondition}
+          AND ledger.is_billable
+      ) AS provider_billing_event`;
   const eventProviderId = sql<number>`provider_billing_event.provider_id`;
   const eventCost = sql<string>`provider_billing_event.cost_usd`;
   const eventInputTokens = sql<number>`provider_billing_event.input_tokens`;

@@ -1,5 +1,6 @@
 import type { SQL } from "drizzle-orm";
 import { sql } from "drizzle-orm";
+import { db } from "@/drizzle/db";
 
 export interface ProviderBillingEventQueryOptions {
   providerId?: number;
@@ -446,4 +447,49 @@ export function buildProviderBillingTotalQuery(options: ProviderBillingTotalQuer
         + provider_loser_total.cost_usd AS total
     FROM winner_total, winner_loser_adjustment, provider_loser_total
   `;
+}
+
+/**
+ * Hedge-loser existence gate for the 'all'-mode fast path.
+ *
+ * The streaming-hedge feature requires a per-provider
+ * firstByteTimeoutStreamingMs > 0 to ever race providers; no provider in
+ * this deployment has it set, so usage_ledger.hedge_losers has never been
+ * non-null (verified against the full ledger). The probe matches the
+ * idx_usage_ledger_winner_hedge_losers partial predicate exactly, so it is
+ * an index-only EXISTS over an effectively empty index (sub-millisecond).
+ *
+ * While no loser row exists, provider aggregates can skip the loser
+ * expansion machinery entirely and read usage_ledger directly. If hedge is
+ * ever enabled, the first billed loser row flips the gate within TTL and
+ * consumers fall back to the full attribution CTE — no manual switch.
+ */
+const HEDGE_LOSER_GATE_TTL_MS = 60 * 1000;
+let hedgeLoserGateCache: { value: boolean; expiresAt: number } | null = null;
+
+export async function anyHedgeLoserRowsExist(): Promise<boolean> {
+  const now = Date.now();
+  if (hedgeLoserGateCache && hedgeLoserGateCache.expiresAt > now) {
+    return hedgeLoserGateCache.value;
+  }
+  const result = await db.execute(sql`
+    SELECT EXISTS (
+      SELECT 1 FROM usage_ledger
+      WHERE blocked_by IS NULL AND hedge_losers IS NOT NULL
+    ) AS has_losers
+  `);
+  const row = (Array.from(result) as Array<{ has_losers: boolean }>)[0];
+  const value = row?.has_losers === true;
+  hedgeLoserGateCache = { value, expiresAt: now + HEDGE_LOSER_GATE_TTL_MS };
+  return value;
+}
+
+/** Test-only: reset the gate cache between cases. */
+export function __resetHedgeLoserGateCacheForTests(): void {
+  hedgeLoserGateCache = null;
+}
+
+/** Test-only: force the cached gate value to exercise both query paths. */
+export function __setHedgeLoserGateCacheForTests(value: boolean): void {
+  hedgeLoserGateCache = { value, expiresAt: Date.now() + HEDGE_LOSER_GATE_TTL_MS };
 }
