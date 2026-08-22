@@ -99,15 +99,21 @@ describe("usage logs hidden non-chat endpoints", () => {
     expect(explicitSql).not.toContain("not in");
   });
 
-  it("key scoped usage log queries still call the shared default hidden predicate", () => {
+  it("message_request paths keep the hidden predicate; ledger paths rely on is_billable", () => {
     expect(usageLogFiltersSource).toContain("DEFAULT_HIDDEN_USAGE_LOG_ENDPOINTS");
     expect(
       sqlToQuery(buildDefaultHiddenUsageLogEndpointCondition(messageRequest.endpoint, null) as SQL)
         .params
     ).toEqual(["/v1/messages/count_tokens", "/v1/responses/compact"]);
-    expect(usageLogsSource).toContain("hiddenLedgerEndpointCondition");
-    expect(usageLogsSource).toContain("hiddenKeyLedgerEndpointCondition");
-    expect(usageLogsSource).toContain("hiddenStatsLedgerEndpointCondition");
+    // Ledger-based queries dropped the vestigial hidden-endpoint predicate:
+    // LEDGER_BILLING_CONDITION (is_billable) already encodes the identical
+    // endpoint exclusion, and the trigger keeps such rows out of the ledger
+    // entirely (verified 0 rows in production). The dead regex blocked
+    // index-only scans on the is_billable partial indexes.
+    expect(usageLogsSource).not.toContain("hiddenLedgerEndpointCondition");
+    expect(usageLogsSource).not.toContain("hiddenKeyLedgerEndpointCondition");
+    expect(usageLogsSource).not.toContain("hiddenStatsLedgerEndpointCondition");
+    expect(usageLogsSource).not.toContain("buildDefaultHiddenUsageLogEndpointCondition");
     expect(usageLogsSource).toContain(
       "buildUsageLogEndpointMatchCondition(\n      usageLedger.endpoint,\n      filters.endpoint"
     );

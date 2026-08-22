@@ -9,7 +9,10 @@ import {
 import { logger } from "@/lib/logger";
 import { readLiveChainBatch } from "@/lib/redis/live-chain-store";
 import { RedisKVStore } from "@/lib/redis/redis-kv-store";
-import { getUsageLogsSummaryWithCache } from "@/lib/redis/usage-logs-summary-cache";
+import {
+  getUsageLogsStatsWithCache,
+  getUsageLogsSummaryWithCache,
+} from "@/lib/redis/usage-logs-summary-cache";
 import { buildCsvHeaderLine, buildCsvRows, CSV_BOM } from "@/lib/usage-logs/export/csv";
 import { createSummaryAccumulator } from "@/lib/usage-logs/export/summary";
 import { assembleUsageLogsXlsx, buildDetailRowXml } from "@/lib/usage-logs/export/xlsx";
@@ -19,7 +22,6 @@ import {
   findUsageLogSessionIdSuggestions,
   findUsageLogsBatch,
   findUsageLogsRows,
-  findUsageLogsStats,
   getUsedEndpoints,
   getUsedModels,
   getUsedStatusCodes,
@@ -687,7 +689,7 @@ export async function getUsageLogsStats(
       ? applyDefaultUsageLogsTimeWindow(filters)
       : applyDefaultUsageLogsTimeWindow({ ...filters, userId: session.user.id });
 
-    const stats = await findUsageLogsStats(finalFilters);
+    const stats = await getUsageLogsStatsWithCache(finalFilters);
 
     return { ok: true, data: stats };
   } catch (error) {

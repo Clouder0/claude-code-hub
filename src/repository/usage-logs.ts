@@ -17,7 +17,6 @@ import { escapeLike } from "./_shared/like";
 import { EXCLUDE_WARMUP_CONDITION } from "./_shared/message-request-conditions";
 import {
   buildActualResponseModelMismatchCondition,
-  buildDefaultHiddenUsageLogEndpointCondition,
   buildUsageLogConditions,
   buildUsageLogEndpointMatchCondition,
   RETRY_COUNT_EXPR,
@@ -346,14 +345,6 @@ export async function findUsageLogsBatch(
         usageLedger.originalModel
       )
     );
-  }
-
-  const hiddenLedgerEndpointCondition = buildDefaultHiddenUsageLogEndpointCondition(
-    usageLedger.endpoint,
-    filters.endpoint
-  );
-  if (hiddenLedgerEndpointCondition) {
-    ledgerConditions.push(hiddenLedgerEndpointCondition);
   }
 
   if (filters.endpoint?.trim()) {
@@ -780,14 +771,6 @@ function buildKeyLedgerConditions(
         usageLedger.originalModel
       )
     );
-  }
-
-  const hiddenKeyLedgerEndpointCondition = buildDefaultHiddenUsageLogEndpointCondition(
-    usageLedger.endpoint,
-    filters.endpoint
-  );
-  if (hiddenKeyLedgerEndpointCondition) {
-    conditions.push(hiddenKeyLedgerEndpointCondition);
   }
 
   if (filters.endpoint?.trim()) {
@@ -1840,14 +1823,6 @@ export async function findUsageLogsStats(
         usageLedger.originalModel
       )
     );
-  }
-
-  const hiddenStatsLedgerEndpointCondition = buildDefaultHiddenUsageLogEndpointCondition(
-    usageLedger.endpoint,
-    filters.endpoint
-  );
-  if (hiddenStatsLedgerEndpointCondition) {
-    conditions.push(hiddenStatsLedgerEndpointCondition);
   }
 
   if (filters.endpoint?.trim()) {

@@ -144,8 +144,22 @@ describe("Warmup 请求：不计入任何聚合统计", () => {
     await findUsageLogsStats({});
 
     expect(whereArgs.length).toBeGreaterThan(0);
-    const whereSql = sqlToString(whereArgs[0]);
-    expect(whereSql.toLowerCase()).toContain("is null");
+    // Warmup/blocked/non-billing rows are excluded via the stored billable
+    // decision (the trigger clears the flag on the warmup transition). The
+    // condition is a bare Column reference, so assert on the chunk tree.
+    const seen: string[] = [];
+    const walkChunks = (node: unknown, depth = 0): void => {
+      if (!node || typeof node !== "object" || depth > 8) return;
+      const anyNode = node as Record<string, unknown>;
+      if (typeof anyNode.name === "string") seen.push(anyNode.name);
+      for (const value of Object.values(anyNode)) {
+        if (Array.isArray(value)) value.forEach((v) => walkChunks(v, depth + 1));
+        else if (value && typeof value === "object") walkChunks(value, depth + 1);
+      }
+    };
+    walkChunks(whereArgs[0]);
+    expect(seen).toContain("is_billable");
+    expect(seen.some((n) => n.toLowerCase().includes("regexp"))).toBe(false);
   });
 
   test("provider statistics：SQL 应使用 blocked_by IS NULL 计费过滤", async () => {

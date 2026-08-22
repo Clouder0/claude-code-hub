@@ -32,6 +32,7 @@ vi.mock("@/repository/usage-logs", () => ({
 
 vi.mock("@/lib/redis/usage-logs-summary-cache", () => ({
   getUsageLogsSummaryWithCache: mockSummaryCache,
+  getUsageLogsStatsWithCache: mockFindUsageLogsStats,
 }));
 
 vi.mock("@/lib/redis/live-chain-store", () => ({

@@ -2,8 +2,10 @@ import { createHash } from "node:crypto";
 import { logger } from "@/lib/logger";
 import { getRedisClient } from "@/lib/redis/client";
 import {
+  findUsageLogsStats,
   findUsageLogsSummary,
   type UsageLogFilters,
+  type UsageLogSummary,
   type UsageLogsResult,
 } from "@/repository/usage-logs";
 
@@ -49,6 +51,10 @@ function buildSummaryCacheKey(filters: Omit<UsageLogFilters, "page" | "pageSize"
   return `${KEY_PREFIX}:${hash}`;
 }
 
+function buildSummaryCacheKeyHash(filters: Omit<UsageLogFilters, "page" | "pageSize">): string {
+  return buildSummaryCacheKey(filters).split(":").slice(-1)[0];
+}
+
 export async function getUsageLogsSummaryWithCache(
   filters: Omit<UsageLogFilters, "page" | "pageSize">
 ): Promise<Pick<UsageLogsResult, "total" | "summary">> {
@@ -77,5 +83,41 @@ export async function getUsageLogsSummaryWithCache(
       error: error instanceof Error ? error.message : String(error),
     });
     return await findUsageLogsSummary(filters);
+  }
+}
+
+/**
+ * 统计面板（getUsageLogsStats）的 60 秒微缓存。
+ *
+ * 面板常驻展开、页面打开即加载；主查询已是 index-only 后单次成本亚秒，
+ * 这里把"换筛选条件来回看"和"短时间重开页面"也挡掉，且换页/刷新不再重跑。
+ * 键与分页 summary 同维度（排除 page/pageSize）；fail-open。
+ */
+export async function getUsageLogsStatsWithCache(
+  filters: Omit<UsageLogFilters, "page" | "pageSize">
+): Promise<UsageLogSummary> {
+  const redis = getRedisClient();
+  if (!redis) {
+    return await findUsageLogsStats(filters);
+  }
+  const cacheKey = `usage-logs:stats:v1:${buildSummaryCacheKeyHash(filters)}`;
+
+  try {
+    const cached = await redis.get(cacheKey);
+    if (cached) {
+      return JSON.parse(cached);
+    }
+    const data = await findUsageLogsStats(filters);
+    await redis
+      .setex(cacheKey, USAGE_LOGS_SUMMARY_TTL, JSON.stringify(data))
+      .catch((err: unknown) =>
+        logger.warn("[UsageLogsSummaryCache] Failed to write stats cache", { cacheKey, error: err })
+      );
+    return data;
+  } catch (error) {
+    logger.warn("[UsageLogsSummaryCache] Redis error on stats, fallback to direct query", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return await findUsageLogsStats(filters);
   }
 }
