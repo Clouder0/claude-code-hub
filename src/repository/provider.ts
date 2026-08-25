@@ -20,7 +20,11 @@ import type {
   ProviderModelRedirectRule,
   UpdateProviderData,
 } from "@/types/provider";
-import { buildRawLoserCandidates, buildSettledLoserCtes } from "./_shared/provider-billing-events";
+import {
+  anyHedgeLoserRowsExist,
+  buildRawLoserCandidates,
+  buildSettledLoserCtes,
+} from "./_shared/provider-billing-events";
 import { toProvider } from "./_shared/transformers";
 import {
   ensureProviderEndpointExistsForUrl,
@@ -1569,11 +1573,14 @@ export async function getDistinctProviderGroups(): Promise<string[]> {
  * 包括：今天的总金额、今天的调用次数、最近一次调用时间和模型
  *
  * 性能优化：
- * - provider_stats: 先按最终供应商聚合，再与 providers 做 LEFT JOIN，避免 providers × usage_ledger 的笛卡尔积
  * - bounds: 用“按时区计算的时间范围”过滤 created_at，便于命中 created_at 索引
  * - DST 兼容：对“本地日界/近 7 日”先在 timestamp 上做 +interval，再 AT TIME ZONE 回到 timestamptz，避免夏令时跨日偏移
- * - provider_stats: 只扫描“今日”窗口（原实现物化近 7 天约 87 万行再过滤，实测 160s+）
- * - latest_call: 每供应商 LATERAL 索引点查（idx_usage_ledger_provider_created_at），替代近 7 天全量 DISTINCT ON 排序
+ * - 竞速门控（anyHedgeLoserRowsExist）：无任何 hedge_loser 行时走快路径——两个每供应商
+ *   LATERAL 子树范围扫描，完全命中 idx_ul_billable_provider_time（partial WHERE is_billable，
+ *   index-only）。首次出现真实输家行后门控在 TTL 内翻转，回退完整归因查询。
+ * - 完整路径仅在存在 hedge_loser 行时执行：拆分 winner/loser 归因，成本为请求总额减去
+ *   已结算输家成本。其 latest_call LATERAL 沿用旧版正则谓词，B5 删除
+ *   idx_usage_ledger_provider_created_at 后无专用索引（已接受：竞速在本部署永久禁用）。
  */
 export type ProviderStatisticsRow = {
   id: number;
@@ -1598,6 +1605,172 @@ let providerStatisticsInFlight: {
   promise: Promise<ProviderStatisticsRow[]>;
 } | null = null;
 
+/**
+ * Full attribution query: used only while billed hedge-loser rows exist.
+ * Splits each request's total cost between the winner provider and the
+ * settled loser providers. Kept verbatim from the pre-gate implementation;
+ * its latest_call LATERAL uses the legacy regex predicate and has had no
+ * dedicated index since the B5 index cleanup (accepted: provider racing is
+ * permanently disabled in this deployment, so this path is not expected
+ * to run).
+ */
+function buildProviderStatisticsQueryFull(timezone: string) {
+  return sql`
+     WITH bounds AS (
+       SELECT
+         (DATE_TRUNC('day', CURRENT_TIMESTAMP AT TIME ZONE ${timezone}) AT TIME ZONE ${timezone}) AS today_start,
+         ((DATE_TRUNC('day', CURRENT_TIMESTAMP AT TIME ZONE ${timezone}) + INTERVAL '1 day') AT TIME ZONE ${timezone}) AS tomorrow_start,
+         ((DATE_TRUNC('day', CURRENT_TIMESTAMP AT TIME ZONE ${timezone}) - INTERVAL '7 days') AT TIME ZONE ${timezone}) AS last7_start
+     ),
+     ${buildSettledLoserCtes(
+       buildRawLoserCandidates(sql`usage_ledger AS ledger`, "all", [
+         sql`ledger.blocked_by IS NULL`,
+         sql`ledger.hedge_losers IS NOT NULL`,
+         sql`ledger.created_at >= (SELECT today_start FROM bounds)`,
+         sql`ledger.created_at < (SELECT tomorrow_start FROM bounds)`,
+       ])
+     )},
+     loser_totals AS (
+       SELECT request_id, COALESCE(SUM(cost_usd), 0) AS cost_usd
+       FROM settled_losers
+       GROUP BY request_id
+     ),
+     today_winner_events AS (
+       -- Winner events within today's window only; cost is the request total minus
+       -- settled hedge-loser costs.
+       SELECT
+         ledger.final_provider_id AS provider_id,
+         GREATEST(COALESCE(ledger.cost_usd, 0) - COALESCE(loser_totals.cost_usd, 0), 0) AS cost_usd
+       FROM usage_ledger AS ledger
+       LEFT JOIN loser_totals USING (request_id)
+       WHERE ledger.blocked_by IS NULL
+         AND (
+           ledger.endpoint IS NULL
+           OR LOWER(REGEXP_REPLACE(ledger.endpoint, '/+$', '')) NOT IN (
+             ${sql.join(
+               NON_BILLING_ENDPOINTS.map((endpoint) => sql`${endpoint}`),
+               sql`, `
+             )}
+           )
+         )
+         AND ledger.created_at >= (SELECT today_start FROM bounds)
+         AND ledger.created_at < (SELECT tomorrow_start FROM bounds)
+     ),
+     provider_stats AS (
+       -- Provider billing events split a request total into winner and hedge-loser costs.
+       SELECT
+         provider_id,
+         COALESCE(SUM(cost_usd), 0) AS today_cost,
+         COUNT(*)::integer AS today_calls
+       FROM (
+         SELECT provider_id, cost_usd FROM today_winner_events
+         UNION ALL
+         SELECT provider_id, cost_usd FROM settled_losers
+       ) events
+       GROUP BY provider_id
+     ),
+     latest_call AS (
+       -- Per-provider LATERAL lookup instead of a 7-day DISTINCT ON sort.
+       -- Winner events only: verified on production data that no provider's
+       -- newest hedge-loser event is newer than its last winner event.
+       SELECT p.id AS provider_id, lc.created_at AS last_call_time, lc.model AS last_call_model
+       FROM providers p
+       LEFT JOIN LATERAL (
+         SELECT created_at, model
+         FROM usage_ledger
+         WHERE final_provider_id = p.id
+           AND blocked_by IS NULL
+           AND created_at >= (SELECT last7_start FROM bounds)
+           AND (
+             endpoint IS NULL
+             OR LOWER(REGEXP_REPLACE(endpoint, '/+$', '')) NOT IN (
+               ${sql.join(
+                 NON_BILLING_ENDPOINTS.map((endpoint) => sql`${endpoint}`),
+                 sql`, `
+               )}
+             )
+           )
+         ORDER BY created_at DESC, request_id DESC
+         LIMIT 1
+       ) lc ON true
+       WHERE p.deleted_at IS NULL
+     )
+     SELECT
+       p.id,
+       COALESCE(ps.today_cost, 0) AS today_cost,
+       COALESCE(ps.today_calls, 0) AS today_calls,
+       lc.last_call_time,
+       lc.last_call_model
+     FROM providers p
+     LEFT JOIN provider_stats ps ON p.id = ps.provider_id
+     LEFT JOIN latest_call lc ON p.id = lc.provider_id
+     WHERE p.deleted_at IS NULL
+     ORDER BY p.id ASC
+  `;
+}
+
+/**
+ * Fast path: valid only while anyHedgeLoserRowsExist() is false, where it is
+ * exactly equivalent to the full query:
+ * - The gate probe (blocked_by IS NULL AND hedge_losers IS NOT NULL) covers the
+ *   full query's raw_loser_candidates predicate, so settled_losers/loser_totals
+ *   are empty and GREATEST(cost - 0, 0) degenerates to GREATEST(cost, 0)
+ *   (kept per-row so totals match the full path for any cost sign).
+ * - is_billable equals the legacy blocked_by/endpoint regex predicate
+ *   (maintained by the 0116 trigger, verified over the full backfill).
+ * Both LATERALs are subtree range scans over idx_ul_billable_provider_time
+ * (partial WHERE is_billable, INCLUDE covers cost_usd/model), so they stay
+ * index-only; only exact created_at ties in latest_call may touch the heap
+ * until request_id is added to the index INCLUDE.
+ */
+function buildProviderStatisticsQueryFast(timezone: string) {
+  return sql`
+     WITH bounds AS (
+       SELECT
+         (DATE_TRUNC('day', CURRENT_TIMESTAMP AT TIME ZONE ${timezone}) AT TIME ZONE ${timezone}) AS today_start,
+         ((DATE_TRUNC('day', CURRENT_TIMESTAMP AT TIME ZONE ${timezone}) + INTERVAL '1 day') AT TIME ZONE ${timezone}) AS tomorrow_start,
+         ((DATE_TRUNC('day', CURRENT_TIMESTAMP AT TIME ZONE ${timezone}) - INTERVAL '7 days') AT TIME ZONE ${timezone}) AS last7_start
+     )
+     SELECT
+       p.id,
+       COALESCE(ts.today_cost, 0) AS today_cost,
+       COALESCE(ts.today_calls, 0) AS today_calls,
+       lc.created_at AS last_call_time,
+       lc.model AS last_call_model
+     FROM providers p
+     LEFT JOIN LATERAL (
+       -- Today's per-provider subtree aggregate (index-only).
+       SELECT
+         SUM(GREATEST(COALESCE(cost_usd, 0), 0)) AS today_cost,
+         COUNT(*)::integer AS today_calls
+       FROM usage_ledger
+       WHERE final_provider_id = p.id
+         AND is_billable
+         AND created_at >= (SELECT today_start FROM bounds)
+         AND created_at < (SELECT tomorrow_start FROM bounds)
+     ) ts ON true
+     LEFT JOIN LATERAL (
+       -- Newest billable row per provider subtree; same ORDER BY as the full
+       -- path so created_at ties resolve to the same row.
+       SELECT created_at, model
+       FROM usage_ledger
+       WHERE final_provider_id = p.id
+         AND is_billable
+         AND created_at >= (SELECT last7_start FROM bounds)
+       ORDER BY created_at DESC, request_id DESC
+       LIMIT 1
+     ) lc ON true
+     WHERE p.deleted_at IS NULL
+     ORDER BY p.id ASC
+  `;
+}
+
+/** Test-only: drop the in-memory statistics cache between cases. */
+export function __resetProviderStatisticsCacheForTests(): void {
+  providerStatisticsCache = null;
+  providerStatisticsInFlight = null;
+}
+
 export async function getProviderStatistics(): Promise<ProviderStatisticsRow[]> {
   try {
     // 统一的时区处理：使用 PostgreSQL AT TIME ZONE + 系统时区配置
@@ -1617,99 +1790,14 @@ export async function getProviderStatistics(): Promise<ProviderStatisticsRow[]> 
     }
 
     const promise: Promise<ProviderStatisticsRow[]> = (async () => {
-      const query = sql`
-         WITH bounds AS (
-           SELECT
-             (DATE_TRUNC('day', CURRENT_TIMESTAMP AT TIME ZONE ${timezone}) AT TIME ZONE ${timezone}) AS today_start,
-             ((DATE_TRUNC('day', CURRENT_TIMESTAMP AT TIME ZONE ${timezone}) + INTERVAL '1 day') AT TIME ZONE ${timezone}) AS tomorrow_start,
-             ((DATE_TRUNC('day', CURRENT_TIMESTAMP AT TIME ZONE ${timezone}) - INTERVAL '7 days') AT TIME ZONE ${timezone}) AS last7_start
-         ),
-         ${buildSettledLoserCtes(
-           buildRawLoserCandidates(sql`usage_ledger AS ledger`, "all", [
-             sql`ledger.blocked_by IS NULL`,
-             sql`ledger.hedge_losers IS NOT NULL`,
-             sql`ledger.created_at >= (SELECT today_start FROM bounds)`,
-             sql`ledger.created_at < (SELECT tomorrow_start FROM bounds)`,
-           ])
-         )},
-         loser_totals AS (
-           SELECT request_id, COALESCE(SUM(cost_usd), 0) AS cost_usd
-           FROM settled_losers
-           GROUP BY request_id
-         ),
-         today_winner_events AS (
-           -- Winner events within today's window only; cost is the request total minus
-           -- settled hedge-loser costs. Index scan on idx_usage_ledger_created_at_desc_id.
-           SELECT
-             ledger.final_provider_id AS provider_id,
-             GREATEST(COALESCE(ledger.cost_usd, 0) - COALESCE(loser_totals.cost_usd, 0), 0) AS cost_usd
-           FROM usage_ledger AS ledger
-           LEFT JOIN loser_totals USING (request_id)
-           WHERE ledger.blocked_by IS NULL
-             AND (
-               ledger.endpoint IS NULL
-               OR LOWER(REGEXP_REPLACE(ledger.endpoint, '/+$', '')) NOT IN (
-                 ${sql.join(
-                   NON_BILLING_ENDPOINTS.map((endpoint) => sql`${endpoint}`),
-                   sql`, `
-                 )}
-               )
-             )
-             AND ledger.created_at >= (SELECT today_start FROM bounds)
-             AND ledger.created_at < (SELECT tomorrow_start FROM bounds)
-         ),
-         provider_stats AS (
-           -- Provider billing events split a request total into winner and hedge-loser costs.
-           SELECT
-             provider_id,
-             COALESCE(SUM(cost_usd), 0) AS today_cost,
-             COUNT(*)::integer AS today_calls
-           FROM (
-             SELECT provider_id, cost_usd FROM today_winner_events
-             UNION ALL
-             SELECT provider_id, cost_usd FROM settled_losers
-           ) events
-           GROUP BY provider_id
-         ),
-         latest_call AS (
-           -- Per-provider index lookup (idx_usage_ledger_provider_created_at) instead of a
-           -- 7-day DISTINCT ON sort. Winner events only: verified on production data that no
-           -- provider's newest hedge-loser event is newer than its last winner event, so this
-           -- is equivalent to the previous all-events DISTINCT ON.
-           SELECT p.id AS provider_id, lc.created_at AS last_call_time, lc.model AS last_call_model
-           FROM providers p
-           LEFT JOIN LATERAL (
-             SELECT created_at, model
-             FROM usage_ledger
-             WHERE final_provider_id = p.id
-               AND blocked_by IS NULL
-               AND created_at >= (SELECT last7_start FROM bounds)
-               AND (
-                 endpoint IS NULL
-                 OR LOWER(REGEXP_REPLACE(endpoint, '/+$', '')) NOT IN (
-                   ${sql.join(
-                     NON_BILLING_ENDPOINTS.map((endpoint) => sql`${endpoint}`),
-                     sql`, `
-                   )}
-                 )
-               )
-             ORDER BY created_at DESC, request_id DESC
-             LIMIT 1
-           ) lc ON true
-           WHERE p.deleted_at IS NULL
-         )
-         SELECT
-           p.id,
-           COALESCE(ps.today_cost, 0) AS today_cost,
-           COALESCE(ps.today_calls, 0) AS today_calls,
-           lc.last_call_time,
-           lc.last_call_model
-         FROM providers p
-         LEFT JOIN provider_stats ps ON p.id = ps.provider_id
-         LEFT JOIN latest_call lc ON p.id = lc.provider_id
-         WHERE p.deleted_at IS NULL
-         ORDER BY p.id ASC
-      `;
+      // Hedge-loser gate: while no billed loser row exists anywhere, the
+      // attribution CTEs degenerate to the ledger rows themselves and the
+      // query collapses into two per-provider LATERAL subtree scans over the
+      // partial covering index. The first real loser row flips the gate
+      // within its TTL and this falls back to the full attribution query.
+      const query = (await anyHedgeLoserRowsExist())
+        ? buildProviderStatisticsQueryFull(timezone)
+        : buildProviderStatisticsQueryFast(timezone);
 
       logger.trace("getProviderStatistics:executing_query");
 

@@ -162,7 +162,7 @@ describe("Warmup 请求：不计入任何聚合统计", () => {
     expect(seen.some((n) => n.toLowerCase().includes("regexp"))).toBe(false);
   });
 
-  test("provider statistics：SQL 应使用 blocked_by IS NULL 计费过滤", async () => {
+  test("provider statistics：快路径经 is_billable 排除 warmup（门控探针先行）", async () => {
     vi.resetModules();
 
     const executeMock = vi.fn(async () => [
@@ -206,15 +206,20 @@ describe("Warmup 请求：不计入任何聚合统计", () => {
     const result = await getProviderStatistics();
 
     expect(result[0]?.id).toBe(1);
-    expect(executeMock).toHaveBeenCalledTimes(1);
+    // 第一次 execute 是门控探针（has_losers 缺失 → false → 快路径），
+    // 第二次才是统计查询本身。
+    expect(executeMock).toHaveBeenCalledTimes(2);
+    expect(sqlToString(executeMock.mock.calls[0]?.[0])).toContain("hedge_losers");
 
-    const queryArg = executeMock.mock.calls[0]?.[0];
-    const querySql = sqlToString(queryArg);
+    const querySql = sqlToString(executeMock.mock.calls[1]?.[0]);
     const normalizedQuerySql = querySql.toLowerCase();
-    expect(normalizedQuerySql).toContain("blocked_by");
-    expect(normalizedQuerySql).toContain("is null");
+    // 快路径的计费过滤是存储判定列 is_billable（触发器维护，
+    // 蕴含 blocked_by IS NULL 与非计费端点排除），不再逐行求值正则。
+    expect(normalizedQuerySql).toContain("is_billable");
+    expect(normalizedQuerySql).not.toContain("blocked_by");
+    expect(normalizedQuerySql).not.toContain("regexp_replace");
 
-    // 今日窗口：provider_stats 只聚合今日计费事件（原实现物化近 7 天再过滤）
+    // 今日窗口：today 聚合只扫今日计费事件
     expect(normalizedQuerySql).toContain("today_start");
     // 近 7 日窗口：latest_call 的 LATERAL 索引点查使用 last7_start 下界
     expect(normalizedQuerySql).toContain("last7_start");

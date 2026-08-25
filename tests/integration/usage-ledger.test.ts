@@ -23,7 +23,10 @@ import {
 } from "@/repository/statistics";
 import { findReadonlyUsageLogsBatchForKey } from "@/repository/usage-logs";
 import { findDailyProviderLeaderboard } from "@/repository/leaderboard";
-import { getProviderStatistics } from "@/repository/provider";
+import {
+  getProviderStatistics,
+  __resetProviderStatisticsCacheForTests,
+} from "@/repository/provider";
 import type { HedgeLoserBilling, StoredCostBreakdown } from "@/types/cost-breakdown";
 import type { SpecialSetting } from "@/types/special-settings";
 
@@ -1237,7 +1240,9 @@ run("usage ledger integration", () => {
           .set({ successRateOutcome: null })
           .where(eq(usageLedger.requestId, requestId));
 
-        const summary = await backfillUsageLedger();
+        // These rows already exist in the ledger; only repair mode re-derives
+        // them (the default "sync" mode is a missing-row anti-join).
+        const summary = await backfillUsageLedger({ mode: "repair" });
         expect(summary.alreadyExisted).toBeGreaterThanOrEqual(1);
 
         const ledgerRow = await selectLedgerRowByRequestId(requestId);
@@ -1272,14 +1277,14 @@ run("usage ledger integration", () => {
           })
           .where(eq(usageLedger.requestId, requestId));
 
-        const summary = await backfillUsageLedger();
+        const summary = await backfillUsageLedger({ mode: "repair" });
         expect(summary.alreadyExisted).toBeGreaterThanOrEqual(1);
 
         const repaired = await selectLedgerRowByRequestId(requestId);
         expect(repaired?.finalProviderId).toBe(winnerProviderId);
         expect(repaired?.costUsd).toBe("9.876000000000000");
 
-        await backfillUsageLedger();
+        await backfillUsageLedger({ mode: "repair" });
         const afterSecondRun = await selectLedgerRowByRequestId(requestId);
         expect(afterSecondRun?.finalProviderId).toBe(winnerProviderId);
         expect(afterSecondRun?.costUsd).toBe("9.876000000000000");
@@ -1838,6 +1843,140 @@ run("usage ledger integration", () => {
         `);
         __resetHedgeLoserGateCacheForTests();
       }
+    });
+
+    test("provider statistics hedge gate: fast path equals the full attribution query", async () => {
+      const activeProviderId = nextProviderId();
+      const idleProviderId = nextProviderId();
+      const userId = nextUserId();
+      const [vendor] = await db
+        .insert(providerVendors)
+        .values({
+          websiteDomain: `${KEY_PREFIX}-stats-gate.example`,
+          displayName: "stats-gate-test",
+        })
+        .returning({ id: providerVendors.id });
+      if (!vendor) throw new Error("failed to insert provider vendor test row");
+
+      await db.insert(providers).values([
+        {
+          id: activeProviderId,
+          name: `${KEY_PREFIX}-stats-active`,
+          url: "https://stats-active.example/v1",
+          key: "sk-stats-active",
+          providerVendorId: vendor.id,
+          providerType: "claude",
+        },
+        {
+          id: idleProviderId,
+          name: `${KEY_PREFIX}-stats-idle`,
+          url: "https://stats-idle.example/v1",
+          key: "sk-stats-idle",
+          providerVendorId: vendor.id,
+          providerType: "claude",
+        },
+      ]);
+
+      // Two billable rows sharing one created_at pin the shared
+      // ORDER BY created_at DESC, request_id DESC tiebreak: the row with the
+      // higher request_id (inserted later) must win latest_call on BOTH paths.
+      const now = new Date();
+      await insertMessageRequestRow({
+        key: nextKey("stats-tie-a"),
+        userId,
+        providerId: activeProviderId,
+        model: "stats-tie-model-a",
+        statusCode: 200,
+        costUsd: "0.300000000000000",
+        createdAt: now,
+      });
+      await insertMessageRequestRow({
+        key: nextKey("stats-tie-b"),
+        userId,
+        providerId: activeProviderId,
+        model: "stats-tie-model-b",
+        statusCode: 200,
+        costUsd: "0.200000000000000",
+        createdAt: now,
+      });
+      // 8 days old: outside both the today window and the 7-day latest_call
+      // window under any timezone offset.
+      await insertMessageRequestRow({
+        key: nextKey("stats-old"),
+        userId,
+        providerId: activeProviderId,
+        model: "stats-old-model",
+        statusCode: 200,
+        costUsd: "0.500000000000000",
+        createdAt: new Date(now.getTime() - 8 * 24 * 60 * 60 * 1000),
+      });
+      // Non-billable endpoint rows must stay excluded on both paths
+      // (is_billable and the legacy regex predicate agree).
+      await insertMessageRequestRow({
+        key: nextKey("stats-count-tokens"),
+        userId,
+        providerId: activeProviderId,
+        model: "stats-count-model",
+        statusCode: 200,
+        costUsd: "0.990000000000000",
+        endpoint: "/v1/messages/count_tokens",
+        createdAt: now,
+      });
+
+      const { __resetHedgeLoserGateCacheForTests, __setHedgeLoserGateCacheForTests } = await import(
+        "@/repository/_shared/provider-billing-events"
+      );
+
+      // The global gate state is not deterministic on the shared DB (other
+      // suites leave loser rows); the contract under test is routing +
+      // equivalence for providers whose requests carry no losers.
+      __setHedgeLoserGateCacheForTests(false);
+      __resetProviderStatisticsCacheForTests();
+      const fastRows = await getProviderStatistics();
+
+      __setHedgeLoserGateCacheForTests(true);
+      let fullRows: Awaited<ReturnType<typeof getProviderStatistics>>;
+      try {
+        __resetProviderStatisticsCacheForTests();
+        fullRows = await getProviderStatistics();
+      } finally {
+        __resetHedgeLoserGateCacheForTests();
+      }
+
+      const pick = (rows: typeof fastRows, id: number) => rows.find((entry) => entry.id === id);
+      const fastActive = pick(fastRows, activeProviderId);
+      const fullActive = pick(fullRows, activeProviderId);
+      const fastIdle = pick(fastRows, idleProviderId);
+      const fullIdle = pick(fullRows, idleProviderId);
+      expect(fastActive).toBeDefined();
+      expect(fullActive).toBeDefined();
+      expect(fastIdle).toBeDefined();
+      expect(fullIdle).toBeDefined();
+
+      expect(fastActive?.today_cost).toBe(fullActive?.today_cost);
+      expect(fastActive?.today_calls).toBe(fullActive?.today_calls);
+      // The raw driver returns timestamptz as string/Date depending on
+      // configuration; normalize both sides to epoch millis for comparison.
+      const epochMillis = (value: unknown) =>
+        value == null ? null : new Date(value as string).getTime();
+
+      expect(epochMillis(fastActive?.last_call_time)).toBe(epochMillis(fullActive?.last_call_time));
+      expect(fastActive?.last_call_model).toBe(fullActive?.last_call_model);
+      expect(fastIdle?.today_cost).toBe(fullIdle?.today_cost);
+      expect(fastIdle?.today_calls).toBe(fullIdle?.today_calls);
+      expect(fastIdle?.last_call_time).toBeNull();
+      expect(fastIdle?.last_call_model).toBeNull();
+
+      // Concrete shared semantics: 0.3 + 0.2 today (count_tokens excluded,
+      // 8-day-old row excluded), tie resolves to the later request_id.
+      expect(fastActive?.today_cost).toBe("0.500000000000000");
+      expect(fastActive?.today_calls).toBe(2);
+      expect(fastActive?.last_call_model).toBe("stats-tie-model-b");
+      expect(fullActive?.today_cost).toBe("0.500000000000000");
+      expect(fullActive?.today_calls).toBe(2);
+      expect(fullActive?.last_call_model).toBe("stats-tie-model-b");
+      expect(fastIdle?.today_cost).toBe("0");
+      expect(fastIdle?.today_calls).toBe(0);
     });
 
     test("provider leaderboard merged pass excludes blank models and honors the providerType filter", async () => {
