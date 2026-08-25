@@ -4,7 +4,7 @@
  *
  *   bun build scripts/benchmark-cyber-check-admission.ts \
  *     --target=node --outfile=/tmp/cyber-check-admission-bench.mjs
- *   node --expose-gc /tmp/cyber-check-admission-bench.mjs history-1m
+ *   node --expose-gc /tmp/cyber-check-admission-bench.mjs history-1m 30 8
  *
  * Set CYBER_CHECK_BENCH_URL and CYBER_CHECK_BENCH_TOKEN to include unique fast-path
  * submissions to a running service configured with async sampling disabled. The output is
@@ -37,6 +37,9 @@ const spec = scenarioSpecs[scenario];
 const iterations = process.argv[3]
   ? parsePositiveInteger(process.argv[3], "iterations")
   : spec.defaultIterations;
+const concurrency = process.argv[4]
+  ? parsePositiveInteger(process.argv[4], "concurrency")
+  : 1;
 const serviceUrl = process.env.CYBER_CHECK_BENCH_URL;
 const serviceToken = process.env.CYBER_CHECK_BENCH_TOKEN;
 if (Boolean(serviceUrl) !== Boolean(serviceToken)) {
@@ -87,6 +90,7 @@ forceGc();
 const compressionHeld = memory();
 
 let serviceMilliseconds: number[] | null = null;
+let serviceWallMilliseconds: number | null = null;
 if (serviceUrl && serviceToken && heldPacket) {
   const basePacket = heldPacket;
   const config = {
@@ -100,7 +104,7 @@ if (serviceUrl && serviceToken && heldPacket) {
       ...basePacket,
       identity: {
         ...basePacket.identity,
-        request_id: `bench-${scenario}-${index}:${basePacket.source.body_sha256}`,
+        request_id: `bench-${scenario}-${process.pid}-${index}:${basePacket.source.body_sha256}`,
         sequence: index + 3,
       },
     };
@@ -115,18 +119,29 @@ if (serviceUrl && serviceToken && heldPacket) {
   };
 
   for (let index = -2; index < 0; index += 1) await submit(index);
-  serviceMilliseconds = [];
-  for (let index = 0; index < iterations; index += 1) {
-    const started = performance.now();
-    await submit(index);
-    serviceMilliseconds.push(performance.now() - started);
-  }
+  const samples: number[] = [];
+  let nextIndex = 0;
+  const startedAll = performance.now();
+  await Promise.all(
+    Array.from({ length: Math.min(concurrency, iterations) }, async () => {
+      while (nextIndex < iterations) {
+        const index = nextIndex;
+        nextIndex += 1;
+        const started = performance.now();
+        await submit(index);
+        samples.push(performance.now() - started);
+      }
+    })
+  );
+  serviceMilliseconds = samples;
+  serviceWallMilliseconds = performance.now() - startedAll;
 }
 
 process.stdout.write(
   `${JSON.stringify({
     scenario,
     iterations,
+    concurrency,
     runtime: { node: process.version, platform: process.platform, arch: process.arch },
     sourceBodyBytes: Buffer.byteLength(bodyString),
     reviewPacketBytes: Buffer.byteLength(heldPacketJson),
@@ -135,6 +150,8 @@ process.stdout.write(
     projectionAndSerializationMs: distribution(projectionMilliseconds),
     zstdCompressionMs: distribution(compressionMilliseconds),
     liveIdentityIngressMs: serviceMilliseconds ? distribution(serviceMilliseconds) : null,
+    liveIdentityIngressRequestsPerSecond:
+      serviceWallMilliseconds === null ? null : iterations / (serviceWallMilliseconds / 1_000),
     memory: {
       baseline,
       projectionHeld,
