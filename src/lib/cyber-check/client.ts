@@ -2,6 +2,7 @@ import { promisify } from "node:util";
 import { constants as zlibConstants, zstdCompress } from "node:zlib";
 import type { CyberCheckConfig } from "./config";
 import type {
+  ProviderEventEnvelope,
   ReviewFinalDecision,
   ReviewJob,
   ReviewRequestEnvelope,
@@ -10,6 +11,7 @@ import type {
 
 const SUBMISSION_TIMEOUT_MS = 20_000;
 const JOB_READ_TIMEOUT_MS = 5_000;
+const EVENT_REPORT_TIMEOUT_MS = 5_000;
 // Admission optimizes transfer cost, not archival ratio; keep compression off the high-CPU levels.
 const ZSTD_COMPRESSION_LEVEL = 1;
 const compressZstd = promisify(zstdCompress);
@@ -92,6 +94,26 @@ export async function getReviewJob(
   );
   if (response.status !== 200) throw await responseError(response);
   return parseJob(await response.json());
+}
+
+export async function reportProviderEvent(
+  config: CyberCheckConfig,
+  event: ProviderEventEnvelope,
+  options: RequestOptions = {}
+): Promise<void> {
+  const response = await (options.fetchImpl ?? globalThis.fetch)(
+    new URL("/v1/provider-events", config.baseUrl),
+    {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${config.gatewayToken}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(event),
+      signal: boundedSignal(options.signal, EVENT_REPORT_TIMEOUT_MS),
+    }
+  );
+  if (response.status !== 204) throw await responseError(response);
 }
 
 function parseCompletedSubmission(payload: unknown): ReviewSubmission {

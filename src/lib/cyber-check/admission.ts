@@ -71,6 +71,10 @@ export async function admitFinalResponsesRequest({
       bodyString,
     });
     submission = await submitReview(config, packet, { signal: session.clientAbortSignal });
+    session.setCyberCheckAdmissionCorrelation({
+      identity: packet.identity,
+      upstreamProviderId: String(provider.id),
+    });
   } catch (error) {
     if (session.clientAbortSignal?.aborted) throw error;
     logAdmissionFailure("submission", error, session, provider.id);

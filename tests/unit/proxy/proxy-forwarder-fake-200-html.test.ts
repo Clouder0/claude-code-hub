@@ -231,6 +231,17 @@ describe("ProxyForwarder - fake 200 HTML body", () => {
     session.request.message = { model: "gpt-5.6", input: "hello", stream: true };
     session.messageContext = { id: 123, user: { id: 7 } } as ProxySession["messageContext"];
     session.setProvider(provider1);
+    session.setCyberCheckAdmissionCorrelation({
+      identity: {
+        gateway: "cch-test",
+        request_id: "stale:digest",
+        principal_id: "7",
+        credential_id: "9",
+        session_id: "stale-session",
+        sequence: 0,
+      },
+      upstreamProviderId: "99",
+    });
 
     const realErrors = await vi.importActual<typeof import("@/app/v1/_lib/proxy/errors")>(
       "@/app/v1/_lib/proxy/errors"
@@ -255,6 +266,7 @@ describe("ProxyForwarder - fake 200 HTML body", () => {
     expect(mocks.recordSecurityEventBestEffort).toHaveBeenCalledWith(7, 123, "cyber_safety_check");
     expect(mocks.containPolicyRejection).toHaveBeenCalledTimes(1);
     expect(mocks.containPolicyRejection).toHaveBeenCalledWith(expect.anything(), "cyber_policy");
+    expect(session.getCyberCheckAdmissionCorrelation()).toBeNull();
     expect(session.provider?.id).toBe(provider1.id);
     expect(session.getProviderChain()).toEqual(
       expect.arrayContaining([

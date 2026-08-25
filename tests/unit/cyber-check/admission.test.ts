@@ -19,7 +19,7 @@ vi.mock("@/lib/config/env.schema", () => ({ getEnvConfig: mocks.getEnvConfig }))
 vi.mock("@/lib/logger", () => ({ logger: mocks.logger }));
 
 import { RequestReviewError } from "@/app/v1/_lib/proxy/errors";
-import type { ProxySession } from "@/app/v1/_lib/proxy/session";
+import type { CyberCheckAdmissionCorrelation, ProxySession } from "@/app/v1/_lib/proxy/session";
 import { admitFinalResponsesRequest } from "@/lib/cyber-check/admission";
 
 const message = {
@@ -35,6 +35,7 @@ const message = {
 };
 
 function session(): ProxySession {
+  let admissionCorrelation: CyberCheckAdmissionCorrelation | null = null;
   return {
     headers: new Headers(),
     clientAbortSignal: null,
@@ -45,6 +46,13 @@ function session(): ProxySession {
     },
     sessionId: "session-admission-test",
     requestSequence: 3,
+    clearCyberCheckAdmissionCorrelation: () => {
+      admissionCorrelation = null;
+    },
+    setCyberCheckAdmissionCorrelation: (correlation) => {
+      admissionCorrelation = correlation;
+    },
+    getCyberCheckAdmissionCorrelation: () => admissionCorrelation,
   } as unknown as ProxySession;
 }
 
@@ -159,10 +167,11 @@ describe("CCH cyber-check admission seam", () => {
   it("sends the final body in shadow mode but does not enforce a denial", async () => {
     const fetchMock = vi.fn(async () => finalResponse("deny"));
     vi.stubGlobal("fetch", fetchMock);
+    const reviewSession = session();
 
     await expect(
       admitFinalResponsesRequest({
-        session: session(),
+        session: reviewSession,
         provider: { id: 1, providerType: "codex" },
         requestPath: "/v1/responses",
         message,
@@ -178,6 +187,10 @@ describe("CCH cyber-check admission seam", () => {
       credential_id: "9",
       session_id: "session-admission-test",
       sequence: 3,
+    });
+    expect(reviewSession.getCyberCheckAdmissionCorrelation()).toEqual({
+      identity: packet.identity,
+      upstreamProviderId: "1",
     });
   });
 

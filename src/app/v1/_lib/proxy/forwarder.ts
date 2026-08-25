@@ -21,6 +21,7 @@ import { getEnvConfig } from "@/lib/config/env.schema";
 import { PROVIDER_DEFAULTS, PROVIDER_LIMITS } from "@/lib/constants/provider.constants";
 import { PROTECTED_AUTH_HEADER_NAMES } from "@/lib/custom-headers";
 import { admitFinalResponsesRequest } from "@/lib/cyber-check/admission";
+import { reportProviderPolicyEventBestEffort } from "@/lib/cyber-check/provider-event";
 import { recordEndpointFailure, recordEndpointSuccess } from "@/lib/endpoint-circuit-breaker";
 import { applyGeminiGoogleSearchOverrideWithAudit } from "@/lib/gemini/provider-overrides";
 import { logger } from "@/lib/logger";
@@ -1872,7 +1873,12 @@ export class ProxyForwarder {
             // categorizeErrorAsync 判定 POLICY_REJECTION 与 policyRejectionCodeOf 共用
             // 同一条结构化检测路径，此处必然非空；?? 仅为类型收窄，不可能命中。
             const rejectedPolicy = policyRejectionCodeOf(lastError) ?? "cyber_policy";
+            const providerEventReport = reportProviderPolicyEventBestEffort(
+              session,
+              rejectedPolicy
+            );
             await containPolicyRejection(session, rejectedPolicy);
+            await providerEventReport;
             logger.warn("ProxyForwarder: Policy rejection, stopping immediately", {
               policy: rejectedPolicy,
               providerId: currentProvider.id,
@@ -2477,6 +2483,11 @@ export class ProxyForwarder {
     if (!provider) {
       throw new Error("Provider is required");
     }
+
+    // Correlation belongs to one concrete upstream attempt. Clear it before any provider-specific
+    // preparation so protocol changes, raw passthrough, and failed admission cannot inherit a
+    // previous attempt's provider identity.
+    session.clearCyberCheckAdmissionCorrelation();
 
     const resolvedCacheTtl = resolveCacheTtlPreference(
       session.authState?.key?.cacheTtlPreference,
@@ -4556,7 +4567,12 @@ export class ProxyForwarder {
       if (errorCategory === ErrorCategory.POLICY_REJECTION) {
         // 与主重试循环同理：分类与 codeOf 共用同一条检测路径，?? 仅为类型收窄。
         const rejectedPolicy = policyRejectionCodeOf(error) ?? "cyber_policy";
+        const providerEventReport = reportProviderPolicyEventBestEffort(
+          attempt.session,
+          rejectedPolicy
+        );
         await containPolicyRejection(session, rejectedPolicy);
+        await providerEventReport;
         attempt.settled = true;
         if (attempt.thresholdTimer) {
           clearTimeout(attempt.thresholdTimer);
@@ -5123,6 +5139,7 @@ export class ProxyForwarder {
     shadow.setContext1mApplied(session.getContext1mApplied());
     // 浅拷贝会带上 tracking session 的缓存解析树；成对清掉，避免影子持有大对象。
     shadow.clearForwardedRequestBody();
+    shadow.clearCyberCheckAdmissionCorrelation();
     // Keep stable request identity for metadata/cache-affinity shaping, but prevent each racing
     // attempt from independently persisting debug/session state. The tracking session owns writes.
     shadow.shouldPersistSessionDebugArtifacts = () => false;
@@ -5144,6 +5161,7 @@ export class ProxyForwarder {
     );
     target.requestUrl = new URL(source.requestUrl.toString());
     target.copyForwardedRequestBodyFrom(source);
+    target.copyCyberCheckAdmissionCorrelationFrom(source);
     target.setCacheTtlResolved(source.getCacheTtlResolved());
     target.setContext1mApplied(source.getContext1mApplied());
 

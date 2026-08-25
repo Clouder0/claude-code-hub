@@ -28,6 +28,16 @@ export type ReviewJob =
   | ({ status: "completed"; job_id: string } & ReviewFinalDecision)
   | { status: "failed"; job_id: string; error_code: string };
 
+export interface ProviderEventEnvelope {
+  schema_version: "cyber-check.provider-event.v1";
+  identity: ReviewRequestEnvelope["identity"];
+  upstream_provider_id: string;
+  event: {
+    type: "policy_rejection";
+    code: "cyber_policy";
+  };
+}
+
 export interface ReviewRequestEnvelope {
   schema_version: "cyber-check.request-review.v1";
   identity: {

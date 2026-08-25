@@ -1,8 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
 import { zstdDecompressSync } from "node:zlib";
-import { CyberCheckClientError, getReviewJob, submitReview } from "@/lib/cyber-check/client";
+import {
+  CyberCheckClientError,
+  getReviewJob,
+  reportProviderEvent,
+  submitReview,
+} from "@/lib/cyber-check/client";
 import { resolveCyberCheckConfig } from "@/lib/cyber-check/config";
-import type { ReviewRequestEnvelope } from "@/lib/cyber-check/types";
+import type { ProviderEventEnvelope, ReviewRequestEnvelope } from "@/lib/cyber-check/types";
 
 const config = {
   mode: "shadow" as const,
@@ -34,6 +39,16 @@ const packet: ReviewRequestEnvelope = {
   items: [],
   capabilities: [],
   coverage: { notices: [] },
+};
+
+const providerEvent: ProviderEventEnvelope = {
+  schema_version: "cyber-check.provider-event.v1",
+  identity: packet.identity,
+  upstream_provider_id: "17",
+  event: {
+    type: "policy_rejection",
+    code: "cyber_policy",
+  },
 };
 
 function jsonResponse(body: unknown, status: number): Response {
@@ -160,6 +175,21 @@ describe("cyber-check client", () => {
     expect(String(fetchMock.mock.calls[1]?.[0])).toBe(
       "http://127.0.0.1:8090/v1/review-jobs/019d0000-0000-7000-8000-000000000001"
     );
+  });
+
+  it("reports an authoritative provider event to its dedicated resource", async () => {
+    const fetchMock = vi.fn(async () => new Response(null, { status: 204 }));
+
+    await reportProviderEvent(config, providerEvent, {
+      fetchImpl: fetchMock as unknown as typeof fetch,
+    });
+
+    const [url, init] = fetchMock.mock.calls[0] ?? [];
+    expect(String(url)).toBe("http://127.0.0.1:8090/v1/provider-events");
+    expect(init?.method).toBe("POST");
+    expect(new Headers(init?.headers).get("authorization")).toBe("Bearer gateway-test-token");
+    expect(new Headers(init?.headers).get("content-type")).toBe("application/json");
+    expect(JSON.parse(String(init?.body))).toEqual(providerEvent);
   });
 
   it("rejects malformed success responses instead of treating them as allow", async () => {

@@ -48,6 +48,25 @@ GET /v1/review-jobs/{job_id}
 session restriction，因此即使 CCH 停止轮询，下一次请求仍会在服务端命中限制。V0 不会在异步
 deny 到达后中止已经发出的上游请求；这是后续需要独立验证取消、重试和计费语义的能力。
 
+## 上游 Cyber 事件
+
+审查服务成功接收一次 admission 后，CCH 只在同一个实际 provider attempt 收到结构化
+`cyber_policy` 时回报：
+
+```text
+POST /v1/provider-events
+  204 -> 事件与 session restriction 已持久化
+```
+
+Correlation 只包含该 admission 的 identity 与 provider ID，不持有审查正文。普通错误文本、
+`invalid_prompt`、本地 reviewer 预测和 `bio_policy` 都不会升级成这个权威事件。Hedge attempt 各自
+持有 correlation，只有赢家会同步回 tracking session，避免把拒绝归到错误的 provider 或最终 body。
+
+事件回报与 CCH 已有的本地遏制同时启动，但两者不共享成败：CCH 仍会立即执行 session block、
+security event 和 cyber strike；`cyber-check` 不可用时只记录无正文的回报失败。如果本次 attempt
+没有成功 admission，就没有可验证的 join key，因此 CCH 不向中心服务猜测归因，本地遏制仍照常
+执行。
+
 网关 request id 使用 `message_request.id + final body SHA-256`。同一最终 body 的 provider
 重试或 hedge 会命中服务端幂等结果；provider rewrite 产生不同最终 body 时会得到独立审查。
 SHA-256 同时用于把审查记录与真实出站 bytes 关联，不用于判断内容安全。

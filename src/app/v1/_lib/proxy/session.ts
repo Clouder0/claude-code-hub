@@ -122,6 +122,18 @@ export interface StableRequestIdentity {
   credentialId: number;
 }
 
+export interface CyberCheckAdmissionCorrelation {
+  identity: {
+    gateway: string;
+    request_id: string;
+    principal_id: string;
+    credential_id: string;
+    session_id: string;
+    sequence: number;
+  };
+  upstreamProviderId: string;
+}
+
 export interface ProxyRequestPayload {
   message: Record<string, unknown>;
   buffer?: ArrayBuffer;
@@ -166,6 +178,7 @@ export class ProxySession {
   // Hedge attempts intentionally drop messageContext so only the tracking session owns persistence.
   // These three scalar IDs remain available for request-scoped admission and audit correlation.
   private stableRequestIdentity: StableRequestIdentity | null = null;
+  private cyberCheckAdmissionCorrelation: CyberCheckAdmissionCorrelation | null = null;
 
   // Time To First Byte (ms). Streaming: first chunk. Non-stream: equals durationMs.
   ttfbMs: number | null = null;
@@ -615,6 +628,22 @@ export class ProxySession {
 
   getStableRequestIdentity(): StableRequestIdentity | null {
     return this.stableRequestIdentity;
+  }
+
+  setCyberCheckAdmissionCorrelation(correlation: CyberCheckAdmissionCorrelation): void {
+    this.cyberCheckAdmissionCorrelation = correlation;
+  }
+
+  clearCyberCheckAdmissionCorrelation(): void {
+    this.cyberCheckAdmissionCorrelation = null;
+  }
+
+  getCyberCheckAdmissionCorrelation(): CyberCheckAdmissionCorrelation | null {
+    return this.cyberCheckAdmissionCorrelation;
+  }
+
+  copyCyberCheckAdmissionCorrelationFrom(source: ProxySession): void {
+    this.cyberCheckAdmissionCorrelation = source.cyberCheckAdmissionCorrelation;
   }
 
   /**

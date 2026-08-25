@@ -36,6 +36,8 @@ const mocks = vi.hoisted(() => ({
   storeSessionSpecialSettings: vi.fn(async () => {}),
   storeSessionRequestPhaseSnapshot: vi.fn(async () => {}),
   storeSessionResponsePhaseSnapshot: vi.fn(async () => {}),
+  containPolicyRejection: vi.fn(async (..._args: unknown[]) => {}),
+  reportProviderPolicyEventBestEffort: vi.fn(async (..._args: unknown[]) => {}),
 }));
 
 vi.mock("@/lib/logger", () => ({
@@ -85,6 +87,14 @@ vi.mock("@/lib/rate-limit/service", () => ({
     checkAndTrackProviderSession: mocks.checkAndTrackProviderSession,
     releaseProviderSession: mocks.releaseProviderSession,
   },
+}));
+
+vi.mock("@/lib/security/policy-containment", () => ({
+  containPolicyRejection: mocks.containPolicyRejection,
+}));
+
+vi.mock("@/lib/cyber-check/provider-event", () => ({
+  reportProviderPolicyEventBestEffort: mocks.reportProviderPolicyEventBestEffort,
 }));
 
 vi.mock("@/lib/session-manager", () => ({
@@ -513,6 +523,17 @@ describe("ProxyForwarder - first-byte hedge scheduling", () => {
       user: { id: 7, name: "test-user" },
       key: { id: 9 },
     } as never);
+    session.setCyberCheckAdmissionCorrelation({
+      identity: {
+        gateway: "cch-test",
+        request_id: "tracking:digest",
+        principal_id: "7",
+        credential_id: "9",
+        session_id: "sess-hedge",
+        sequence: 1,
+      },
+      upstreamProviderId: "1",
+    });
 
     const attempt = (
       ProxyForwarder as unknown as {
@@ -527,8 +548,30 @@ describe("ProxyForwarder - first-byte hedge scheduling", () => {
       principalId: 7,
       credentialId: 9,
     });
+    expect(attempt.getCyberCheckAdmissionCorrelation()).toBeNull();
     expect(attempt.shouldPersistSessionDebugArtifacts()).toBe(false);
     expect(attempt.shouldTrackSessionObservability()).toBe(false);
+
+    attempt.setCyberCheckAdmissionCorrelation({
+      identity: {
+        gateway: "cch-test",
+        request_id: "attempt:digest",
+        principal_id: "7",
+        credential_id: "9",
+        session_id: "sess-hedge",
+        sequence: 1,
+      },
+      upstreamProviderId: "2",
+    });
+    (
+      ProxyForwarder as unknown as {
+        syncWinningAttemptSession: (target: ProxySession, source: ProxySession) => void;
+      }
+    ).syncWinningAttemptSession(session, attempt);
+    expect(session.getCyberCheckAdmissionCorrelation()).toMatchObject({
+      identity: { request_id: "attempt:digest" },
+      upstreamProviderId: "2",
+    });
   });
 
   test("switching to provider without redirect should clear stale redirect snapshot", () => {
@@ -1976,6 +2019,59 @@ describe("ProxyForwarder - first-byte hedge scheduling", () => {
         matchedRuleHasOverrideStatusCode: true,
       })
     );
+  });
+
+  test("an upstream cyber rejection reports the exact hedge attempt correlation", async () => {
+    const provider = createProvider({ id: 17, name: "p17", firstByteTimeoutStreamingMs: 100 });
+    const session = createSession();
+    session.setProvider(provider);
+
+    const parsed = { error: { code: "cyber_policy", message: "blocked" } };
+    const originalError = new UpstreamProxyError("blocked", 400, {
+      body: JSON.stringify(parsed),
+      parsed,
+      providerId: provider.id,
+      providerName: provider.name,
+    });
+    mocks.categorizeErrorAsync.mockResolvedValueOnce(ProxyErrorCategory.POLICY_REJECTION);
+
+    const doForward = vi.spyOn(
+      ProxyForwarder as unknown as {
+        doForward: (...args: unknown[]) => Promise<Response>;
+      },
+      "doForward"
+    );
+    doForward.mockImplementationOnce(async (attemptSession) => {
+      const correlatedAttempt = attemptSession as ProxySession;
+      correlatedAttempt.setCyberCheckAdmissionCorrelation({
+        identity: {
+          gateway: "cch-test",
+          request_id: "attempt-17:digest",
+          principal_id: "7",
+          credential_id: "9",
+          session_id: "sess-hedge",
+          sequence: 1,
+        },
+        upstreamProviderId: "17",
+      });
+      throw originalError;
+    });
+
+    const error = await ProxyForwarder.send(session).catch(
+      (rejection) => rejection as UpstreamProxyError
+    );
+
+    expect(error).toBe(originalError);
+    expect(mocks.reportProviderPolicyEventBestEffort).toHaveBeenCalledOnce();
+    const [reportedSession, reportedPolicy] =
+      mocks.reportProviderPolicyEventBestEffort.mock.calls[0] ?? [];
+    expect(reportedSession).not.toBe(session);
+    expect((reportedSession as ProxySession).getCyberCheckAdmissionCorrelation()).toMatchObject({
+      identity: { request_id: "attempt-17:digest" },
+      upstreamProviderId: "17",
+    });
+    expect(reportedPolicy).toBe("cyber_policy");
+    expect(mocks.containPolicyRejection).toHaveBeenCalledWith(session, "cyber_policy");
   });
 
   test("hedge 备选供应商命中 thinking signature 错误时，应整流后在同供应商重试并保留审计", async () => {
