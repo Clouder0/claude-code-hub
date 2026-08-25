@@ -51,6 +51,8 @@ deny 到达后中止已经发出的上游请求；这是后续需要独立验证
 网关 request id 使用 `message_request.id + final body SHA-256`。同一最终 body 的 provider
 重试或 hedge 会命中服务端幂等结果；provider rewrite 产生不同最终 body 时会得到独立审查。
 SHA-256 同时用于把审查记录与真实出站 bytes 关联，不用于判断内容安全。
+Hedge attempt 仍会清空完整 `messageContext` 以避免重复持久化，但会保留 request/user/key 三个
+标量 ID，因此每个真实出站 attempt 都能完成同一套审查，而不会重新持有整块用户上下文。
 
 ## V0 边界
 

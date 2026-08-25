@@ -181,6 +181,35 @@ describe("CCH cyber-check admission seam", () => {
     });
   });
 
+  it("uses the stable scalar identity retained by a hedge attempt", async () => {
+    const fetchMock = vi.fn(async () => finalResponse("allow"));
+    vi.stubGlobal("fetch", fetchMock);
+    const attempt = session();
+    attempt.messageContext = null;
+    attempt.getStableRequestIdentity = () => ({
+      requestId: 42,
+      principalId: 7,
+      credentialId: 9,
+    });
+
+    await admitFinalResponsesRequest({
+      session: attempt,
+      provider: { id: 1, providerType: "codex" },
+      requestPath: "/v1/responses",
+      message,
+      bodyString: JSON.stringify(message),
+    });
+
+    const packet = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body));
+    expect(packet.identity).toMatchObject({
+      principal_id: "7",
+      credential_id: "9",
+      session_id: "session-admission-test",
+      sequence: 3,
+    });
+    expect(packet.identity.request_id).toMatch(/^42:/);
+  });
+
   it("enforces a synchronous denial as a distinct local gateway outcome", async () => {
     mocks.getEnvConfig.mockReturnValue(env("enforce"));
     vi.stubGlobal(

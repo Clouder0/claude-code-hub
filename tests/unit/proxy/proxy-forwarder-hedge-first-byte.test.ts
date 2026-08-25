@@ -508,7 +508,11 @@ describe("ProxyForwarder - first-byte hedge scheduling", () => {
   test("attempt sessions retain stable request identity without owning persistence", () => {
     const provider = createProvider({ id: 2, name: "attempt" });
     const session = createSession();
-    session.messageContext = { id: 123 } as never;
+    session.setMessageContext({
+      id: 123,
+      user: { id: 7, name: "test-user" },
+      key: { id: 9 },
+    } as never);
 
     const attempt = (
       ProxyForwarder as unknown as {
@@ -518,6 +522,11 @@ describe("ProxyForwarder - first-byte hedge scheduling", () => {
 
     expect(attempt.sessionId).toBe("sess-hedge");
     expect(attempt.messageContext).toBeNull();
+    expect(attempt.getStableRequestIdentity()).toEqual({
+      requestId: 123,
+      principalId: 7,
+      credentialId: 9,
+    });
     expect(attempt.shouldPersistSessionDebugArtifacts()).toBe(false);
     expect(attempt.shouldTrackSessionObservability()).toBe(false);
   });

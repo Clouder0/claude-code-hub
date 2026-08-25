@@ -54,12 +54,16 @@ export async function admitFinalResponsesRequest({
   let submission: ReviewSubmission;
   try {
     const context = session.messageContext;
+    const stableIdentity = session.getStableRequestIdentity?.();
+    const requestId = stableIdentity?.requestId ?? context?.id;
+    const principalId = stableIdentity?.principalId ?? context?.user.id;
+    const credentialId = stableIdentity?.credentialId ?? context?.key.id;
     const packet = projectFinalResponsesRequest({
       identity: {
         gateway: config.gatewayId,
-        requestId: context ? String(context.id) : "",
-        principalId: context ? String(context.user.id) : "",
-        credentialId: context ? String(context.key.id) : "",
+        requestId: requestId == null ? "" : String(requestId),
+        principalId: principalId == null ? "" : String(principalId),
+        credentialId: credentialId == null ? "" : String(credentialId),
         sessionId: session.sessionId ?? "",
         sequence: session.requestSequence,
       },
