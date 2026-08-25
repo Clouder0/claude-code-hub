@@ -43,6 +43,7 @@ describe.runIf(runLive)("CCH to cyber-check live contract", () => {
       baseUrl: new URL(serviceUrl as string),
       gatewayToken: gatewayToken as string,
       gatewayId: "cch-live-contract",
+      zstdMinBytes: 1,
     };
 
     const first = await submitReview(config, packet);

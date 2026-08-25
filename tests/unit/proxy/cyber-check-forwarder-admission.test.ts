@@ -170,6 +170,7 @@ describe("ProxyForwarder cyber-check admission boundary", () => {
       CYBER_CHECK_URL: "http://127.0.0.1:8090",
       CYBER_CHECK_GATEWAY_TOKEN: "gateway-token",
       CYBER_CHECK_GATEWAY_ID: "cch-forwarder-test",
+      CYBER_CHECK_ZSTD_MIN_BYTES: 256 * 1024,
     });
   });
 

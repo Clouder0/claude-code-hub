@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { zstdDecompressSync } from "node:zlib";
 import { CyberCheckClientError, getReviewJob, submitReview } from "@/lib/cyber-check/client";
 import { resolveCyberCheckConfig } from "@/lib/cyber-check/config";
 import type { ReviewRequestEnvelope } from "@/lib/cyber-check/types";
@@ -8,6 +9,7 @@ const config = {
   baseUrl: new URL("http://127.0.0.1:8090"),
   gatewayToken: "gateway-test-token",
   gatewayId: "cch-test",
+  zstdMinBytes: 256 * 1024,
 };
 
 const packet: ReviewRequestEnvelope = {
@@ -67,7 +69,48 @@ describe("cyber-check client", () => {
     const [url, init] = fetchMock.mock.calls[0] ?? [];
     expect(String(url)).toBe("http://127.0.0.1:8090/v1/request-reviews");
     expect(new Headers(init?.headers).get("authorization")).toBe("Bearer gateway-test-token");
+    expect(new Headers(init?.headers).get("content-encoding")).toBeNull();
     expect(JSON.parse(String(init?.body))).toEqual(packet);
+  });
+
+  it("uses asynchronous zstd level 1 transport for large compressible packets", async () => {
+    const largePacket: ReviewRequestEnvelope = {
+      ...packet,
+      items: [
+        {
+          source_type: "message",
+          origin: "user",
+          content: [{ type: "text", text: "reviewable context ".repeat(32_768), format: "plain" }],
+        },
+      ],
+    };
+    const fetchMock = vi.fn(async () =>
+      jsonResponse(
+        {
+          status: "completed",
+          decision: "allow",
+          predicted_decision: "allow",
+          enforcement_mode: "shadow",
+          reason: "fast_path",
+          coverage: "complete",
+          policy_version: "policy-v1",
+          reviewer_version: "reviewer-v1",
+        },
+        200
+      )
+    );
+
+    await submitReview({ ...config, zstdMinBytes: 1 }, largePacket, {
+      fetchImpl: fetchMock as unknown as typeof fetch,
+    });
+
+    const init = fetchMock.mock.calls[0]?.[1];
+    expect(new Headers(init?.headers).get("content-encoding")).toBe("zstd");
+    const compressed = init?.body;
+    expect(compressed).toBeInstanceOf(Uint8Array);
+    const decoded = zstdDecompressSync(compressed as Uint8Array).toString("utf8");
+    expect(JSON.parse(decoded)).toEqual(largePacket);
+    expect((compressed as Uint8Array).byteLength).toBeLessThan(Buffer.byteLength(decoded));
   });
 
   it("uses the normal POST-created job and GET status resource", async () => {
@@ -150,6 +193,7 @@ describe("cyber-check gateway configuration", () => {
         CYBER_CHECK_URL: undefined,
         CYBER_CHECK_GATEWAY_TOKEN: undefined,
         CYBER_CHECK_GATEWAY_ID: "cch",
+        CYBER_CHECK_ZSTD_MIN_BYTES: 256 * 1024,
       })
     ).toBeNull();
 
@@ -159,6 +203,7 @@ describe("cyber-check gateway configuration", () => {
         CYBER_CHECK_URL: undefined,
         CYBER_CHECK_GATEWAY_TOKEN: undefined,
         CYBER_CHECK_GATEWAY_ID: "cch",
+        CYBER_CHECK_ZSTD_MIN_BYTES: 256 * 1024,
       })
     ).toThrow("CYBER_CHECK_URL");
   });
@@ -170,6 +215,7 @@ describe("cyber-check gateway configuration", () => {
         CYBER_CHECK_URL: "http://127.0.0.1:8090",
         CYBER_CHECK_GATEWAY_TOKEN: "token",
         CYBER_CHECK_GATEWAY_ID: "cch",
+        CYBER_CHECK_ZSTD_MIN_BYTES: 256 * 1024,
       })
     ).toMatchObject({ mode: "shadow", gatewayId: "cch" });
 
@@ -179,6 +225,7 @@ describe("cyber-check gateway configuration", () => {
         CYBER_CHECK_URL: "http://review.internal.example",
         CYBER_CHECK_GATEWAY_TOKEN: "token",
         CYBER_CHECK_GATEWAY_ID: "cch",
+        CYBER_CHECK_ZSTD_MIN_BYTES: 256 * 1024,
       })
     ).toThrow("must use HTTPS");
   });
@@ -190,6 +237,7 @@ describe("cyber-check gateway configuration", () => {
         CYBER_CHECK_URL: "https://review.internal.example",
         CYBER_CHECK_GATEWAY_TOKEN: undefined,
         CYBER_CHECK_GATEWAY_ID: "cch",
+        CYBER_CHECK_ZSTD_MIN_BYTES: 256 * 1024,
       })
     ).toThrow("CYBER_CHECK_GATEWAY_TOKEN");
 
@@ -204,6 +252,7 @@ describe("cyber-check gateway configuration", () => {
           CYBER_CHECK_URL: url,
           CYBER_CHECK_GATEWAY_TOKEN: "token",
           CYBER_CHECK_GATEWAY_ID: "cch",
+          CYBER_CHECK_ZSTD_MIN_BYTES: 256 * 1024,
         })
       ).toThrow();
     }

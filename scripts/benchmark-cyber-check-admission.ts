@@ -1,22 +1,26 @@
 /**
- * Measure the CCH review projection, identity-encoded handoff, and optional live Rust ingress.
+ * Measure the CCH review projection, zstd handoff, and optional live Rust ingress.
  * Run one scenario per process so retained-memory deltas are comparable:
  *
  *   bun build scripts/benchmark-cyber-check-admission.ts \
  *     --target=node --outfile=/tmp/cyber-check-admission-bench.mjs
- *   node --expose-gc /tmp/cyber-check-admission-bench.mjs history-1m 30 8
+ *   node --expose-gc /tmp/cyber-check-admission-bench.mjs history-1m 30 8 1
  *
  * Set CYBER_CHECK_BENCH_URL and CYBER_CHECK_BENCH_TOKEN to include unique fast-path
- * submissions to a running service configured with async sampling disabled. The output is
- * one JSON object; it contains no request content.
+ * submissions to a running service configured with async sampling disabled. Arguments after the
+ * scenario are iterations, live-ingress concurrency, and isolated zstd level. Production live ingress
+ * always uses level 1; CYBER_CHECK_BENCH_ZSTD_MIN_BYTES selects its threshold. The output is one JSON
+ * object and contains no request content.
  */
-import { zstdCompressSync } from "node:zlib";
+import { promisify } from "node:util";
+import { constants as zlibConstants, zstdCompress } from "node:zlib";
 import { submitReview } from "../src/lib/cyber-check/client";
 import { projectFinalResponsesRequest } from "../src/lib/cyber-check/projection";
 import type { ReviewRequestEnvelope } from "../src/lib/cyber-check/types";
 
 const KIB = 1024;
 const MIB = 1024 * KIB;
+const compressZstd = promisify(zstdCompress);
 
 const scenarioSpecs = {
   "text-1k": { kind: "history", contentBytes: 1 * KIB, defaultIterations: 250 },
@@ -40,8 +44,17 @@ const iterations = process.argv[3]
 const concurrency = process.argv[4]
   ? parsePositiveInteger(process.argv[4], "concurrency")
   : 1;
+const zstdLevel = process.argv[5]
+  ? parsePositiveInteger(process.argv[5], "zstdLevel")
+  : 1;
 const serviceUrl = process.env.CYBER_CHECK_BENCH_URL;
 const serviceToken = process.env.CYBER_CHECK_BENCH_TOKEN;
+const liveZstdMinBytes = process.env.CYBER_CHECK_BENCH_ZSTD_MIN_BYTES
+  ? parseNonNegativeInteger(
+      process.env.CYBER_CHECK_BENCH_ZSTD_MIN_BYTES,
+      "CYBER_CHECK_BENCH_ZSTD_MIN_BYTES"
+    )
+  : 256 * KIB;
 if (Boolean(serviceUrl) !== Boolean(serviceToken)) {
   throw new Error("CYBER_CHECK_BENCH_URL and CYBER_CHECK_BENCH_TOKEN must be set together");
 }
@@ -83,7 +96,9 @@ let heldCompressed = Buffer.alloc(0);
 const compressionMilliseconds: number[] = [];
 for (let index = 0; index < iterations; index += 1) {
   const started = performance.now();
-  heldCompressed = zstdCompressSync(heldPacketJson);
+  heldCompressed = await compressZstd(heldPacketJson, {
+    params: { [zlibConstants.ZSTD_c_compressionLevel]: zstdLevel },
+  });
   compressionMilliseconds.push(performance.now() - started);
 }
 forceGc();
@@ -98,6 +113,7 @@ if (serviceUrl && serviceToken && heldPacket) {
     baseUrl: new URL(serviceUrl),
     gatewayToken: serviceToken,
     gatewayId: "cch-admission-benchmark",
+    zstdMinBytes: liveZstdMinBytes,
   };
   const submit = async (index: number): Promise<void> => {
     const packet: ReviewRequestEnvelope = {
@@ -142,6 +158,8 @@ process.stdout.write(
     scenario,
     iterations,
     concurrency,
+    zstdLevel,
+    liveZstdMinBytes,
     runtime: { node: process.version, platform: process.platform, arch: process.arch },
     sourceBodyBytes: Buffer.byteLength(bodyString),
     reviewPacketBytes: Buffer.byteLength(heldPacketJson),
@@ -149,8 +167,13 @@ process.stdout.write(
     zstdRatio: heldCompressed.byteLength / Buffer.byteLength(heldPacketJson),
     projectionAndSerializationMs: distribution(projectionMilliseconds),
     zstdCompressionMs: distribution(compressionMilliseconds),
-    liveIdentityIngressMs: serviceMilliseconds ? distribution(serviceMilliseconds) : null,
-    liveIdentityIngressRequestsPerSecond:
+    liveTransport:
+      Buffer.byteLength(heldPacketJson) >= liveZstdMinBytes &&
+      heldCompressed.byteLength < Buffer.byteLength(heldPacketJson)
+        ? "zstd-1"
+        : "identity",
+    liveIngressMs: serviceMilliseconds ? distribution(serviceMilliseconds) : null,
+    liveIngressRequestsPerSecond:
       serviceWallMilliseconds === null ? null : iterations / (serviceWallMilliseconds / 1_000),
     memory: {
       baseline,
@@ -172,6 +195,14 @@ function parsePositiveInteger(value: string, name: string): number {
   const parsed = Number.parseInt(value, 10);
   if (!Number.isSafeInteger(parsed) || parsed <= 0) {
     throw new RangeError(`${name} must be a positive integer`);
+  }
+  return parsed;
+}
+
+function parseNonNegativeInteger(value: string, name: string): number {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isSafeInteger(parsed) || parsed < 0) {
+    throw new RangeError(`${name} must be a non-negative integer`);
   }
   return parsed;
 }

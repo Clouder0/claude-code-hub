@@ -192,6 +192,12 @@ export const EnvSchema = z.object({
     .max(256)
     .regex(/^[^\r\n]+$/)
     .default("cch"),
+  CYBER_CHECK_ZSTD_MIN_BYTES: z.coerce
+    .number()
+    .int()
+    .min(0)
+    .max(16 * 1024 * 1024)
+    .default(256 * 1024),
 
   DASHBOARD_LOGS_POLL_INTERVAL_MS: z.coerce.number().int().min(250).max(60000).default(5000),
 

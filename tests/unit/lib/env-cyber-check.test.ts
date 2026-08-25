@@ -9,6 +9,7 @@ describe("EnvSchema - cyber-check", () => {
     expect(parsed.CYBER_CHECK_GATEWAY_ID).toBe("cch");
     expect(parsed.CYBER_CHECK_URL).toBeUndefined();
     expect(parsed.CYBER_CHECK_GATEWAY_TOKEN).toBeUndefined();
+    expect(parsed.CYBER_CHECK_ZSTD_MIN_BYTES).toBe(256 * 1024);
   });
 
   it("accepts an explicit shadow service configuration", () => {
@@ -18,6 +19,7 @@ describe("EnvSchema - cyber-check", () => {
       CYBER_CHECK_URL: "http://127.0.0.1:8090",
       CYBER_CHECK_GATEWAY_TOKEN: "token",
       CYBER_CHECK_GATEWAY_ID: "cch-staging",
+      CYBER_CHECK_ZSTD_MIN_BYTES: "1048576",
     });
 
     expect(parsed).toMatchObject({
@@ -25,6 +27,7 @@ describe("EnvSchema - cyber-check", () => {
       CYBER_CHECK_URL: "http://127.0.0.1:8090",
       CYBER_CHECK_GATEWAY_TOKEN: "token",
       CYBER_CHECK_GATEWAY_ID: "cch-staging",
+      CYBER_CHECK_ZSTD_MIN_BYTES: 1024 * 1024,
     });
   });
 

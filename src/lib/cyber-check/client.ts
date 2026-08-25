@@ -1,3 +1,5 @@
+import { promisify } from "node:util";
+import { constants as zlibConstants, zstdCompress } from "node:zlib";
 import type { CyberCheckConfig } from "./config";
 import type {
   ReviewFinalDecision,
@@ -8,6 +10,9 @@ import type {
 
 const SUBMISSION_TIMEOUT_MS = 20_000;
 const JOB_READ_TIMEOUT_MS = 5_000;
+// Admission optimizes transfer cost, not archival ratio; keep compression off the high-CPU levels.
+const ZSTD_COMPRESSION_LEVEL = 1;
+const compressZstd = promisify(zstdCompress);
 
 type FetchImplementation = typeof globalThis.fetch;
 
@@ -32,15 +37,33 @@ export async function submitReview(
   packet: ReviewRequestEnvelope,
   options: RequestOptions = {}
 ): Promise<ReviewSubmission> {
+  const packetJson = JSON.stringify(packet);
+  const packetBytes = Buffer.byteLength(packetJson);
+  const headers: Record<string, string> = {
+    authorization: `Bearer ${config.gatewayToken}`,
+    "content-type": "application/json",
+  };
+  let body: string | Uint8Array<ArrayBuffer> = packetJson;
+  if (packetBytes >= config.zstdMinBytes) {
+    const compressed = await compressZstd(packetJson, {
+      params: { [zlibConstants.ZSTD_c_compressionLevel]: ZSTD_COMPRESSION_LEVEL },
+    });
+    if (compressed.byteLength < packetBytes) {
+      body = new Uint8Array(
+        compressed.buffer as ArrayBuffer,
+        compressed.byteOffset,
+        compressed.byteLength
+      );
+      headers["content-encoding"] = "zstd";
+    }
+  }
+
   const response = await (options.fetchImpl ?? globalThis.fetch)(
     new URL("/v1/request-reviews", config.baseUrl),
     {
       method: "POST",
-      headers: {
-        authorization: `Bearer ${config.gatewayToken}`,
-        "content-type": "application/json",
-      },
-      body: JSON.stringify(packet),
+      headers,
+      body,
       signal: boundedSignal(options.signal, SUBMISSION_TIMEOUT_MS),
     }
   );

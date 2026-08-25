@@ -13,6 +13,7 @@ CYBER_CHECK_MODE=shadow
 CYBER_CHECK_URL=http://127.0.0.1:8090
 CYBER_CHECK_GATEWAY_TOKEN=replace-with-the-shared-gateway-token
 CYBER_CHECK_GATEWAY_ID=cch
+CYBER_CHECK_ZSTD_MIN_BYTES=262144
 ```
 
 `CYBER_CHECK_MODE` 有三个值：
@@ -24,6 +25,11 @@ CYBER_CHECK_GATEWAY_ID=cch
 
 `cyber-check` 服务本身也有独立的 `shadow/enforce`。只有服务返回有效 deny 且 CCH 处于
 `enforce` 时才会阻断。非 loopback 服务必须使用 HTTPS。
+
+CCH 对达到 `CYBER_CHECK_ZSTD_MIN_BYTES`（默认 256 KiB）的审查包使用 Node 异步 zstd，压缩
+级别固定为 1；若压缩结果没有变小则仍发送普通 JSON。固定低级别是为了降低跨服务字节数，同时
+避免把同步 admission 路径变成追求极致压缩率的 CPU 热点。服务端会分别限制 wire body 和解压后
+JSON 的大小。
 
 ## 同步与异步
 
@@ -53,5 +59,5 @@ SHA-256 同时用于把审查记录与真实出站 bytes 关联，不用于判�
 - `previous_response_id`、`conversation`、prompt template、远程图片、新 item/content 类型和
   compaction 都被明确标为 partial coverage，不能静默当成完整上下文。
 - encrypted reasoning 只发送 opaque marker，不复制 ciphertext；普通请求日志也不记录投影正文。
-- V0 使用普通 JSON over HTTP。对 loopback/内部链路而言，先证明端到端语义比预先引入压缩更重要；
-  若代表性包体与延迟测量表明网络字节是瓶颈，再增加请求压缩及解压后 body limit。
+- 小于压缩阈值的请求仍使用普通 JSON；阈值应根据部署链路的 CPU、带宽和延迟测量调整，而不是
+  提高 zstd 级别。
