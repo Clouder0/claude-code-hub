@@ -4,10 +4,15 @@ import {
   CyberCheckClientError,
   getReviewJob,
   reportProviderEvent,
+  reportRequestOutcome,
   submitReview,
 } from "@/lib/cyber-check/client";
 import { resolveCyberCheckConfig } from "@/lib/cyber-check/config";
-import type { ProviderEventEnvelope, ReviewRequestEnvelope } from "@/lib/cyber-check/types";
+import type {
+  ProviderEventEnvelope,
+  RequestOutcomeEnvelope,
+  ReviewRequestEnvelope,
+} from "@/lib/cyber-check/types";
 
 const config = {
   mode: "shadow" as const,
@@ -49,6 +54,12 @@ const providerEvent: ProviderEventEnvelope = {
     type: "policy_rejection",
     code: "cyber_policy",
   },
+};
+
+const requestOutcome: RequestOutcomeEnvelope = {
+  schema_version: "cyber-check.request-outcome.v1",
+  identity: packet.identity,
+  outcome: "clean",
 };
 
 function jsonResponse(body: unknown, status: number): Response {
@@ -190,6 +201,20 @@ describe("cyber-check client", () => {
     expect(new Headers(init?.headers).get("authorization")).toBe("Bearer gateway-test-token");
     expect(new Headers(init?.headers).get("content-type")).toBe("application/json");
     expect(JSON.parse(String(init?.body))).toEqual(providerEvent);
+  });
+
+  it("reports a clean terminal outcome to its dedicated resource", async () => {
+    const fetchMock = vi.fn(async () => new Response(null, { status: 204 }));
+
+    await reportRequestOutcome(config, requestOutcome, {
+      fetchImpl: fetchMock as unknown as typeof fetch,
+    });
+
+    const [url, init] = fetchMock.mock.calls[0] ?? [];
+    expect(String(url)).toBe("http://127.0.0.1:8090/v1/request-outcomes");
+    expect(init?.method).toBe("POST");
+    expect(new Headers(init?.headers).get("authorization")).toBe("Bearer gateway-test-token");
+    expect(JSON.parse(String(init?.body))).toEqual(requestOutcome);
   });
 
   it("rejects malformed success responses instead of treating them as allow", async () => {

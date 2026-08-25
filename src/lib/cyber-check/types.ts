@@ -38,6 +38,12 @@ export interface ProviderEventEnvelope {
   };
 }
 
+export interface RequestOutcomeEnvelope {
+  schema_version: "cyber-check.request-outcome.v1";
+  identity: ReviewRequestEnvelope["identity"];
+  outcome: "clean";
+}
+
 export interface ReviewRequestEnvelope {
   schema_version: "cyber-check.request-review.v1";
   identity: {

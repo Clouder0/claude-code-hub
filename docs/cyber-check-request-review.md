@@ -67,6 +67,17 @@ security event 和 cyber strike；`cyber-check` 不可用时只记录无正文�
 没有成功 admission，就没有可验证的 join key，因此 CCH 不向中心服务猜测归因，本地遏制仍照常
 执行。
 
+对于正常完成且没有权威策略拒绝的 Codex SSE，CCH 会 best-effort 回报 clean 终态：
+
+```text
+POST /v1/request-outcomes
+  204 -> 候选审计文件已释放、已不存在，或仍被 pending Job 使用
+```
+
+这个请求不在客户端响应的同步路径上，失败只意味着审查服务稍后用 TTL 清理。若 hedge loser 仍在
+继续读取并计费，它仍可能返回权威 provider policy，因此赢家完成时不会过早发送 clean；该场景
+直接交给 TTL。clean 也不会删除已经因本地 predicted deny 或上游 `cyber_policy` 而 retained 的证据。
+
 网关 request id 使用 `message_request.id + final body SHA-256`。同一最终 body 的 provider
 重试或 hedge 会命中服务端幂等结果；provider rewrite 产生不同最终 body 时会得到独立审查。
 SHA-256 同时用于把审查记录与真实出站 bytes 关联，不用于判断内容安全。

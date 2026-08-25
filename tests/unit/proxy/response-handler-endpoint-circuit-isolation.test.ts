@@ -15,6 +15,7 @@ import type { ModelPriceData } from "@/types/model-price";
 // Track async tasks for draining
 const asyncTasks: Promise<void>[] = [];
 const loggerWarn = vi.hoisted(() => vi.fn());
+const mockReportCleanRequestOutcome = vi.hoisted(() => vi.fn(async () => {}));
 
 vi.mock("@/lib/async-task-manager", () => ({
   AsyncTaskManager: {
@@ -36,6 +37,10 @@ vi.mock("@/lib/logger", () => ({
     error: () => {},
     trace: () => {},
   },
+}));
+
+vi.mock("@/lib/cyber-check/request-outcome", () => ({
+  reportCleanRequestOutcomeBestEffort: mockReportCleanRequestOutcome,
 }));
 
 vi.mock("@/lib/price-sync/cloud-price-updater", () => ({
@@ -275,6 +280,7 @@ function setDeferredMeta(
     endpointId,
     endpointUrl: "https://api.test.com",
     upstreamStatusCode: 200,
+    billHedgeLosers: false,
     ...(withStreamGateMarker
       ? {
           streamGateCommitMarker: {
@@ -653,7 +659,7 @@ describe("Endpoint circuit breaker isolation", () => {
   });
 
   it("streaming success DOES call recordEndpointSuccess (regression guard)", async () => {
-    const session = createSession();
+    const session = createSession({ sessionId: null });
     setDeferredMeta(session, 42);
 
     const response = createSuccessStreamResponse();
@@ -662,6 +668,33 @@ describe("Endpoint circuit breaker isolation", () => {
 
     expect(mockRecordEndpointSuccess).toHaveBeenCalledWith(42);
     expect(mockRecordEndpointFailure).not.toHaveBeenCalled();
+    expect(mockReportCleanRequestOutcome).toHaveBeenCalledOnce();
+    expect(mockReportCleanRequestOutcome).toHaveBeenCalledWith(session);
+  });
+
+  it("does not release evidence while a billable hedge loser can still report policy", async () => {
+    const session = createSession({ sessionId: null });
+    setDeferredStreamingFinalization(session, {
+      providerId: 1,
+      providerName: "test-provider",
+      providerPriority: 10,
+      attemptNumber: 1,
+      totalProvidersAttempted: 2,
+      isFirstAttempt: true,
+      isFailoverSuccess: false,
+      endpointId: 42,
+      endpointUrl: "https://api.test.com",
+      upstreamStatusCode: 200,
+      isHedgeWinner: true,
+      billHedgeLosers: true,
+    });
+
+    const response = createSuccessStreamResponse();
+    await ProxyResponseHandler.dispatch(session, response);
+    await drainAsyncTasks();
+
+    expect(mockRecordEndpointSuccess).toHaveBeenCalledWith(42);
+    expect(mockReportCleanRequestOutcome).not.toHaveBeenCalled();
   });
 
   it("streaming success without endpointId should NOT call any endpoint circuit breaker function", async () => {

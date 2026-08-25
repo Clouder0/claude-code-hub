@@ -11,6 +11,7 @@ import {
 import { getEnvConfig } from "@/lib/config/env.schema";
 import { getCachedSystemSettings } from "@/lib/config/system-settings-cache";
 import { reportProviderPolicyEventBestEffort } from "@/lib/cyber-check/provider-event";
+import { reportCleanRequestOutcomeBestEffort } from "@/lib/cyber-check/request-outcome";
 import { emitProxyLangfuseTrace } from "@/lib/langfuse/emit-proxy-trace";
 import { logger } from "@/lib/logger";
 import { requestCloudPriceTableSync } from "@/lib/price-sync/cloud-price-updater";
@@ -1423,6 +1424,14 @@ async function finalizeDeferredStreamingFinalizationIfNeeded(
         error: endpointError,
       });
     }
+  }
+
+  // A billable hedge loser continues reading after the winner completes and can still surface an
+  // authoritative provider policy event. In that case TTL cleanup is safer than an early release.
+  // Report immediately after the terminal-success classification so unrelated accounting failures
+  // cannot suppress this best-effort cleanup signal.
+  if (!billHedgeLosers) {
+    void reportCleanRequestOutcomeBestEffort(session);
   }
 
   try {

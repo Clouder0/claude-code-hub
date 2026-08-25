@@ -3,6 +3,7 @@ import { constants as zlibConstants, zstdCompress } from "node:zlib";
 import type { CyberCheckConfig } from "./config";
 import type {
   ProviderEventEnvelope,
+  RequestOutcomeEnvelope,
   ReviewFinalDecision,
   ReviewJob,
   ReviewRequestEnvelope,
@@ -110,6 +111,26 @@ export async function reportProviderEvent(
         "content-type": "application/json",
       },
       body: JSON.stringify(event),
+      signal: boundedSignal(options.signal, EVENT_REPORT_TIMEOUT_MS),
+    }
+  );
+  if (response.status !== 204) throw await responseError(response);
+}
+
+export async function reportRequestOutcome(
+  config: CyberCheckConfig,
+  outcome: RequestOutcomeEnvelope,
+  options: RequestOptions = {}
+): Promise<void> {
+  const response = await (options.fetchImpl ?? globalThis.fetch)(
+    new URL("/v1/request-outcomes", config.baseUrl),
+    {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${config.gatewayToken}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(outcome),
       signal: boundedSignal(options.signal, EVENT_REPORT_TIMEOUT_MS),
     }
   );
