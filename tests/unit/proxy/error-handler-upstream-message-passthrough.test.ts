@@ -32,7 +32,7 @@ vi.mock("@/app/v1/_lib/proxy/errors", async (importOriginal) => {
 });
 
 import { ProxyErrorHandler } from "@/app/v1/_lib/proxy/error-handler";
-import { ProxyError } from "@/app/v1/_lib/proxy/errors";
+import { ProxyError, RequestReviewError } from "@/app/v1/_lib/proxy/errors";
 
 function createSession(): any {
   return {
@@ -278,6 +278,32 @@ describe("ProxyErrorHandler.handle - upstream message passthrough", () => {
 
     expect(response.status).toBe(400);
     expect(body.error.code).toBe("bio_policy");
+    expect(mocks.getErrorOverrideAsync).not.toHaveBeenCalled();
+  });
+
+  test("preserves a local request-review denial independently of upstream policy codes", async () => {
+    mocks.getCachedSystemSettings.mockResolvedValue({
+      verboseProviderError: false,
+      passThroughUpstreamErrorMessage: false,
+    });
+    mocks.getErrorOverrideAsync.mockResolvedValue({
+      statusCode: 503,
+      response: {
+        error: {
+          type: "service_unavailable_error",
+          message: "custom override",
+          code: "provider_unavailable",
+        },
+      },
+    });
+
+    const response = await ProxyErrorHandler.handle(createSession(), RequestReviewError.denied());
+    const body = await response.json();
+
+    expect(response.status).toBe(403);
+    expect(body.error.code).toBe("cyber_check_denied");
+    expect(body.error.message).toContain("gateway request review policy");
+    expect(body.error.code).not.toBe("cyber_policy");
     expect(mocks.getErrorOverrideAsync).not.toHaveBeenCalled();
   });
 });

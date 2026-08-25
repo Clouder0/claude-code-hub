@@ -20,6 +20,7 @@ import { getCachedSystemSettings, isHttp2Enabled } from "@/lib/config";
 import { getEnvConfig } from "@/lib/config/env.schema";
 import { PROVIDER_DEFAULTS, PROVIDER_LIMITS } from "@/lib/constants/provider.constants";
 import { PROTECTED_AUTH_HEADER_NAMES } from "@/lib/custom-headers";
+import { admitFinalResponsesRequest } from "@/lib/cyber-check/admission";
 import { recordEndpointFailure, recordEndpointSuccess } from "@/lib/endpoint-circuit-breaker";
 import { applyGeminiGoogleSearchOverrideWithAudit } from "@/lib/gemini/provider-overrides";
 import { logger } from "@/lib/logger";
@@ -2998,6 +2999,14 @@ export class ProxyForwarder {
           const bodyString = JSON.stringify(messageToSend);
           requestBody = bodyString;
           session.setForwardedRequestBody(bodyString, messageToSend);
+
+          await admitFinalResponsesRequest({
+            session,
+            provider,
+            requestPath,
+            message: messageToSend,
+            bodyString,
+          });
 
           // messageToSend 就是 bodyString 的序列化来源；直接读取 stream 字段，
           // 避免对多 MB 请求体做一次只为读布尔值的 JSON.parse（该解析位于 TTFB 路径）。

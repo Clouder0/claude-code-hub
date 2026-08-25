@@ -36,6 +36,8 @@
 
   "INTERNAL_ERROR": "Internal server error, please try again later",
   "DATABASE_ERROR": "Database error",
+  "CYBER_CHECK_DENIED": "This session is temporarily restricted by the gateway request review policy.",
+  "CYBER_CHECK_UNAVAILABLE": "The gateway request review service is temporarily unavailable.",
   "INVALID_NORMALIZED_BODY": "The normalized request body could not be serialized",
   "NOT_FOUND": "Resource not found",
   "OPERATION_FAILED": "Operation failed",

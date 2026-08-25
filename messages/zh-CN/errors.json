@@ -36,6 +36,8 @@
 
   "INTERNAL_ERROR": "系统内部错误，请稍后重试",
   "DATABASE_ERROR": "数据库错误",
+  "CYBER_CHECK_DENIED": "该会话已被网关请求审查策略暂时限制。",
+  "CYBER_CHECK_UNAVAILABLE": "网关请求审查服务暂时不可用。",
   "INVALID_NORMALIZED_BODY": "规范化后的请求体无法序列化",
   "NOT_FOUND": "资源不存在",
   "OPERATION_FAILED": "操作失败",
