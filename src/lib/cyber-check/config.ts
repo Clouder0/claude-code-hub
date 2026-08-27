@@ -6,6 +6,7 @@ export interface CyberCheckConfig {
   baseUrl: URL;
   gatewayToken: string;
   zstdMinBytes: number;
+  maxEncodingBytes: number;
 }
 
 type CyberCheckEnv = Pick<
@@ -14,6 +15,7 @@ type CyberCheckEnv = Pick<
   | "CYBER_CHECK_URL"
   | "CYBER_CHECK_GATEWAY_TOKEN"
   | "CYBER_CHECK_ZSTD_MIN_BYTES"
+  | "CYBER_CHECK_MAX_ENCODING_BYTES"
 >;
 
 export class CyberCheckConfigurationError extends Error {
@@ -60,6 +62,7 @@ export function resolveCyberCheckConfig(env: CyberCheckEnv): CyberCheckConfig | 
     baseUrl,
     gatewayToken: env.CYBER_CHECK_GATEWAY_TOKEN,
     zstdMinBytes: env.CYBER_CHECK_ZSTD_MIN_BYTES,
+    maxEncodingBytes: env.CYBER_CHECK_MAX_ENCODING_BYTES,
   };
 }
 

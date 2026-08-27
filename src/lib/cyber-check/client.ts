@@ -11,7 +11,7 @@ import type {
   ReviewSubmission,
 } from "./types";
 
-const SUBMISSION_TIMEOUT_MS = 20_000;
+const SUBMISSION_TIMEOUT_MS = 25_000;
 const JOB_READ_TIMEOUT_MS = 5_000;
 const EVENT_REPORT_TIMEOUT_MS = 5_000;
 // Admission optimizes transfer cost, not archival ratio; keep compression off the high-CPU levels.
@@ -46,6 +46,7 @@ export async function submitReview(
   const headers: Record<string, string> = {
     authorization: `Bearer ${config.gatewayToken}`,
     "content-type": "application/json",
+    "x-cyber-check-decoded-length": String(packetBytes),
   };
   let body: string | Uint8Array<ArrayBuffer> = packetJson;
   if (packetBytes >= config.zstdMinBytes) {
@@ -61,6 +62,9 @@ export async function submitReview(
       headers["content-encoding"] = "zstd";
     }
   }
+  headers["content-length"] = String(
+    typeof body === "string" ? Buffer.byteLength(body) : body.byteLength
+  );
 
   const response = await (options.fetchImpl ?? globalThis.fetch)(
     new URL("/v1/request-reviews", config.baseUrl),

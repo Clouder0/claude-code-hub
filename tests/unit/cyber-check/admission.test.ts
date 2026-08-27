@@ -21,6 +21,7 @@ vi.mock("@/lib/logger", () => ({ logger: mocks.logger }));
 import { RequestReviewError } from "@/app/v1/_lib/proxy/errors";
 import type { CyberCheckAdmissionCorrelation, ProxySession } from "@/app/v1/_lib/proxy/session";
 import { admitFinalResponsesRequest } from "@/lib/cyber-check/admission";
+import { cyberCheckEncodingCapacity } from "@/lib/cyber-check/capacity";
 
 const message = {
   model: "gpt-test",
@@ -63,6 +64,7 @@ function env(mode: "off" | "shadow" | "enforce") {
     CYBER_CHECK_URL: "http://127.0.0.1:8090",
     CYBER_CHECK_GATEWAY_TOKEN: "gateway-token",
     CYBER_CHECK_ZSTD_MIN_BYTES: 256 * 1024,
+    CYBER_CHECK_MAX_ENCODING_BYTES: 256 * 1024 * 1024,
   };
 }
 
@@ -290,7 +292,7 @@ describe("CCH cyber-check admission seam", () => {
   });
 
   it("fails closed when evidence or review-queue capacity cannot create an admission", async () => {
-    for (const serviceCode of ["cyber_check_capacity", "review_queue_full"]) {
+    for (const serviceCode of ["cyber_check_capacity", "reviewer_capacity", "review_queue_full"]) {
       vi.stubGlobal(
         "fetch",
         vi.fn(async () =>
@@ -311,6 +313,27 @@ describe("CCH cyber-check admission seam", () => {
 
       expect(error).toMatchObject({ code: "cyber_check_capacity", statusCode: 503 });
     }
+  });
+
+  it("fails closed before projection when the local encoding budget is exhausted", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    mocks.getEnvConfig.mockReturnValue({
+      ...env("shadow"),
+      CYBER_CHECK_MAX_ENCODING_BYTES: 64 * 1024,
+    });
+
+    const error = await admitFinalResponsesRequest({
+      session: session(),
+      provider: { id: 1, providerType: "codex" },
+      requestPath: "/v1/responses",
+      message,
+      bodyString: JSON.stringify(message),
+    }).catch((value: unknown) => value);
+
+    expect(error).toMatchObject({ code: "cyber_check_capacity", statusCode: 503 });
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(cyberCheckEncodingCapacity.snapshot()).toBe(0);
   });
 
   it("fails open in shadow and closed in enforce when the review service is unavailable", async () => {
@@ -432,6 +455,7 @@ describe("CCH cyber-check admission seam", () => {
         bodyString: JSON.stringify(message),
       })
     ).rejects.toThrow("client disconnected");
+    expect(cyberCheckEncodingCapacity.snapshot()).toBe(0);
     expect(mocks.logger.warn).not.toHaveBeenCalledWith(
       "CyberCheck: request review could not be completed",
       expect.anything()

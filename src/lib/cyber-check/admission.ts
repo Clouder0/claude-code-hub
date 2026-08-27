@@ -7,7 +7,8 @@ import { getEnvConfig } from "@/lib/config/env.schema";
 import { logger } from "@/lib/logger";
 import { ERROR_CODES, getErrorMessageServer } from "@/lib/utils/error-messages";
 import type { Provider } from "@/types/provider";
-import { type CyberCheckClientError, getReviewJob, submitReview } from "./client";
+import { cyberCheckEncodingCapacity, type EncodingCapacityLease } from "./capacity";
+import { CyberCheckClientError, getReviewJob, submitReview } from "./client";
 import { type CyberCheckConfig, resolveCyberCheckConfig } from "./config";
 import { projectFinalResponsesRequest } from "./projection";
 import type { ActiveRestriction, ReviewSubmission } from "./types";
@@ -52,7 +53,19 @@ export async function admitFinalResponsesRequest({
   }
 
   let submission: ReviewSubmission;
+  let encodingLease: EncodingCapacityLease | null = null;
   try {
+    encodingLease = cyberCheckEncodingCapacity.tryAcquire(
+      Buffer.byteLength(bodyString),
+      config.maxEncodingBytes
+    );
+    if (!encodingLease) {
+      throw new CyberCheckClientError(
+        "Cyber Check encoding working-set capacity is exhausted",
+        503,
+        "cyber_check_capacity"
+      );
+    }
     const context = session.messageContext;
     const stableIdentity = session.getStableRequestIdentity?.();
     const requestId = stableIdentity?.requestId ?? context?.id;
@@ -78,6 +91,8 @@ export async function admitFinalResponsesRequest({
     if (isCapacityFailure(error)) throw await localizedRequestReviewError("capacity");
     if (config.mode === "enforce") throw await localizedRequestReviewError("unavailable");
     return;
+  } finally {
+    encodingLease?.release();
   }
 
   if (submission.status === "pending") {
@@ -252,5 +267,9 @@ function errorMessageCode(
 function isCapacityFailure(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
   const serviceCode = (error as Partial<CyberCheckClientError>).serviceCode;
-  return serviceCode === "cyber_check_capacity" || serviceCode === "review_queue_full";
+  return (
+    serviceCode === "cyber_check_capacity" ||
+    serviceCode === "reviewer_capacity" ||
+    serviceCode === "review_queue_full"
+  );
 }

@@ -20,6 +20,7 @@ const config = {
   baseUrl: new URL("http://127.0.0.1:8090"),
   gatewayToken: "gateway-test-token",
   zstdMinBytes: 256 * 1024,
+  maxEncodingBytes: 256 * 1024 * 1024,
 };
 
 const packet: ReviewRequestEnvelope = {
@@ -92,9 +93,13 @@ describe("cyber-check client", () => {
 
     expect(result).toMatchObject({ status: "completed", decision: "allow" });
     const [url, init] = fetchMock.mock.calls[0] ?? [];
+    const serialized = JSON.stringify(packet);
+    const headers = new Headers(init?.headers);
     expect(String(url)).toBe("http://127.0.0.1:8090/v1/request-reviews");
-    expect(new Headers(init?.headers).get("authorization")).toBe("Bearer gateway-test-token");
-    expect(new Headers(init?.headers).get("content-encoding")).toBeNull();
+    expect(headers.get("authorization")).toBe("Bearer gateway-test-token");
+    expect(headers.get("content-encoding")).toBeNull();
+    expect(headers.get("content-length")).toBe(String(Buffer.byteLength(serialized)));
+    expect(headers.get("x-cyber-check-decoded-length")).toBe(String(Buffer.byteLength(serialized)));
     expect(JSON.parse(String(init?.body))).toEqual(packet);
   });
 
@@ -130,12 +135,39 @@ describe("cyber-check client", () => {
     });
 
     const init = fetchMock.mock.calls[0]?.[1];
-    expect(new Headers(init?.headers).get("content-encoding")).toBe("zstd");
+    const headers = new Headers(init?.headers);
+    expect(headers.get("content-encoding")).toBe("zstd");
     const compressed = init?.body;
     expect(compressed).toBeInstanceOf(Uint8Array);
     const decoded = zstdDecompressSync(compressed as Uint8Array).toString("utf8");
     expect(JSON.parse(decoded)).toEqual(largePacket);
     expect((compressed as Uint8Array).byteLength).toBeLessThan(Buffer.byteLength(decoded));
+    expect(headers.get("content-length")).toBe(String((compressed as Uint8Array).byteLength));
+    expect(headers.get("x-cyber-check-decoded-length")).toBe(String(Buffer.byteLength(decoded)));
+  });
+
+  it("bounds the cross-machine submission with a 25 second deadline", async () => {
+    const timeout = vi.spyOn(AbortSignal, "timeout");
+    const fetchMock = vi.fn(async () =>
+      jsonResponse(
+        {
+          status: "completed",
+          decision: "allow",
+          predicted_decision: "allow",
+          enforcement_mode: "shadow",
+          reason: "fast_path",
+          coverage: "complete",
+          policy_version: "policy-v1",
+          reviewer_version: "reviewer-v1",
+        },
+        200
+      )
+    );
+
+    await submitReview(config, packet, { fetchImpl: fetchMock as unknown as typeof fetch });
+
+    expect(timeout).toHaveBeenCalledWith(25_000);
+    timeout.mockRestore();
   });
 
   it("uses the normal POST-created job and GET status resource", async () => {
@@ -277,6 +309,7 @@ describe("cyber-check gateway configuration", () => {
         CYBER_CHECK_URL: undefined,
         CYBER_CHECK_GATEWAY_TOKEN: undefined,
         CYBER_CHECK_ZSTD_MIN_BYTES: 256 * 1024,
+        CYBER_CHECK_MAX_ENCODING_BYTES: 256 * 1024 * 1024,
       })
     ).toBeNull();
 
@@ -286,6 +319,7 @@ describe("cyber-check gateway configuration", () => {
         CYBER_CHECK_URL: undefined,
         CYBER_CHECK_GATEWAY_TOKEN: undefined,
         CYBER_CHECK_ZSTD_MIN_BYTES: 256 * 1024,
+        CYBER_CHECK_MAX_ENCODING_BYTES: 256 * 1024 * 1024,
       })
     ).toThrow("CYBER_CHECK_URL");
   });
@@ -297,6 +331,7 @@ describe("cyber-check gateway configuration", () => {
         CYBER_CHECK_URL: "http://127.0.0.1:8090",
         CYBER_CHECK_GATEWAY_TOKEN: "token",
         CYBER_CHECK_ZSTD_MIN_BYTES: 256 * 1024,
+        CYBER_CHECK_MAX_ENCODING_BYTES: 256 * 1024 * 1024,
       })
     ).toMatchObject({ mode: "shadow" });
 
@@ -306,6 +341,7 @@ describe("cyber-check gateway configuration", () => {
         CYBER_CHECK_URL: "http://review.internal.example",
         CYBER_CHECK_GATEWAY_TOKEN: "token",
         CYBER_CHECK_ZSTD_MIN_BYTES: 256 * 1024,
+        CYBER_CHECK_MAX_ENCODING_BYTES: 256 * 1024 * 1024,
       })
     ).toThrow("must use HTTPS");
   });
@@ -317,6 +353,7 @@ describe("cyber-check gateway configuration", () => {
         CYBER_CHECK_URL: "https://review.internal.example",
         CYBER_CHECK_GATEWAY_TOKEN: undefined,
         CYBER_CHECK_ZSTD_MIN_BYTES: 256 * 1024,
+        CYBER_CHECK_MAX_ENCODING_BYTES: 256 * 1024 * 1024,
       })
     ).toThrow("CYBER_CHECK_GATEWAY_TOKEN");
 
@@ -331,6 +368,7 @@ describe("cyber-check gateway configuration", () => {
           CYBER_CHECK_URL: url,
           CYBER_CHECK_GATEWAY_TOKEN: "token",
           CYBER_CHECK_ZSTD_MIN_BYTES: 256 * 1024,
+          CYBER_CHECK_MAX_ENCODING_BYTES: 256 * 1024 * 1024,
         })
       ).toThrow();
     }

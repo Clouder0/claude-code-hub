@@ -33,6 +33,7 @@ function env(mode: "off" | "shadow" | "enforce") {
     CYBER_CHECK_URL: "http://127.0.0.1:8090",
     CYBER_CHECK_GATEWAY_TOKEN: "gateway-token",
     CYBER_CHECK_ZSTD_MIN_BYTES: 256 * 1024,
+    CYBER_CHECK_MAX_ENCODING_BYTES: 256 * 1024 * 1024,
   };
 }
 

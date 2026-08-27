@@ -9,6 +9,7 @@ describe("EnvSchema - cyber-check", () => {
     expect(parsed.CYBER_CHECK_URL).toBeUndefined();
     expect(parsed.CYBER_CHECK_GATEWAY_TOKEN).toBeUndefined();
     expect(parsed.CYBER_CHECK_ZSTD_MIN_BYTES).toBe(256 * 1024);
+    expect(parsed.CYBER_CHECK_MAX_ENCODING_BYTES).toBe(256 * 1024 * 1024);
   });
 
   it("accepts an explicit shadow service configuration", () => {
@@ -18,6 +19,7 @@ describe("EnvSchema - cyber-check", () => {
       CYBER_CHECK_URL: "http://127.0.0.1:8090",
       CYBER_CHECK_GATEWAY_TOKEN: "token",
       CYBER_CHECK_ZSTD_MIN_BYTES: "1048576",
+      CYBER_CHECK_MAX_ENCODING_BYTES: "134217728",
     });
 
     expect(parsed).toMatchObject({
@@ -25,10 +27,14 @@ describe("EnvSchema - cyber-check", () => {
       CYBER_CHECK_URL: "http://127.0.0.1:8090",
       CYBER_CHECK_GATEWAY_TOKEN: "token",
       CYBER_CHECK_ZSTD_MIN_BYTES: 1024 * 1024,
+      CYBER_CHECK_MAX_ENCODING_BYTES: 128 * 1024 * 1024,
     });
   });
 
   it("rejects invalid review transport thresholds", () => {
     expect(() => EnvSchema.parse({ NODE_ENV: "test", CYBER_CHECK_ZSTD_MIN_BYTES: "-1" })).toThrow();
+    expect(() =>
+      EnvSchema.parse({ NODE_ENV: "test", CYBER_CHECK_MAX_ENCODING_BYTES: "65535" })
+    ).toThrow();
   });
 });

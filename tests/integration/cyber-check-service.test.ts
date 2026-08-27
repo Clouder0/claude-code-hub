@@ -14,6 +14,7 @@ describe.runIf(runLive)("CCH to cyber-check live contract", () => {
     baseUrl: new URL(serviceUrl ?? "http://127.0.0.1"),
     gatewayToken: gatewayToken ?? "",
     zstdMinBytes: 1,
+    maxEncodingBytes: 256 * 1024 * 1024,
   };
 
   function packetFor({

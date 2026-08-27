@@ -192,6 +192,12 @@ export const EnvSchema = z.object({
     .min(0)
     .max(16 * 1024 * 1024)
     .default(256 * 1024),
+  CYBER_CHECK_MAX_ENCODING_BYTES: z.coerce
+    .number()
+    .int()
+    .min(64 * 1024)
+    .max(1024 * 1024 * 1024)
+    .default(256 * 1024 * 1024),
 
   DASHBOARD_LOGS_POLL_INTERVAL_MS: z.coerce.number().int().min(250).max(60000).default(5000),
 
