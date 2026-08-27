@@ -119,15 +119,13 @@ export interface MessageContext {
 export interface StableRequestIdentity {
   requestId: number;
   principalId: number;
-  credentialId: number;
 }
 
 export interface CyberCheckAdmissionCorrelation {
   identity: {
-    gateway: string;
     request_id: string;
     principal_id: string;
-    credential_id: string;
+    client_instance_id?: string;
     session_id: string;
     sequence: number;
   };
@@ -618,7 +616,6 @@ export class ProxySession {
       this.stableRequestIdentity = {
         requestId: context.id,
         principalId: context.user.id,
-        credentialId: context.key.id,
       };
     }
     if (context?.user) {

@@ -3,10 +3,8 @@ import { describe, expect, it } from "vitest";
 import { projectFinalResponsesRequest, ReviewProjectionError } from "@/lib/cyber-check/projection";
 
 const identity = {
-  gateway: "cch-test",
   requestId: "42",
   principalId: "7",
-  credentialId: "9",
   sessionId: "session-projection-test",
   sequence: 2,
 };
@@ -75,7 +73,10 @@ describe("cyber-check Responses projection", () => {
       reasoning: { effort: "medium", context: "all_turns" },
       text: { verbosity: "low" },
       prompt_cache_key: "session-projection-test",
-      client_metadata: { session_id: "session-projection-test" },
+      client_metadata: {
+        session_id: "session-projection-test",
+        "x-codex-installation-id": "installation-projection-test",
+      },
     });
 
     expect(packet.source.context_state).toEqual({ type: "self_contained" });
@@ -107,6 +108,25 @@ describe("cyber-check Responses projection", () => {
     expect(packet.source.body_sha256).toBe(createHash("sha256").update(bodyString).digest("hex"));
     expect(packet.source.body_bytes).toBe(Buffer.byteLength(bodyString));
     expect(packet.identity.request_id).toBe(`42:${packet.source.body_sha256}`);
+    expect(packet.identity.client_instance_id).toBe("installation-projection-test");
+  });
+
+  it("omits missing or malformed optional Codex installation IDs", () => {
+    for (const clientMetadata of [
+      undefined,
+      {},
+      { "x-codex-installation-id": "" },
+      { "x-codex-installation-id": "installation\nspoof" },
+      { "x-codex-installation-id": "x".repeat(257) },
+      { "x-codex-installation-id": 7 },
+    ]) {
+      const { packet } = project({
+        model: "gpt-test",
+        input: "ordinary request",
+        ...(clientMetadata === undefined ? {} : { client_metadata: clientMetadata }),
+      });
+      expect(packet.identity).not.toHaveProperty("client_instance_id");
+    }
   });
 
   it("reviews actionable instructions discovered in tool output rather than only user messages", () => {

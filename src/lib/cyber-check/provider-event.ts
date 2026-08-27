@@ -1,9 +1,11 @@
 import type { ProxySession } from "@/app/v1/_lib/proxy/session";
 import { getEnvConfig } from "@/lib/config/env.schema";
 import { logger } from "@/lib/logger";
+import { disableUserForCyberCheckContainment } from "@/lib/security/policy-containment";
 import type { PolicyRejectionCode } from "@/lib/security/security-signals";
 import { type CyberCheckClientError, reportProviderEvent } from "./client";
 import { resolveCyberCheckConfig } from "./config";
+import type { ProviderContainment } from "./types";
 
 type CorrelatedSession = Pick<ProxySession, "getCyberCheckAdmissionCorrelation">;
 
@@ -15,17 +17,17 @@ type CorrelatedSession = Pick<ProxySession, "getCyberCheckAdmissionCorrelation">
 export async function reportProviderPolicyEventBestEffort(
   session: CorrelatedSession,
   policy: PolicyRejectionCode
-): Promise<void> {
-  if (policy !== "cyber_policy") return;
+): Promise<ProviderContainment | null> {
+  if (policy !== "cyber_policy") return null;
 
   const correlation = session.getCyberCheckAdmissionCorrelation();
-  if (!correlation) return;
+  if (!correlation) return null;
 
   try {
     const config = resolveCyberCheckConfig(getEnvConfig());
-    if (!config) return;
+    if (!config) return null;
 
-    await reportProviderEvent(config, {
+    const containment = await reportProviderEvent(config, {
       schema_version: "cyber-check.provider-event.v1",
       identity: correlation.identity,
       upstream_provider_id: correlation.upstreamProviderId,
@@ -35,11 +37,26 @@ export async function reportProviderPolicyEventBestEffort(
       },
     });
 
+    if (containment.principal_restricted) {
+      const userId = Number(correlation.identity.principal_id);
+      if (Number.isSafeInteger(userId) && userId > 0) {
+        await disableUserForCyberCheckContainment(userId);
+      } else {
+        logger.error("CyberCheck: principal restriction could not be mapped to a CCH user", {
+          principalId: correlation.identity.principal_id,
+        });
+      }
+    }
+
     logger.info("CyberCheck: authoritative provider cyber event reported", {
       requestId: correlation.identity.request_id,
       sessionId: correlation.identity.session_id,
       upstreamProviderId: correlation.upstreamProviderId,
+      principalStrikes: containment.principal_strikes,
+      clientInstanceRestricted: containment.client_instance_restricted,
+      principalRestricted: containment.principal_restricted,
     });
+    return containment;
   } catch (error) {
     logger.warn("CyberCheck: authoritative provider cyber event could not be reported", {
       ...clientErrorContext(error),
@@ -47,6 +64,7 @@ export async function reportProviderPolicyEventBestEffort(
       sessionId: correlation.identity.session_id,
       upstreamProviderId: correlation.upstreamProviderId,
     });
+    return null;
   }
 }
 

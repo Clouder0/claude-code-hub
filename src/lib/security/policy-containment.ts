@@ -103,6 +103,10 @@ export async function maybeDisableUserForCyberPolicy(userId: number): Promise<bo
           WHERE user_id = ${userId}
             AND type = 'cyber_policy'
             AND created_at >= now() - make_interval(secs => ${CYBER_POLICY_STRIKE_WINDOW_MS / 1000})
+            AND created_at > coalesce(
+              (SELECT cyber_policy_reset_at FROM users WHERE id = ${userId}),
+              '-infinity'::timestamptz
+            )
         ) >= ${CYBER_POLICY_DISABLE_THRESHOLD}
       RETURNING id
     `);
@@ -119,6 +123,32 @@ export async function maybeDisableUserForCyberPolicy(userId: number): Promise<bo
     return disabled;
   } catch (error) {
     logger.error("[CyberContainment] Failed to evaluate user disable", {
+      userId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return false;
+  }
+}
+
+/** Applies Cyber Check's authoritative principal restriction to the CCH user row. */
+export async function disableUserForCyberCheckContainment(userId: number): Promise<boolean> {
+  try {
+    const result = await db.execute(sql`
+      UPDATE users
+      SET is_enabled = false, updated_at = now()
+      WHERE id = ${userId} AND is_enabled = true AND deleted_at IS NULL
+      RETURNING id
+    `);
+    const disabled = Array.from(result).length > 0;
+    if (disabled) {
+      await invalidateCachedUser(userId);
+      logger.warn("[CyberContainment] User disabled by Cyber Check principal restriction", {
+        userId,
+      });
+    }
+    return disabled;
+  } catch (error) {
+    logger.error("[CyberContainment] Failed to apply Cyber Check principal restriction", {
       userId,
       error: error instanceof Error ? error.message : String(error),
     });

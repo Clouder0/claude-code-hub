@@ -233,10 +233,9 @@ describe("ProxyForwarder - fake 200 HTML body", () => {
     session.setProvider(provider1);
     session.setCyberCheckAdmissionCorrelation({
       identity: {
-        gateway: "cch-test",
         request_id: "stale:digest",
         principal_id: "7",
-        credential_id: "9",
+        client_instance_id: "installation-1",
         session_id: "stale-session",
         sequence: 0,
       },

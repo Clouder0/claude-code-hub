@@ -525,10 +525,9 @@ describe("ProxyForwarder - first-byte hedge scheduling", () => {
     } as never);
     session.setCyberCheckAdmissionCorrelation({
       identity: {
-        gateway: "cch-test",
         request_id: "tracking:digest",
         principal_id: "7",
-        credential_id: "9",
+        client_instance_id: "installation-1",
         session_id: "sess-hedge",
         sequence: 1,
       },
@@ -546,7 +545,6 @@ describe("ProxyForwarder - first-byte hedge scheduling", () => {
     expect(attempt.getStableRequestIdentity()).toEqual({
       requestId: 123,
       principalId: 7,
-      credentialId: 9,
     });
     expect(attempt.getCyberCheckAdmissionCorrelation()).toBeNull();
     expect(attempt.shouldPersistSessionDebugArtifacts()).toBe(false);
@@ -554,10 +552,9 @@ describe("ProxyForwarder - first-byte hedge scheduling", () => {
 
     attempt.setCyberCheckAdmissionCorrelation({
       identity: {
-        gateway: "cch-test",
         request_id: "attempt:digest",
         principal_id: "7",
-        credential_id: "9",
+        client_instance_id: "installation-1",
         session_id: "sess-hedge",
         sequence: 1,
       },
@@ -2045,10 +2042,9 @@ describe("ProxyForwarder - first-byte hedge scheduling", () => {
       const correlatedAttempt = attemptSession as ProxySession;
       correlatedAttempt.setCyberCheckAdmissionCorrelation({
         identity: {
-          gateway: "cch-test",
           request_id: "attempt-17:digest",
           principal_id: "7",
-          credential_id: "9",
+          client_instance_id: "installation-1",
           session_id: "sess-hedge",
           sequence: 1,
         },

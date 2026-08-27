@@ -9,6 +9,7 @@ import { messageRequest, usageLedger, users as usersTable } from "@/drizzle/sche
 import { emitActionAudit } from "@/lib/audit/emit";
 import { type AuthSession, getSession, hasAdminAuthority } from "@/lib/auth";
 import { PROVIDER_GROUP } from "@/lib/constants/provider.constants";
+import { reinstateCyberCheckPrincipalIfConfigured } from "@/lib/cyber-check/admin";
 import { logger } from "@/lib/logger";
 import { getUnauthorizedFields } from "@/lib/permissions/user-field-permissions";
 import { clipStartByResetAt, resolveUser5hCostResetAt } from "@/lib/rate-limit/cost-reset-utils";
@@ -1787,29 +1788,37 @@ export async function editUser(
       validatedData.providerGroup === undefined
         ? undefined
         : normalizeProviderGroup(validatedData.providerGroup);
+    const reinstatingUser = validatedData.isEnabled === true && beforeUser?.isEnabled === false;
+    if (reinstatingUser) {
+      await reinstateCyberCheckPrincipalIfConfigured(String(userId));
+    }
 
     // Update user with validated data
-    await updateUser(userId, {
-      name: validatedData.name,
-      description: validatedData.note,
-      ...(nextProviderGroup !== undefined ? { providerGroup: nextProviderGroup } : {}),
-      tags: validatedData.tags,
-      rpm: validatedData.rpm,
-      dailyQuota: validatedData.dailyQuota,
-      limit5hUsd: validatedData.limit5hUsd,
-      limit5hResetMode: validatedData.limit5hResetMode,
-      limitWeeklyUsd: validatedData.limitWeeklyUsd,
-      limitMonthlyUsd: validatedData.limitMonthlyUsd,
-      limitTotalUsd: validatedData.limitTotalUsd,
-      limitConcurrentSessions: validatedData.limitConcurrentSessions,
-      dailyResetMode: validatedData.dailyResetMode,
-      dailyResetTime: validatedData.dailyResetTime,
-      isEnabled: validatedData.isEnabled,
-      expiresAt: validatedData.expiresAt,
-      allowedClients: validatedData.allowedClients,
-      blockedClients: validatedData.blockedClients,
-      allowedModels: validatedData.allowedModels,
-    });
+    await updateUser(
+      userId,
+      {
+        name: validatedData.name,
+        description: validatedData.note,
+        ...(nextProviderGroup !== undefined ? { providerGroup: nextProviderGroup } : {}),
+        tags: validatedData.tags,
+        rpm: validatedData.rpm,
+        dailyQuota: validatedData.dailyQuota,
+        limit5hUsd: validatedData.limit5hUsd,
+        limit5hResetMode: validatedData.limit5hResetMode,
+        limitWeeklyUsd: validatedData.limitWeeklyUsd,
+        limitMonthlyUsd: validatedData.limitMonthlyUsd,
+        limitTotalUsd: validatedData.limitTotalUsd,
+        limitConcurrentSessions: validatedData.limitConcurrentSessions,
+        dailyResetMode: validatedData.dailyResetMode,
+        dailyResetTime: validatedData.dailyResetTime,
+        isEnabled: validatedData.isEnabled,
+        expiresAt: validatedData.expiresAt,
+        allowedClients: validatedData.allowedClients,
+        blockedClients: validatedData.blockedClients,
+        allowedModels: validatedData.allowedModels,
+      },
+      { resetCyberPolicyStrikes: reinstatingUser }
+    );
 
     if (
       validatedData.limit5hResetMode !== undefined &&
@@ -2048,11 +2057,17 @@ export async function renewUser(
       expiresAt,
     };
 
+    const reinstatingUser = data.enableUser === true && !user.isEnabled;
+    if (reinstatingUser) {
+      await reinstateCyberCheckPrincipalIfConfigured(String(userId));
+    }
     if (data.enableUser === true) {
       updateData.isEnabled = true;
     }
 
-    const updated = await updateUser(userId, updateData);
+    const updated = await updateUser(userId, updateData, {
+      resetCyberPolicyStrikes: reinstatingUser,
+    });
     if (!updated) {
       return {
         ok: false,
@@ -2101,7 +2116,19 @@ export async function toggleUserEnabled(userId: number, enabled: boolean): Promi
       };
     }
 
-    await updateUser(userId, { isEnabled: enabled });
+    const target = await findUserById(userId);
+    if (!target) {
+      return {
+        ok: false,
+        error: tError("USER_NOT_FOUND"),
+        errorCode: ERROR_CODES.NOT_FOUND,
+      };
+    }
+    const reinstatingUser = enabled && !target.isEnabled;
+    if (reinstatingUser) {
+      await reinstateCyberCheckPrincipalIfConfigured(String(userId));
+    }
+    await updateUser(userId, { isEnabled: enabled }, { resetCyberPolicyStrikes: reinstatingUser });
 
     revalidatePath("/dashboard/users");
     revalidatePath("/dashboard");

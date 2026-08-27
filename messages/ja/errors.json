@@ -36,8 +36,12 @@
 
   "INTERNAL_ERROR": "内部サーバーエラー、後でもう一度お試しください",
   "DATABASE_ERROR": "データベースエラー",
-  "CYBER_CHECK_DENIED": "このセッションはゲートウェイのリクエスト審査ポリシーにより一時的に制限されています。",
+  "GATEWAY_CYBER_REQUEST_RESTRICTED": "このリクエストはゲートウェイのサイバーポリシーによりブロックされました。",
+  "GATEWAY_CYBER_SESSION_RESTRICTED": "このセッションはゲートウェイのサイバーポリシーにより一時的に制限されています。",
+  "GATEWAY_CYBER_CLIENT_RESTRICTED": "このクライアントインスタンスはゲートウェイのサイバーポリシーにより制限されています。管理者に連絡してください。",
+  "GATEWAY_CYBER_PRINCIPAL_RESTRICTED": "このアカウントはゲートウェイのサイバーポリシーにより制限されています。管理者に連絡してください。",
   "CYBER_CHECK_UNAVAILABLE": "ゲートウェイのリクエスト審査サービスは一時的に利用できません。",
+  "CYBER_CHECK_CAPACITY": "ゲートウェイのリクエスト審査サービスに利用可能な監査保存容量がありません。",
   "INVALID_NORMALIZED_BODY": "正規化されたリクエスト本文をシリアル化できません",
   "NOT_FOUND": "リソースが見つかりません",
   "OPERATION_FAILED": "操作に失敗しました",

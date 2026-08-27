@@ -36,8 +36,12 @@
 
   "INTERNAL_ERROR": "系统内部错误，请稍后重试",
   "DATABASE_ERROR": "数据库错误",
-  "CYBER_CHECK_DENIED": "该会话已被网关请求审查策略暂时限制。",
+  "GATEWAY_CYBER_REQUEST_RESTRICTED": "该请求已被网关网络安全策略拦截。",
+  "GATEWAY_CYBER_SESSION_RESTRICTED": "该会话已被网关网络安全策略暂时限制。",
+  "GATEWAY_CYBER_CLIENT_RESTRICTED": "该客户端实例已被网关网络安全策略限制，请联系管理员。",
+  "GATEWAY_CYBER_PRINCIPAL_RESTRICTED": "该账户已被网关网络安全策略限制，请联系管理员。",
   "CYBER_CHECK_UNAVAILABLE": "网关请求审查服务暂时不可用。",
+  "CYBER_CHECK_CAPACITY": "网关请求审查服务当前没有可用的审计存储容量。",
   "INVALID_NORMALIZED_BODY": "规范化后的请求体无法序列化",
   "NOT_FOUND": "资源不存在",
   "OPERATION_FAILED": "操作失败",

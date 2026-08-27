@@ -169,7 +169,6 @@ describe("ProxyForwarder cyber-check admission boundary", () => {
       CYBER_CHECK_MODE: "enforce",
       CYBER_CHECK_URL: "http://127.0.0.1:8090",
       CYBER_CHECK_GATEWAY_TOKEN: "gateway-token",
-      CYBER_CHECK_GATEWAY_ID: "cch-forwarder-test",
       CYBER_CHECK_ZSTD_MIN_BYTES: 256 * 1024,
     });
   });
@@ -262,7 +261,7 @@ describe("ProxyForwarder cyber-check admission boundary", () => {
     const error = await forward(session, provider).catch((value: unknown) => value);
 
     expect(error).toBeInstanceOf(RequestReviewError);
-    expect(error).toMatchObject({ code: "cyber_check_denied", statusCode: 403 });
+    expect(error).toMatchObject({ code: "gateway_cyber_restricted", statusCode: 403 });
     expect(upstreamFetch).not.toHaveBeenCalled();
   });
 

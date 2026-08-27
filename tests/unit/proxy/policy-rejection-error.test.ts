@@ -100,7 +100,7 @@ describe("policy rejection error categorization", () => {
   });
 
   it("classifies local request-review outcomes as non-retryable without impersonating cyber_policy", async () => {
-    const error = RequestReviewError.denied();
+    const error = RequestReviewError.restricted();
 
     expect(await categorizeErrorAsync(error)).toBe(ErrorCategory.NON_RETRYABLE_CLIENT_ERROR);
     expect(isPolicyRejectionError(error)).toBe(false);

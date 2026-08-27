@@ -2,6 +2,7 @@ import { promisify } from "node:util";
 import { constants as zlibConstants, zstdCompress } from "node:zlib";
 import type { CyberCheckConfig } from "./config";
 import type {
+  ProviderContainment,
   ProviderEventEnvelope,
   RequestOutcomeEnvelope,
   ReviewFinalDecision,
@@ -101,7 +102,7 @@ export async function reportProviderEvent(
   config: CyberCheckConfig,
   event: ProviderEventEnvelope,
   options: RequestOptions = {}
-): Promise<void> {
+): Promise<ProviderContainment> {
   const response = await (options.fetchImpl ?? globalThis.fetch)(
     new URL("/v1/provider-events", config.baseUrl),
     {
@@ -111,6 +112,23 @@ export async function reportProviderEvent(
         "content-type": "application/json",
       },
       body: JSON.stringify(event),
+      signal: boundedSignal(options.signal, EVENT_REPORT_TIMEOUT_MS),
+    }
+  );
+  if (response.status !== 200) throw await responseError(response);
+  return parseProviderContainment(await response.json());
+}
+
+export async function reinstatePrincipal(
+  config: CyberCheckConfig,
+  principalId: string,
+  options: RequestOptions = {}
+): Promise<void> {
+  const response = await (options.fetchImpl ?? globalThis.fetch)(
+    new URL(`/v1/principals/${encodeURIComponent(principalId)}/reinstatement`, config.baseUrl),
+    {
+      method: "POST",
+      headers: { authorization: `Bearer ${config.gatewayToken}` },
       signal: boundedSignal(options.signal, EVENT_REPORT_TIMEOUT_MS),
     }
   );
@@ -184,21 +202,73 @@ function parseFinalDecision(object: Record<string, unknown>): ReviewFinalDecisio
     !isOneOf(object.decision, ["allow", "deny"]) ||
     !isOneOf(object.predicted_decision, ["allow", "deny"]) ||
     !isOneOf(object.enforcement_mode, ["shadow", "enforce"]) ||
-    !isOneOf(object.reason, ["fast_path", "active_restriction", "reviewer_assessment"]) ||
+    !isOneOf(object.reason, [
+      "fast_path",
+      "active_restriction",
+      "reviewer_assessment",
+      "reviewer_unavailable",
+    ]) ||
     !isOneOf(object.coverage, ["complete", "partial"]) ||
     typeof object.policy_version !== "string" ||
     typeof object.reviewer_version !== "string"
   ) {
     throw new CyberCheckClientError("review service returned an invalid final decision");
   }
+  const reviewDisposition =
+    object.review_disposition === undefined
+      ? undefined
+      : requireOneOf(object.review_disposition, ["allowed", "restricted", "uncertain"]);
+  const restriction =
+    object.restriction === undefined ? undefined : parseRestriction(object.restriction);
   return {
     decision: object.decision,
     predicted_decision: object.predicted_decision,
     enforcement_mode: object.enforcement_mode,
     reason: object.reason,
+    ...(reviewDisposition ? { review_disposition: reviewDisposition } : {}),
+    ...(restriction ? { restriction } : {}),
     coverage: object.coverage,
     policy_version: object.policy_version,
     reviewer_version: object.reviewer_version,
+  };
+}
+
+function parseRestriction(value: unknown): NonNullable<ReviewFinalDecision["restriction"]> {
+  const object = requireRecord(value, "active restriction");
+  const scope = requireOneOf(object.scope, ["session", "client_instance", "principal"]);
+  if (typeof object.subject_id !== "string" || typeof object.reason !== "string") {
+    throw new CyberCheckClientError("review service returned an invalid active restriction");
+  }
+  if (
+    object.expires_at_ms !== undefined &&
+    (!Number.isSafeInteger(object.expires_at_ms) || Number(object.expires_at_ms) < 0)
+  ) {
+    throw new CyberCheckClientError("review service returned an invalid restriction expiry");
+  }
+  return {
+    scope,
+    subject_id: object.subject_id,
+    reason: object.reason,
+    ...(object.expires_at_ms === undefined ? {} : { expires_at_ms: Number(object.expires_at_ms) }),
+  };
+}
+
+function parseProviderContainment(payload: unknown): ProviderContainment {
+  const object = requireRecord(payload, "provider containment response");
+  if (
+    !Number.isSafeInteger(object.principal_strikes) ||
+    Number(object.principal_strikes) < 0 ||
+    typeof object.session_restricted !== "boolean" ||
+    typeof object.client_instance_restricted !== "boolean" ||
+    typeof object.principal_restricted !== "boolean"
+  ) {
+    throw new CyberCheckClientError("review service returned invalid provider containment");
+  }
+  return {
+    principal_strikes: Number(object.principal_strikes),
+    session_restricted: object.session_restricted,
+    client_instance_restricted: object.client_instance_restricted,
+    principal_restricted: object.principal_restricted,
   };
 }
 
@@ -237,4 +307,11 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 
 function isOneOf<const T extends string>(value: unknown, values: readonly T[]): value is T {
   return typeof value === "string" && values.includes(value as T);
+}
+
+function requireOneOf<const T extends string>(value: unknown, values: readonly T[]): T {
+  if (!isOneOf(value, values)) {
+    throw new CyberCheckClientError("review service returned an invalid enum value");
+  }
+  return value;
 }

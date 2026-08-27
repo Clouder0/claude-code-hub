@@ -46,10 +46,21 @@ import {
   containPolicyRejection,
   CYBER_POLICY_DISABLE_THRESHOLD,
   CYBER_POLICY_STRIKE_WINDOW_MS,
+  disableUserForCyberCheckContainment,
   findSessionBlockPolicy,
   maybeDisableUserForCyberPolicy,
   POLICY_SESSION_BLOCK_TTL_MS,
 } from "./policy-containment";
+
+function sqlText(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (Array.isArray(value)) return value.map(sqlText).join("");
+  if (!value || typeof value !== "object") return "";
+  const node = value as { queryChunks?: unknown; value?: unknown };
+  if (node.queryChunks !== undefined) return sqlText(node.queryChunks);
+  if (node.value !== undefined) return sqlText(node.value);
+  return "";
+}
 
 describe("policy containment", () => {
   beforeEach(() => {
@@ -128,6 +139,8 @@ describe("policy containment", () => {
       mocks.dbExecute.mockResolvedValueOnce([{ id: 7 }]);
       mocks.invalidateCachedUser.mockResolvedValueOnce(undefined);
       await expect(maybeDisableUserForCyberPolicy(7)).resolves.toBe(true);
+      expect(sqlText(mocks.dbExecute.mock.calls[0]?.[0])).toContain("created_at > coalesce");
+      expect(sqlText(mocks.dbExecute.mock.calls[0]?.[0])).toContain("cyber_policy_reset_at");
       expect(mocks.invalidateCachedUser).toHaveBeenCalledWith(7);
       expect(mocks.warn).toHaveBeenCalledWith(
         "[CyberContainment] User auto-disabled after cyber policy strikes",
@@ -151,6 +164,25 @@ describe("policy containment", () => {
     it("keeps the cyber V1 strike constants unchanged", () => {
       expect(CYBER_POLICY_STRIKE_WINDOW_MS).toBe(30 * 24 * 60 * 60 * 1000);
       expect(CYBER_POLICY_DISABLE_THRESHOLD).toBe(2);
+    });
+  });
+
+  describe("authoritative Cyber Check principal containment", () => {
+    it("disables the complete user immediately and invalidates authentication", async () => {
+      mocks.dbExecute.mockResolvedValueOnce([{ id: 7 }]);
+
+      await expect(disableUserForCyberCheckContainment(7)).resolves.toBe(true);
+
+      expect(mocks.invalidateCachedUser).toHaveBeenCalledWith(7);
+      expect(sqlText(mocks.dbExecute.mock.calls[0]?.[0])).toContain("WHERE id =");
+      expect(sqlText(mocks.dbExecute.mock.calls[0]?.[0])).toContain("deleted_at IS NULL");
+    });
+
+    it("is idempotent when the user is already disabled", async () => {
+      mocks.dbExecute.mockResolvedValueOnce([]);
+
+      await expect(disableUserForCyberCheckContainment(7)).resolves.toBe(false);
+      expect(mocks.invalidateCachedUser).not.toHaveBeenCalled();
     });
   });
 

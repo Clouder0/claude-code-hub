@@ -5,7 +5,6 @@ export interface CyberCheckConfig {
   mode: Exclude<CyberCheckMode, "off">;
   baseUrl: URL;
   gatewayToken: string;
-  gatewayId: string;
   zstdMinBytes: number;
 }
 
@@ -14,7 +13,6 @@ type CyberCheckEnv = Pick<
   | "CYBER_CHECK_MODE"
   | "CYBER_CHECK_URL"
   | "CYBER_CHECK_GATEWAY_TOKEN"
-  | "CYBER_CHECK_GATEWAY_ID"
   | "CYBER_CHECK_ZSTD_MIN_BYTES"
 >;
 
@@ -61,7 +59,6 @@ export function resolveCyberCheckConfig(env: CyberCheckEnv): CyberCheckConfig | 
     mode: env.CYBER_CHECK_MODE,
     baseUrl,
     gatewayToken: env.CYBER_CHECK_GATEWAY_TOKEN,
-    gatewayId: env.CYBER_CHECK_GATEWAY_ID,
     zstdMinBytes: env.CYBER_CHECK_ZSTD_MIN_BYTES,
   };
 }

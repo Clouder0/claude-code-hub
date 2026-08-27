@@ -297,12 +297,15 @@ describe("ProxyErrorHandler.handle - upstream message passthrough", () => {
       },
     });
 
-    const response = await ProxyErrorHandler.handle(createSession(), RequestReviewError.denied());
+    const response = await ProxyErrorHandler.handle(
+      createSession(),
+      RequestReviewError.restricted()
+    );
     const body = await response.json();
 
     expect(response.status).toBe(403);
-    expect(body.error.code).toBe("cyber_check_denied");
-    expect(body.error.message).toContain("gateway request review policy");
+    expect(body.error.code).toBe("gateway_cyber_restricted");
+    expect(body.error.message).toContain("gateway cyber policy");
     expect(body.error.code).not.toBe("cyber_policy");
     expect(mocks.getErrorOverrideAsync).not.toHaveBeenCalled();
   });

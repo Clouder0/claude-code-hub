@@ -74,6 +74,8 @@ export const users = pgTable('users', {
 
   // User status and expiry management
   isEnabled: boolean('is_enabled').notNull().default(true),
+  // Manual reinstatement watermark: older cyber_policy events remain auditable but stop counting.
+  cyberPolicyResetAt: timestamp('cyber_policy_reset_at', { withTimezone: true }),
   expiresAt: timestamp('expires_at', { withTimezone: true }),
 
   // Allowed clients (CLI/IDE restrictions)

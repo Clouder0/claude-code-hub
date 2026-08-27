@@ -36,8 +36,12 @@
 
   "INTERNAL_ERROR": "系統內部錯誤，請稍後重試",
   "DATABASE_ERROR": "資料庫錯誤",
-  "CYBER_CHECK_DENIED": "此工作階段已被閘道請求審查政策暫時限制。",
+  "GATEWAY_CYBER_REQUEST_RESTRICTED": "此請求已被閘道網路安全政策攔截。",
+  "GATEWAY_CYBER_SESSION_RESTRICTED": "此工作階段已被閘道網路安全政策暫時限制。",
+  "GATEWAY_CYBER_CLIENT_RESTRICTED": "此用戶端執行個體已被閘道網路安全政策限制，請聯絡管理員。",
+  "GATEWAY_CYBER_PRINCIPAL_RESTRICTED": "此帳戶已被閘道網路安全政策限制，請聯絡管理員。",
   "CYBER_CHECK_UNAVAILABLE": "閘道請求審查服務暫時無法使用。",
+  "CYBER_CHECK_CAPACITY": "閘道請求審查服務目前沒有可用的稽核儲存容量。",
   "INVALID_NORMALIZED_BODY": "規範化後的請求體無法序列化",
   "NOT_FOUND": "資源不存在",
   "OPERATION_FAILED": "操作失敗",

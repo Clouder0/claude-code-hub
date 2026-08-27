@@ -3,6 +3,7 @@ import { zstdDecompressSync } from "node:zlib";
 import {
   CyberCheckClientError,
   getReviewJob,
+  reinstatePrincipal,
   reportProviderEvent,
   reportRequestOutcome,
   submitReview,
@@ -18,17 +19,15 @@ const config = {
   mode: "shadow" as const,
   baseUrl: new URL("http://127.0.0.1:8090"),
   gatewayToken: "gateway-test-token",
-  gatewayId: "cch-test",
   zstdMinBytes: 256 * 1024,
 };
 
 const packet: ReviewRequestEnvelope = {
   schema_version: "cyber-check.request-review.v1",
   identity: {
-    gateway: "cch-test",
     request_id: "42:digest",
     principal_id: "7",
-    credential_id: "9",
+    client_instance_id: "installation-1",
     session_id: "session-client-test",
     sequence: 1,
   },
@@ -189,10 +188,27 @@ describe("cyber-check client", () => {
   });
 
   it("reports an authoritative provider event to its dedicated resource", async () => {
-    const fetchMock = vi.fn(async () => new Response(null, { status: 204 }));
+    const fetchMock = vi.fn(async () =>
+      jsonResponse(
+        {
+          principal_strikes: 1,
+          session_restricted: true,
+          client_instance_restricted: true,
+          principal_restricted: false,
+        },
+        200
+      )
+    );
 
-    await reportProviderEvent(config, providerEvent, {
+    const containment = await reportProviderEvent(config, providerEvent, {
       fetchImpl: fetchMock as unknown as typeof fetch,
+    });
+
+    expect(containment).toEqual({
+      principal_strikes: 1,
+      session_restricted: true,
+      client_instance_restricted: true,
+      principal_restricted: false,
     });
 
     const [url, init] = fetchMock.mock.calls[0] ?? [];
@@ -201,6 +217,19 @@ describe("cyber-check client", () => {
     expect(new Headers(init?.headers).get("authorization")).toBe("Bearer gateway-test-token");
     expect(new Headers(init?.headers).get("content-type")).toBe("application/json");
     expect(JSON.parse(String(init?.body))).toEqual(providerEvent);
+  });
+
+  it("reinstates a principal through the explicit administration resource", async () => {
+    const fetchMock = vi.fn(async () => new Response(null, { status: 204 }));
+
+    await reinstatePrincipal(config, "principal/7", {
+      fetchImpl: fetchMock as unknown as typeof fetch,
+    });
+
+    const [url, init] = fetchMock.mock.calls[0] ?? [];
+    expect(String(url)).toBe("http://127.0.0.1:8090/v1/principals/principal%2F7/reinstatement");
+    expect(init?.method).toBe("POST");
+    expect(new Headers(init?.headers).get("authorization")).toBe("Bearer gateway-test-token");
   });
 
   it("reports a clean terminal outcome to its dedicated resource", async () => {
@@ -247,7 +276,6 @@ describe("cyber-check gateway configuration", () => {
         CYBER_CHECK_MODE: "off",
         CYBER_CHECK_URL: undefined,
         CYBER_CHECK_GATEWAY_TOKEN: undefined,
-        CYBER_CHECK_GATEWAY_ID: "cch",
         CYBER_CHECK_ZSTD_MIN_BYTES: 256 * 1024,
       })
     ).toBeNull();
@@ -257,7 +285,6 @@ describe("cyber-check gateway configuration", () => {
         CYBER_CHECK_MODE: "enforce",
         CYBER_CHECK_URL: undefined,
         CYBER_CHECK_GATEWAY_TOKEN: undefined,
-        CYBER_CHECK_GATEWAY_ID: "cch",
         CYBER_CHECK_ZSTD_MIN_BYTES: 256 * 1024,
       })
     ).toThrow("CYBER_CHECK_URL");
@@ -269,17 +296,15 @@ describe("cyber-check gateway configuration", () => {
         CYBER_CHECK_MODE: "shadow",
         CYBER_CHECK_URL: "http://127.0.0.1:8090",
         CYBER_CHECK_GATEWAY_TOKEN: "token",
-        CYBER_CHECK_GATEWAY_ID: "cch",
         CYBER_CHECK_ZSTD_MIN_BYTES: 256 * 1024,
       })
-    ).toMatchObject({ mode: "shadow", gatewayId: "cch" });
+    ).toMatchObject({ mode: "shadow" });
 
     expect(() =>
       resolveCyberCheckConfig({
         CYBER_CHECK_MODE: "shadow",
         CYBER_CHECK_URL: "http://review.internal.example",
         CYBER_CHECK_GATEWAY_TOKEN: "token",
-        CYBER_CHECK_GATEWAY_ID: "cch",
         CYBER_CHECK_ZSTD_MIN_BYTES: 256 * 1024,
       })
     ).toThrow("must use HTTPS");
@@ -291,7 +316,6 @@ describe("cyber-check gateway configuration", () => {
         CYBER_CHECK_MODE: "shadow",
         CYBER_CHECK_URL: "https://review.internal.example",
         CYBER_CHECK_GATEWAY_TOKEN: undefined,
-        CYBER_CHECK_GATEWAY_ID: "cch",
         CYBER_CHECK_ZSTD_MIN_BYTES: 256 * 1024,
       })
     ).toThrow("CYBER_CHECK_GATEWAY_TOKEN");
@@ -306,7 +330,6 @@ describe("cyber-check gateway configuration", () => {
           CYBER_CHECK_MODE: "shadow",
           CYBER_CHECK_URL: url,
           CYBER_CHECK_GATEWAY_TOKEN: "token",
-          CYBER_CHECK_GATEWAY_ID: "cch",
           CYBER_CHECK_ZSTD_MIN_BYTES: 256 * 1024,
         })
       ).toThrow();

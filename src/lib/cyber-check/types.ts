@@ -4,11 +4,24 @@ export type ReviewDecision = "allow" | "deny";
 
 export type ReviewCoveragePosture = "complete" | "partial";
 
+export type ReviewDisposition = "allowed" | "restricted" | "uncertain";
+
+export type RestrictionScope = "session" | "client_instance" | "principal";
+
+export interface ActiveRestriction {
+  scope: RestrictionScope;
+  subject_id: string;
+  reason: string;
+  expires_at_ms?: number;
+}
+
 export interface ReviewFinalDecision {
   decision: ReviewDecision;
   predicted_decision: ReviewDecision;
   enforcement_mode: "shadow" | "enforce";
-  reason: "fast_path" | "active_restriction" | "reviewer_assessment";
+  reason: "fast_path" | "active_restriction" | "reviewer_assessment" | "reviewer_unavailable";
+  review_disposition?: ReviewDisposition;
+  restriction?: ActiveRestriction;
   coverage: ReviewCoveragePosture;
   policy_version: string;
   reviewer_version: string;
@@ -38,6 +51,13 @@ export interface ProviderEventEnvelope {
   };
 }
 
+export interface ProviderContainment {
+  principal_strikes: number;
+  session_restricted: boolean;
+  client_instance_restricted: boolean;
+  principal_restricted: boolean;
+}
+
 export interface RequestOutcomeEnvelope {
   schema_version: "cyber-check.request-outcome.v1";
   identity: ReviewRequestEnvelope["identity"];
@@ -47,10 +67,9 @@ export interface RequestOutcomeEnvelope {
 export interface ReviewRequestEnvelope {
   schema_version: "cyber-check.request-review.v1";
   identity: {
-    gateway: string;
     request_id: string;
     principal_id: string;
-    credential_id: string;
+    client_instance_id?: string;
     session_id: string;
     sequence: number;
   };

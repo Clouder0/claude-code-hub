@@ -10,7 +10,7 @@ import type { Provider } from "@/types/provider";
 import { type CyberCheckClientError, getReviewJob, submitReview } from "./client";
 import { type CyberCheckConfig, resolveCyberCheckConfig } from "./config";
 import { projectFinalResponsesRequest } from "./projection";
-import type { ReviewSubmission } from "./types";
+import type { ActiveRestriction, ReviewSubmission } from "./types";
 
 const JOB_POLL_INTERVAL_MS = 1_000;
 const JOB_POLL_LIFETIME_MS = 30_000;
@@ -57,13 +57,10 @@ export async function admitFinalResponsesRequest({
     const stableIdentity = session.getStableRequestIdentity?.();
     const requestId = stableIdentity?.requestId ?? context?.id;
     const principalId = stableIdentity?.principalId ?? context?.user.id;
-    const credentialId = stableIdentity?.credentialId ?? context?.key.id;
     const packet = projectFinalResponsesRequest({
       identity: {
-        gateway: config.gatewayId,
         requestId: requestId == null ? "" : String(requestId),
         principalId: principalId == null ? "" : String(principalId),
-        credentialId: credentialId == null ? "" : String(credentialId),
         sessionId: session.sessionId ?? "",
         sequence: session.requestSequence,
       },
@@ -78,6 +75,7 @@ export async function admitFinalResponsesRequest({
   } catch (error) {
     if (session.clientAbortSignal?.aborted) throw error;
     logAdmissionFailure("submission", error, session, provider.id);
+    if (isCapacityFailure(error)) throw await localizedRequestReviewError("capacity");
     if (config.mode === "enforce") throw await localizedRequestReviewError("unavailable");
     return;
   }
@@ -145,8 +143,8 @@ export async function admitFinalResponsesRequest({
     mode: config.mode,
   });
 
-  if (submission.decision === "deny" && config.mode === "enforce") {
-    throw await localizedRequestReviewError("denied");
+  if (submission.decision === "deny") {
+    throw await localizedRequestReviewError("restricted", submission.restriction);
   }
 }
 
@@ -213,17 +211,46 @@ function clientErrorContext(error: unknown): Record<string, unknown> {
 }
 
 async function localizedRequestReviewError(
-  kind: "denied" | "unavailable"
+  kind: "restricted" | "unavailable" | "capacity",
+  restriction?: ActiveRestriction
 ): Promise<RequestReviewError> {
   try {
     const { getLocale } = await import("next-intl/server");
-    const code =
-      kind === "denied" ? ERROR_CODES.CYBER_CHECK_DENIED : ERROR_CODES.CYBER_CHECK_UNAVAILABLE;
-    const message = await getErrorMessageServer(await getLocale(), code);
-    return kind === "denied"
-      ? RequestReviewError.denied(message)
-      : RequestReviewError.unavailable(message);
+    const code = errorMessageCode(kind, restriction);
+    let message = await getErrorMessageServer(await getLocale(), code);
+    if (restriction?.scope === "session" && restriction.expires_at_ms !== undefined) {
+      message = `${message} Retry after ${new Date(restriction.expires_at_ms).toISOString()}.`;
+    }
+    if (kind === "restricted") return RequestReviewError.restricted(message);
+    if (kind === "capacity") return RequestReviewError.capacity(message);
+    return RequestReviewError.unavailable(message);
   } catch {
-    return kind === "denied" ? RequestReviewError.denied() : RequestReviewError.unavailable();
+    if (kind === "restricted") return RequestReviewError.restricted();
+    if (kind === "capacity") return RequestReviewError.capacity();
+    return RequestReviewError.unavailable();
   }
+}
+
+function errorMessageCode(
+  kind: "restricted" | "unavailable" | "capacity",
+  restriction?: ActiveRestriction
+) {
+  if (kind === "unavailable") return ERROR_CODES.CYBER_CHECK_UNAVAILABLE;
+  if (kind === "capacity") return ERROR_CODES.CYBER_CHECK_CAPACITY;
+  switch (restriction?.scope) {
+    case "session":
+      return ERROR_CODES.GATEWAY_CYBER_SESSION_RESTRICTED;
+    case "client_instance":
+      return ERROR_CODES.GATEWAY_CYBER_CLIENT_RESTRICTED;
+    case "principal":
+      return ERROR_CODES.GATEWAY_CYBER_PRINCIPAL_RESTRICTED;
+    default:
+      return ERROR_CODES.GATEWAY_CYBER_REQUEST_RESTRICTED;
+  }
+}
+
+function isCapacityFailure(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  const serviceCode = (error as Partial<CyberCheckClientError>).serviceCode;
+  return serviceCode === "cyber_check_capacity" || serviceCode === "review_queue_full";
 }

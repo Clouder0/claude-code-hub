@@ -45,10 +45,8 @@ const KNOWN_TOP_LEVEL_FIELDS = new Set([
 const IMAGE_DETAILS = new Set(["auto", "low", "high", "original"]);
 
 export interface ReviewProjectionIdentity {
-  gateway: string;
   requestId: string;
   principalId: string;
-  credentialId: string;
   sessionId: string;
   sequence: number;
 }
@@ -90,10 +88,8 @@ export function projectFinalResponsesRequest({
   }
 
   for (const [name, value] of Object.entries({
-    gateway: identity.gateway,
     requestId: identity.requestId,
     principalId: identity.principalId,
-    credentialId: identity.credentialId,
     sessionId: identity.sessionId,
   })) {
     if (!value) {
@@ -135,13 +131,13 @@ export function projectFinalResponsesRequest({
   if (message.prompt !== undefined && message.prompt !== null) references.push("prompt_template");
 
   const bodySha256 = createHash("sha256").update(bodyString).digest("hex");
+  const clientInstanceId = extractClientInstanceId(message.client_metadata);
   return {
     schema_version: "cyber-check.request-review.v1",
     identity: {
-      gateway: identity.gateway,
       request_id: `${identity.requestId}:${bodySha256}`,
       principal_id: identity.principalId,
-      credential_id: identity.credentialId,
+      ...(clientInstanceId ? { client_instance_id: clientInstanceId } : {}),
       session_id: identity.sessionId,
       sequence: identity.sequence,
     },
@@ -159,6 +155,20 @@ export function projectFinalResponsesRequest({
     capabilities: state.capabilities,
     coverage: { notices: state.notices },
   };
+}
+
+function extractClientInstanceId(clientMetadata: unknown): string | undefined {
+  const value = asRecord(clientMetadata)?.["x-codex-installation-id"];
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    value.includes("\r") ||
+    value.includes("\n") ||
+    Buffer.byteLength(value) > 256
+  ) {
+    return undefined;
+  }
+  return value;
 }
 
 function projectInput(input: unknown, state: ProjectionState): void {

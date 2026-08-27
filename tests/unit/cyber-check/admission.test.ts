@@ -31,6 +31,7 @@ const message = {
       content: [{ type: "input_text", text: "Add a bounded parser test." }],
     },
   ],
+  client_metadata: { "x-codex-installation-id": "installation-admission-test" },
   stream: true,
 };
 
@@ -61,19 +62,34 @@ function env(mode: "off" | "shadow" | "enforce") {
     CYBER_CHECK_MODE: mode,
     CYBER_CHECK_URL: "http://127.0.0.1:8090",
     CYBER_CHECK_GATEWAY_TOKEN: "gateway-token",
-    CYBER_CHECK_GATEWAY_ID: "cch-test",
     CYBER_CHECK_ZSTD_MIN_BYTES: 256 * 1024,
   };
 }
 
-function finalResponse(decision: "allow" | "deny"): Response {
+function finalResponse(
+  decision: "allow" | "deny",
+  options: {
+    predictedDecision?: "allow" | "deny";
+    enforcementMode?: "shadow" | "enforce";
+    reason?: "fast_path" | "active_restriction" | "reviewer_assessment";
+    restriction?: {
+      scope: "session" | "client_instance" | "principal";
+      subject_id: string;
+      reason: string;
+      expires_at_ms?: number;
+    };
+    reviewDisposition?: "allowed" | "restricted" | "uncertain";
+  } = {}
+): Response {
   return new Response(
     JSON.stringify({
       status: "completed",
       decision,
-      predicted_decision: decision,
-      enforcement_mode: "enforce",
-      reason: "reviewer_assessment",
+      predicted_decision: options.predictedDecision ?? decision,
+      enforcement_mode: options.enforcementMode ?? "enforce",
+      reason: options.reason ?? "reviewer_assessment",
+      ...(options.restriction ? { restriction: options.restriction } : {}),
+      ...(options.reviewDisposition ? { review_disposition: options.reviewDisposition } : {}),
       coverage: "complete",
       policy_version: "policy-v1",
       reviewer_version: "reviewer-v1",
@@ -164,8 +180,14 @@ describe("CCH cyber-check admission seam", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it("sends the final body in shadow mode but does not enforce a denial", async () => {
-    const fetchMock = vi.fn(async () => finalResponse("deny"));
+  it("sends the final body and honors a shadow prediction without blocking", async () => {
+    const fetchMock = vi.fn(async () =>
+      finalResponse("allow", {
+        predictedDecision: "deny",
+        enforcementMode: "shadow",
+        reviewDisposition: "restricted",
+      })
+    );
     vi.stubGlobal("fetch", fetchMock);
     const reviewSession = session();
 
@@ -182,9 +204,8 @@ describe("CCH cyber-check admission seam", () => {
     expect(fetchMock).toHaveBeenCalledOnce();
     const packet = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body));
     expect(packet.identity).toMatchObject({
-      gateway: "cch-test",
       principal_id: "7",
-      credential_id: "9",
+      client_instance_id: "installation-admission-test",
       session_id: "session-admission-test",
       sequence: 3,
     });
@@ -202,7 +223,6 @@ describe("CCH cyber-check admission seam", () => {
     attempt.getStableRequestIdentity = () => ({
       requestId: 42,
       principalId: 7,
-      credentialId: 9,
     });
 
     await admitFinalResponsesRequest({
@@ -216,7 +236,7 @@ describe("CCH cyber-check admission seam", () => {
     const packet = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body));
     expect(packet.identity).toMatchObject({
       principal_id: "7",
-      credential_id: "9",
+      client_instance_id: "installation-admission-test",
       session_id: "session-admission-test",
       sequence: 3,
     });
@@ -239,7 +259,58 @@ describe("CCH cyber-check admission seam", () => {
     }).catch((value: unknown) => value);
 
     expect(error).toBeInstanceOf(RequestReviewError);
-    expect(error).toMatchObject({ code: "cyber_check_denied", statusCode: 403 });
+    expect(error).toMatchObject({ code: "gateway_cyber_restricted", statusCode: 403 });
+  });
+
+  it("enforces an authoritative active client restriction even while local review is shadowed", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        finalResponse("deny", {
+          enforcementMode: "shadow",
+          reason: "active_restriction",
+          restriction: {
+            scope: "client_instance",
+            subject_id: "installation-admission-test",
+            reason: "provider_cyber_policy",
+          },
+        })
+      )
+    );
+
+    const error = await admitFinalResponsesRequest({
+      session: session(),
+      provider: { id: 1, providerType: "codex" },
+      requestPath: "/v1/responses",
+      message,
+      bodyString: JSON.stringify(message),
+    }).catch((value: unknown) => value);
+
+    expect(error).toMatchObject({ code: "gateway_cyber_restricted", statusCode: 403 });
+  });
+
+  it("fails closed when evidence or review-queue capacity cannot create an admission", async () => {
+    for (const serviceCode of ["cyber_check_capacity", "review_queue_full"]) {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () =>
+          Response.json(
+            { error: { code: serviceCode, message: "capacity exhausted" } },
+            { status: 503 }
+          )
+        )
+      );
+
+      const error = await admitFinalResponsesRequest({
+        session: session(),
+        provider: { id: 1, providerType: "codex" },
+        requestPath: "/v1/responses",
+        message,
+        bodyString: JSON.stringify(message),
+      }).catch((value: unknown) => value);
+
+      expect(error).toMatchObject({ code: "cyber_check_capacity", statusCode: 503 });
+    }
   });
 
   it("fails open in shadow and closed in enforce when the review service is unavailable", async () => {

@@ -6,7 +6,6 @@ describe("EnvSchema - cyber-check", () => {
     const parsed = EnvSchema.parse({ NODE_ENV: "test" });
 
     expect(parsed.CYBER_CHECK_MODE).toBe("off");
-    expect(parsed.CYBER_CHECK_GATEWAY_ID).toBe("cch");
     expect(parsed.CYBER_CHECK_URL).toBeUndefined();
     expect(parsed.CYBER_CHECK_GATEWAY_TOKEN).toBeUndefined();
     expect(parsed.CYBER_CHECK_ZSTD_MIN_BYTES).toBe(256 * 1024);
@@ -18,7 +17,6 @@ describe("EnvSchema - cyber-check", () => {
       CYBER_CHECK_MODE: "shadow",
       CYBER_CHECK_URL: "http://127.0.0.1:8090",
       CYBER_CHECK_GATEWAY_TOKEN: "token",
-      CYBER_CHECK_GATEWAY_ID: "cch-staging",
       CYBER_CHECK_ZSTD_MIN_BYTES: "1048576",
     });
 
@@ -26,14 +24,11 @@ describe("EnvSchema - cyber-check", () => {
       CYBER_CHECK_MODE: "shadow",
       CYBER_CHECK_URL: "http://127.0.0.1:8090",
       CYBER_CHECK_GATEWAY_TOKEN: "token",
-      CYBER_CHECK_GATEWAY_ID: "cch-staging",
       CYBER_CHECK_ZSTD_MIN_BYTES: 1024 * 1024,
     });
   });
 
-  it("rejects multiline gateway identities", () => {
-    expect(() =>
-      EnvSchema.parse({ NODE_ENV: "test", CYBER_CHECK_GATEWAY_ID: "cch\nstaging" })
-    ).toThrow();
+  it("rejects invalid review transport thresholds", () => {
+    expect(() => EnvSchema.parse({ NODE_ENV: "test", CYBER_CHECK_ZSTD_MIN_BYTES: "-1" })).toThrow();
   });
 });

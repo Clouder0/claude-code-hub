@@ -186,12 +186,6 @@ export const EnvSchema = z.object({
     (value) => (typeof value === "string" && value.length === 0 ? undefined : value),
     z.string().min(1)
   ),
-  CYBER_CHECK_GATEWAY_ID: z
-    .string()
-    .min(1)
-    .max(256)
-    .regex(/^[^\r\n]+$/)
-    .default("cch"),
   CYBER_CHECK_ZSTD_MIN_BYTES: z.coerce
     .number()
     .int()

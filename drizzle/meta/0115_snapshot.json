@@ -1,6 +1,6 @@
 {
-  "id": "d8bb535f-6cd9-4361-a578-e5f390c015b8",
-  "prevId": "d7691073-1769-4637-b39a-18c1f935c35b",
+  "id": "1de568af-bcce-4969-aedc-bee6176188db",
+  "prevId": "d8bb535f-6cd9-4361-a578-e5f390c015b8",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -3336,11 +3336,17 @@
           "primaryKey": true,
           "notNull": true
         },
+        "user_id": {
+          "name": "user_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
         "message_request_id": {
           "name": "message_request_id",
           "type": "integer",
           "primaryKey": false,
-          "notNull": true
+          "notNull": false
         },
         "type": {
           "name": "type",
@@ -3392,9 +3398,49 @@
           "concurrently": false,
           "method": "btree",
           "with": {}
+        },
+        "idx_security_event_user_type_created_at": {
+          "name": "idx_security_event_user_type_created_at",
+          "columns": [
+            {
+              "expression": "user_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "type",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "created_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         }
       },
       "foreignKeys": {
+        "security_event_user_id_users_id_fk": {
+          "name": "security_event_user_id_users_id_fk",
+          "tableFrom": "security_event",
+          "tableTo": "users",
+          "columnsFrom": [
+            "user_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
         "security_event_message_request_id_message_request_id_fk": {
           "name": "security_event_message_request_id_message_request_id_fk",
           "tableFrom": "security_event",
@@ -3405,7 +3451,7 @@
           "columnsTo": [
             "id"
           ],
-          "onDelete": "cascade",
+          "onDelete": "set null",
           "onUpdate": "no action"
         }
       },
@@ -4516,6 +4562,12 @@
           "primaryKey": false,
           "notNull": true,
           "default": true
+        },
+        "cyber_policy_reset_at": {
+          "name": "cyber_policy_reset_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
         },
         "expires_at": {
           "name": "expires_at",

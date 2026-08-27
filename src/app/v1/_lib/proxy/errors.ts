@@ -558,7 +558,10 @@ export class ProxyError extends Error {
   }
 }
 
-export type RequestReviewErrorCode = "cyber_check_denied" | "cyber_check_unavailable";
+export type RequestReviewErrorCode =
+  | "gateway_cyber_restricted"
+  | "cyber_check_unavailable"
+  | "cyber_check_capacity";
 
 /** A local request-admission outcome. It is never attributed to an upstream provider. */
 export class RequestReviewError extends ProxyError {
@@ -571,16 +574,22 @@ export class RequestReviewError extends ProxyError {
     this.name = "RequestReviewError";
   }
 
-  static denied(
-    message = "This session is temporarily restricted by the gateway request review policy."
+  static restricted(
+    message = "This request is restricted by the gateway cyber policy."
   ): RequestReviewError {
-    return new RequestReviewError("cyber_check_denied", 403, message);
+    return new RequestReviewError("gateway_cyber_restricted", 403, message);
   }
 
   static unavailable(
     message = "The gateway request review service is temporarily unavailable."
   ): RequestReviewError {
     return new RequestReviewError("cyber_check_unavailable", 503, message);
+  }
+
+  static capacity(
+    message = "The gateway cyber review service has no evidence capacity available."
+  ): RequestReviewError {
+    return new RequestReviewError("cyber_check_capacity", 503, message);
   }
 }
 

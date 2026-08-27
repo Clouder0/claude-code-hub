@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
+  disableUserForCyberCheckContainment: vi.fn(async () => true),
   getEnvConfig: vi.fn(),
   logger: {
     debug: vi.fn(),
@@ -12,16 +13,18 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("@/lib/config/env.schema", () => ({ getEnvConfig: mocks.getEnvConfig }));
 vi.mock("@/lib/logger", () => ({ logger: mocks.logger }));
+vi.mock("@/lib/security/policy-containment", () => ({
+  disableUserForCyberCheckContainment: mocks.disableUserForCyberCheckContainment,
+}));
 
 import type { CyberCheckAdmissionCorrelation } from "@/app/v1/_lib/proxy/session";
 import { reportProviderPolicyEventBestEffort } from "@/lib/cyber-check/provider-event";
 
 const correlation: CyberCheckAdmissionCorrelation = {
   identity: {
-    gateway: "cch-test",
     request_id: "42:digest",
     principal_id: "7",
-    credential_id: "9",
+    client_instance_id: "installation-1",
     session_id: "session-provider-event-test",
     sequence: 3,
   },
@@ -33,7 +36,6 @@ function env(mode: "off" | "shadow" | "enforce") {
     CYBER_CHECK_MODE: mode,
     CYBER_CHECK_URL: "http://127.0.0.1:8090",
     CYBER_CHECK_GATEWAY_TOKEN: "gateway-token",
-    CYBER_CHECK_GATEWAY_ID: "cch-test",
     CYBER_CHECK_ZSTD_MIN_BYTES: 256 * 1024,
   };
 }
@@ -56,10 +58,26 @@ describe("CCH provider cyber-event reporting", () => {
   });
 
   it("reports an exact correlated cyber event", async () => {
-    const fetchMock = vi.fn(async () => new Response(null, { status: 204 }));
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            principal_strikes: 1,
+            session_restricted: true,
+            client_instance_restricted: true,
+            principal_restricted: false,
+          }),
+          { status: 200, headers: { "content-type": "application/json" } }
+        )
+    );
     vi.stubGlobal("fetch", fetchMock);
 
-    await reportProviderPolicyEventBestEffort(session(), "cyber_policy");
+    await expect(reportProviderPolicyEventBestEffort(session(), "cyber_policy")).resolves.toEqual({
+      principal_strikes: 1,
+      session_restricted: true,
+      client_instance_restricted: true,
+      principal_restricted: false,
+    });
 
     const [url, init] = fetchMock.mock.calls[0] ?? [];
     expect(String(url)).toBe("http://127.0.0.1:8090/v1/provider-events");
@@ -78,8 +96,33 @@ describe("CCH provider cyber-event reporting", () => {
         requestId: "42:digest",
         sessionId: "session-provider-event-test",
         upstreamProviderId: "17",
+        principalStrikes: 1,
+        clientInstanceRestricted: true,
+        principalRestricted: false,
       })
     );
+    expect(mocks.disableUserForCyberCheckContainment).not.toHaveBeenCalled();
+  });
+
+  it("disables the complete CCH user after authoritative principal containment", async () => {
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            principal_strikes: 2,
+            session_restricted: true,
+            client_instance_restricted: true,
+            principal_restricted: true,
+          }),
+          { status: 200, headers: { "content-type": "application/json" } }
+        )
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await reportProviderPolicyEventBestEffort(session(), "cyber_policy");
+
+    expect(mocks.disableUserForCyberCheckContainment).toHaveBeenCalledOnce();
+    expect(mocks.disableUserForCyberCheckContainment).toHaveBeenCalledWith(7);
   });
 
   it("does not report bio, an uncorrelated rejection, or disabled integration", async () => {
@@ -108,7 +151,7 @@ describe("CCH provider cyber-event reporting", () => {
 
     await expect(
       reportProviderPolicyEventBestEffort(session(), "cyber_policy")
-    ).resolves.toBeUndefined();
+    ).resolves.toBeNull();
 
     expect(mocks.logger.warn).toHaveBeenCalledWith(
       "CyberCheck: authoritative provider cyber event could not be reported",

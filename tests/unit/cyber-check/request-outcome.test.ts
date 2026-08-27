@@ -18,10 +18,9 @@ import { reportCleanRequestOutcomeBestEffort } from "@/lib/cyber-check/request-o
 
 const correlation: CyberCheckAdmissionCorrelation = {
   identity: {
-    gateway: "cch-test",
     request_id: "42:digest",
     principal_id: "7",
-    credential_id: "9",
+    client_instance_id: "installation-1",
     session_id: "session-request-outcome-test",
     sequence: 3,
   },
@@ -33,7 +32,6 @@ function env(mode: "off" | "shadow" | "enforce") {
     CYBER_CHECK_MODE: mode,
     CYBER_CHECK_URL: "http://127.0.0.1:8090",
     CYBER_CHECK_GATEWAY_TOKEN: "gateway-token",
-    CYBER_CHECK_GATEWAY_ID: "cch-test",
     CYBER_CHECK_ZSTD_MIN_BYTES: 256 * 1024,
   };
 }

@@ -18,6 +18,15 @@ vi.mock("next-intl/server", () => ({
   getLocale: getLocaleMock,
 }));
 
+const reinstateCyberCheckPrincipalMock = vi.fn(async () => {});
+vi.mock("@/lib/cyber-check/admin", () => ({
+  reinstateCyberCheckPrincipalIfConfigured: reinstateCyberCheckPrincipalMock,
+}));
+
+vi.mock("@/lib/utils/timezone", () => ({
+  resolveSystemTimezone: vi.fn(async () => "UTC"),
+}));
+
 const updateUserMock = vi.fn();
 const findUserByIdMock = vi.fn();
 vi.mock("@/repository/user", async (importOriginal) => {
@@ -57,6 +66,7 @@ describe("editUser: expiresAt 清除应写入数据库更新", () => {
     findUserByIdMock.mockResolvedValue({
       id: 123,
       name: "Test User",
+      isEnabled: false,
       limit5hResetMode: "fixed",
     });
     findKeyListMock.mockResolvedValue([{ id: 11, key: "sk-child-11" }]);
@@ -83,7 +93,8 @@ describe("editUser: expiresAt 清除应写入数据库更新", () => {
       123,
       expect.objectContaining({
         expiresAt: null,
-      })
+      }),
+      { resetCyberPolicyStrikes: false }
     );
   });
 
@@ -99,5 +110,45 @@ describe("editUser: expiresAt 清除应写入数据库更新", () => {
     });
     expect(clearUserCostCacheMock).not.toHaveBeenCalled();
     expect(findKeyListMock).not.toHaveBeenCalled();
+  });
+
+  test("manual edit re-enable resets Cyber Check before making the user active", async () => {
+    const { editUser } = await import("@/actions/users");
+
+    const res = await editUser(123, { isEnabled: true });
+
+    expect(res.ok).toBe(true);
+    expect(reinstateCyberCheckPrincipalMock).toHaveBeenCalledWith("123");
+    expect(updateUserMock).toHaveBeenCalledWith(123, expect.objectContaining({ isEnabled: true }), {
+      resetCyberPolicyStrikes: true,
+    });
+    expect(reinstateCyberCheckPrincipalMock.mock.invocationCallOrder[0]).toBeLessThan(
+      updateUserMock.mock.invocationCallOrder[0] ?? Number.MAX_SAFE_INTEGER
+    );
+  });
+
+  test("a failed central reinstatement leaves the CCH user disabled", async () => {
+    reinstateCyberCheckPrincipalMock.mockRejectedValueOnce(new Error("review service unavailable"));
+    const { toggleUserEnabled } = await import("@/actions/users");
+
+    const res = await toggleUserEnabled(123, true);
+
+    expect(res).toMatchObject({ ok: false, errorCode: "UPDATE_FAILED" });
+    expect(updateUserMock).not.toHaveBeenCalled();
+  });
+
+  test("renew-and-enable also starts a fresh strike epoch", async () => {
+    const { renewUser } = await import("@/actions/users");
+
+    const res = await renewUser(123, {
+      expiresAt: "2030-01-01T00:00:00.000Z",
+      enableUser: true,
+    });
+
+    expect(res.ok).toBe(true);
+    expect(reinstateCyberCheckPrincipalMock).toHaveBeenCalledWith("123");
+    expect(updateUserMock).toHaveBeenCalledWith(123, expect.objectContaining({ isEnabled: true }), {
+      resetCyberPolicyStrikes: true,
+    });
   });
 });
