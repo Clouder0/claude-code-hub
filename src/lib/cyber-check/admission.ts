@@ -80,6 +80,17 @@ export async function admitFinalResponsesRequest({
       message,
       bodyString,
     });
+    const unsupportedFields = packet.coverage.notices
+      .filter((notice) => notice.code === "unsupported_top_level_field" && notice.field)
+      .map((notice) => notice.field);
+    if (unsupportedFields.length > 0) {
+      logger.info("CyberCheck: projection gap - unsupported top-level fields", {
+        fields: unsupportedFields,
+        requestId: session.messageContext?.id ?? null,
+        sessionId: session.sessionId,
+        providerId: provider.id,
+      });
+    }
     submission = await submitReview(config, packet, { signal: session.clientAbortSignal });
     session.setCyberCheckAdmissionCorrelation({
       identity: packet.identity,

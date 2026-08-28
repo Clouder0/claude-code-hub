@@ -242,15 +242,29 @@ describe("cyber-check Responses projection", () => {
     ]);
   });
 
-  it("turns unknown top-level fields into one material coverage notice", () => {
+  it("names each unknown top-level field in its own material coverage notice", () => {
     const { packet } = project({
       model: "gpt-test",
       input: "hello",
       future_model_visible_field: { instruction: "future" },
       another_unknown_field: true,
+      future_model_visible_field_repeated_via_other_key: 1,
     });
 
-    expect(packet.coverage.notices).toEqual([{ code: "unsupported_top_level_field" }]);
+    expect(packet.coverage.notices).toEqual([
+      { code: "unsupported_top_level_field", field: "future_model_visible_field" },
+      { code: "unsupported_top_level_field", field: "another_unknown_field" },
+      { code: "unsupported_top_level_field", field: "future_model_visible_field_repeated_via_other_key" },
+    ]);
+    // A repeated field is still deduplicated to one notice.
+    const { packet: repeat } = project({
+      model: "gpt-test",
+      input: "hello",
+      future_model_visible_field: { instruction: "future" },
+    });
+    expect(repeat.coverage.notices).toEqual([
+      { code: "unsupported_top_level_field", field: "future_model_visible_field" },
+    ]);
   });
 
   it("projects the supported Responses call families in their original order", () => {
@@ -407,7 +421,7 @@ describe("cyber-check Responses projection", () => {
     ]);
     expect(packet.coverage.notices).toEqual(
       expect.arrayContaining([
-        { code: "unsupported_top_level_field" },
+        { code: "unsupported_top_level_field", field: "tools" },
         { code: "unsupported_item_type", item_index: 1 },
         { code: "unsupported_item_type", item_index: 3 },
         { code: "unsupported_content_type", item_index: 16 },

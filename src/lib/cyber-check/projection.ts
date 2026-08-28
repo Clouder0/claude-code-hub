@@ -111,7 +111,7 @@ export function projectFinalResponsesRequest({
       content: [textPart(message.instructions)],
     });
   } else if (message.instructions !== undefined && message.instructions !== null) {
-    addNotice(state, "unsupported_top_level_field");
+    addNotice(state, "unsupported_top_level_field", undefined, "instructions");
   }
 
   projectInput(message.input, state);
@@ -119,7 +119,7 @@ export function projectFinalResponsesRequest({
 
   for (const field of Object.keys(message)) {
     if (!KNOWN_TOP_LEVEL_FIELDS.has(field)) {
-      addNotice(state, "unsupported_top_level_field");
+      addNotice(state, "unsupported_top_level_field", undefined, field);
     }
   }
 
@@ -181,7 +181,9 @@ function projectInput(input: unknown, state: ProjectionState): void {
     return;
   }
   if (!Array.isArray(input)) {
-    if (input !== undefined && input !== null) addNotice(state, "unsupported_top_level_field");
+    if (input !== undefined && input !== null) {
+      addNotice(state, "unsupported_top_level_field", undefined, "input");
+    }
     return;
   }
 
@@ -435,7 +437,7 @@ function projectCompaction(
 function projectTopLevelTools(tools: unknown, state: ProjectionState): void {
   if (tools === undefined || tools === null) return;
   if (!Array.isArray(tools)) {
-    addNotice(state, "unsupported_top_level_field");
+    addNotice(state, "unsupported_top_level_field", undefined, "tools");
     return;
   }
   for (const definition of tools) {
@@ -443,7 +445,7 @@ function projectTopLevelTools(tools: unknown, state: ProjectionState): void {
     if (record) {
       state.capabilities.push({ source: "top_level_tools", definition: record });
     } else {
-      addNotice(state, "unsupported_top_level_field");
+      addNotice(state, "unsupported_top_level_field", undefined, "tools");
     }
   }
 }
@@ -616,12 +618,17 @@ function safeTypeLabel(value: unknown): string {
 function addNotice(
   state: ProjectionState,
   code: ReviewCoverageNotice["code"],
-  itemIndex?: number
+  itemIndex?: number,
+  field?: string
 ): void {
-  const key = `${code}:${itemIndex ?? "top"}`;
+  const key = `${code}:${itemIndex ?? "top"}:${field ?? ""}`;
   if (state.noticeKeys.has(key)) return;
   state.noticeKeys.add(key);
-  state.notices.push({ code, ...(itemIndex === undefined ? {} : { item_index: itemIndex }) });
+  state.notices.push({
+    code,
+    ...(itemIndex === undefined ? {} : { item_index: itemIndex }),
+    ...(field === undefined ? {} : { field }),
+  });
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {

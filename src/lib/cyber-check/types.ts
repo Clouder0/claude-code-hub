@@ -178,4 +178,10 @@ export interface ReviewCoverageNotice {
     | "capability_truncated"
     | "content_truncated";
   item_index?: number;
+  /**
+   * Names the offending request field for unsupported_top_level_field
+   * notices. The service records it on the notice (observability only;
+   * classification stays keyed on the code).
+   */
+  field?: string;
 }
