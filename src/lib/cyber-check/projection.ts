@@ -31,6 +31,7 @@ const KNOWN_TOP_LEVEL_FIELDS = new Set([
   "service_tier",
   "store",
   "stream",
+  "stream_options",
   "temperature",
   "text",
   "tool_choice",

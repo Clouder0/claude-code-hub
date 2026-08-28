@@ -242,6 +242,17 @@ describe("cyber-check Responses projection", () => {
     ]);
   });
 
+  it("treats the chat-style stream_options plumbing field as known and inert", () => {
+    const { packet } = project({
+      model: "gpt-test",
+      input: "hello",
+      stream: true,
+      stream_options: { include_usage: true },
+    });
+
+    expect(packet.coverage.notices).toEqual([]);
+  });
+
   it("names each unknown top-level field in its own material coverage notice", () => {
     const { packet } = project({
       model: "gpt-test",
