@@ -448,11 +448,7 @@ export async function findUserById(id: number): Promise<User | null> {
   return toUser(user);
 }
 
-export async function updateUser(
-  id: number,
-  userData: UpdateUserData,
-  options: { resetCyberPolicyStrikes?: boolean } = {}
-): Promise<User | null> {
+export async function updateUser(id: number, userData: UpdateUserData): Promise<User | null> {
   if (Object.keys(userData).length === 0) {
     return findUserById(id);
   }
@@ -474,7 +470,6 @@ export async function updateUser(
     dailyResetMode?: "fixed" | "rolling";
     dailyResetTime?: string;
     isEnabled?: boolean;
-    cyberPolicyResetAt?: Date;
     expiresAt?: Date | null;
     allowedClients?: string[];
     blockedClients?: string[];
@@ -508,7 +503,6 @@ export async function updateUser(
   if (userData.dailyResetMode !== undefined) dbData.dailyResetMode = userData.dailyResetMode;
   if (userData.dailyResetTime !== undefined) dbData.dailyResetTime = userData.dailyResetTime;
   if (userData.isEnabled !== undefined) dbData.isEnabled = userData.isEnabled;
-  if (options.resetCyberPolicyStrikes) dbData.cyberPolicyResetAt = new Date();
   if (userData.expiresAt !== undefined) dbData.expiresAt = userData.expiresAt;
   if (userData.allowedClients !== undefined) dbData.allowedClients = userData.allowedClients;
   if (userData.blockedClients !== undefined) dbData.blockedClients = userData.blockedClients;

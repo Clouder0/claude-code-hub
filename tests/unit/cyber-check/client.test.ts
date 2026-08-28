@@ -49,6 +49,7 @@ const packet: ReviewRequestEnvelope = {
 const providerEvent: ProviderEventEnvelope = {
   schema_version: "cyber-check.provider-event.v1",
   identity: packet.identity,
+  enforcement_mode: "shadow",
   upstream_provider_id: "17",
   event: {
     type: "policy_rejection",

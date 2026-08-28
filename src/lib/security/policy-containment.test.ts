@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
+  getEnvConfig: vi.fn(),
   redisMget: vi.fn(async (): Promise<(string | null)[]> => [null, null]),
   redisSet: vi.fn(async () => "OK"),
   redisStatus: "ready",
@@ -10,6 +11,8 @@ const mocks = vi.hoisted(() => ({
   warn: vi.fn(),
   error: vi.fn(),
 }));
+
+vi.mock("@/lib/config/env.schema", () => ({ getEnvConfig: mocks.getEnvConfig }));
 
 vi.mock("@/lib/redis", () => ({
   getRedisClient: () =>
@@ -44,11 +47,8 @@ vi.mock("@/lib/logger", () => ({
 import {
   blockSessionForPolicyRejection,
   containPolicyRejection,
-  CYBER_POLICY_DISABLE_THRESHOLD,
-  CYBER_POLICY_STRIKE_WINDOW_MS,
   disableUserForCyberCheckContainment,
   findSessionBlockPolicy,
-  maybeDisableUserForCyberPolicy,
   POLICY_SESSION_BLOCK_TTL_MS,
 } from "./policy-containment";
 
@@ -65,6 +65,7 @@ function sqlText(value: unknown): string {
 describe("policy containment", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.getEnvConfig.mockReturnValue({ CYBER_CHECK_MODE: "shadow" });
   });
 
   describe("session block", () => {
@@ -134,39 +135,6 @@ describe("policy containment", () => {
     });
   });
 
-  describe("user strike disable (cyber only)", () => {
-    it("disables the user when the threshold is reached and invalidates the auth cache", async () => {
-      mocks.dbExecute.mockResolvedValueOnce([{ id: 7 }]);
-      mocks.invalidateCachedUser.mockResolvedValueOnce(undefined);
-      await expect(maybeDisableUserForCyberPolicy(7)).resolves.toBe(true);
-      expect(sqlText(mocks.dbExecute.mock.calls[0]?.[0])).toContain("created_at > coalesce");
-      expect(sqlText(mocks.dbExecute.mock.calls[0]?.[0])).toContain("cyber_policy_reset_at");
-      expect(mocks.invalidateCachedUser).toHaveBeenCalledWith(7);
-      expect(mocks.warn).toHaveBeenCalledWith(
-        "[CyberContainment] User auto-disabled after cyber policy strikes",
-        { userId: 7, threshold: CYBER_POLICY_DISABLE_THRESHOLD }
-      );
-    });
-
-    it("leaves the user enabled below the threshold", async () => {
-      mocks.dbExecute.mockResolvedValueOnce([]);
-      await expect(maybeDisableUserForCyberPolicy(7)).resolves.toBe(false);
-      expect(mocks.invalidateCachedUser).not.toHaveBeenCalled();
-      expect(mocks.warn).not.toHaveBeenCalled();
-    });
-
-    it("contains database failures without throwing", async () => {
-      mocks.dbExecute.mockRejectedValueOnce(new Error("db down"));
-      await expect(maybeDisableUserForCyberPolicy(7)).resolves.toBe(false);
-      expect(mocks.error).toHaveBeenCalled();
-    });
-
-    it("keeps the cyber V1 strike constants unchanged", () => {
-      expect(CYBER_POLICY_STRIKE_WINDOW_MS).toBe(30 * 24 * 60 * 60 * 1000);
-      expect(CYBER_POLICY_DISABLE_THRESHOLD).toBe(2);
-    });
-  });
-
   describe("authoritative Cyber Check principal containment", () => {
     it("disables the complete user immediately and invalidates authentication", async () => {
       mocks.dbExecute.mockResolvedValueOnce([{ id: 7 }]);
@@ -192,8 +160,25 @@ describe("policy containment", () => {
       messageContext: { id: 42, user: { id: 7 } },
     };
 
-    it("cyber: records the event, blocks the session, and evaluates the strike", async () => {
-      mocks.dbExecute.mockResolvedValueOnce([]);
+    it("cyber shadow: records audit only and creates no executable local containment", async () => {
+      await containPolicyRejection(session, "cyber_policy");
+
+      expect(mocks.insertSecurityEvent).toHaveBeenCalledWith(7, 42, "cyber_policy");
+      expect(mocks.redisSet).not.toHaveBeenCalled();
+      expect(mocks.dbExecute).not.toHaveBeenCalled();
+    });
+
+    it("cyber enforce: leaves every cyber restriction and strike to Cyber Check", async () => {
+      mocks.getEnvConfig.mockReturnValue({ CYBER_CHECK_MODE: "enforce" });
+      await containPolicyRejection(session, "cyber_policy");
+
+      expect(mocks.insertSecurityEvent).toHaveBeenCalledWith(7, 42, "cyber_policy");
+      expect(mocks.redisSet).not.toHaveBeenCalled();
+      expect(mocks.dbExecute).not.toHaveBeenCalled();
+    });
+
+    it("cyber off: preserves the legacy local session block without local strikes", async () => {
+      mocks.getEnvConfig.mockReturnValue({ CYBER_CHECK_MODE: "off" });
       await containPolicyRejection(session, "cyber_policy");
 
       expect(mocks.insertSecurityEvent).toHaveBeenCalledWith(7, 42, "cyber_policy");
@@ -203,7 +188,7 @@ describe("policy containment", () => {
         "EX",
         expect.any(Number)
       );
-      expect(mocks.dbExecute).toHaveBeenCalledTimes(1);
+      expect(mocks.dbExecute).not.toHaveBeenCalled();
     });
 
     it("bio: records the event and blocks the session without evaluating a strike", async () => {
@@ -230,7 +215,6 @@ describe("policy containment", () => {
     });
 
     it("skips the session block without a session id", async () => {
-      mocks.dbExecute.mockResolvedValueOnce([]);
       await containPolicyRejection(
         { sessionId: null, messageContext: session.messageContext },
         "cyber_policy"
@@ -239,10 +223,10 @@ describe("policy containment", () => {
       expect(mocks.insertSecurityEvent).toHaveBeenCalledWith(7, 42, "cyber_policy");
     });
 
-    it("skips the strike evaluation without a user", async () => {
+    it("keeps cyber audit best effort without a user and never runs local punishment", async () => {
       await containPolicyRejection({ sessionId: "sess_abc", messageContext: null }, "cyber_policy");
       expect(mocks.insertSecurityEvent).not.toHaveBeenCalled();
-      expect(mocks.redisSet).toHaveBeenCalled();
+      expect(mocks.redisSet).not.toHaveBeenCalled();
       expect(mocks.dbExecute).not.toHaveBeenCalled();
     });
   });

@@ -11,8 +11,8 @@ type CorrelatedSession = Pick<ProxySession, "getCyberCheckAdmissionCorrelation">
 
 /**
  * Reports only an authoritative upstream cyber rejection that can be joined to a successful
- * admission. Local CCH containment remains independent and authoritative if this best-effort
- * cross-service report fails.
+ * admission. Cyber Check owns cyber strikes and restrictions; this deliberately remains one
+ * measured best-effort attempt, so a failed report can mean missed containment.
  */
 export async function reportProviderPolicyEventBestEffort(
   session: CorrelatedSession,
@@ -30,6 +30,7 @@ export async function reportProviderPolicyEventBestEffort(
     const containment = await reportProviderEvent(config, {
       schema_version: "cyber-check.provider-event.v1",
       identity: correlation.identity,
+      enforcement_mode: config.mode,
       upstream_provider_id: correlation.upstreamProviderId,
       event: {
         type: "policy_rejection",
@@ -37,7 +38,7 @@ export async function reportProviderPolicyEventBestEffort(
       },
     });
 
-    if (containment.principal_restricted) {
+    if (config.mode === "enforce" && containment.principal_restricted) {
       const userId = Number(correlation.identity.principal_id);
       if (Number.isSafeInteger(userId) && userId > 0) {
         await disableUserForCyberCheckContainment(userId);
@@ -55,6 +56,7 @@ export async function reportProviderPolicyEventBestEffort(
       principalStrikes: containment.principal_strikes,
       clientInstanceRestricted: containment.client_instance_restricted,
       principalRestricted: containment.principal_restricted,
+      mode: config.mode,
     });
     return containment;
   } catch (error) {

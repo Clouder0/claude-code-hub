@@ -1794,31 +1794,27 @@ export async function editUser(
     }
 
     // Update user with validated data
-    await updateUser(
-      userId,
-      {
-        name: validatedData.name,
-        description: validatedData.note,
-        ...(nextProviderGroup !== undefined ? { providerGroup: nextProviderGroup } : {}),
-        tags: validatedData.tags,
-        rpm: validatedData.rpm,
-        dailyQuota: validatedData.dailyQuota,
-        limit5hUsd: validatedData.limit5hUsd,
-        limit5hResetMode: validatedData.limit5hResetMode,
-        limitWeeklyUsd: validatedData.limitWeeklyUsd,
-        limitMonthlyUsd: validatedData.limitMonthlyUsd,
-        limitTotalUsd: validatedData.limitTotalUsd,
-        limitConcurrentSessions: validatedData.limitConcurrentSessions,
-        dailyResetMode: validatedData.dailyResetMode,
-        dailyResetTime: validatedData.dailyResetTime,
-        isEnabled: validatedData.isEnabled,
-        expiresAt: validatedData.expiresAt,
-        allowedClients: validatedData.allowedClients,
-        blockedClients: validatedData.blockedClients,
-        allowedModels: validatedData.allowedModels,
-      },
-      { resetCyberPolicyStrikes: reinstatingUser }
-    );
+    await updateUser(userId, {
+      name: validatedData.name,
+      description: validatedData.note,
+      ...(nextProviderGroup !== undefined ? { providerGroup: nextProviderGroup } : {}),
+      tags: validatedData.tags,
+      rpm: validatedData.rpm,
+      dailyQuota: validatedData.dailyQuota,
+      limit5hUsd: validatedData.limit5hUsd,
+      limit5hResetMode: validatedData.limit5hResetMode,
+      limitWeeklyUsd: validatedData.limitWeeklyUsd,
+      limitMonthlyUsd: validatedData.limitMonthlyUsd,
+      limitTotalUsd: validatedData.limitTotalUsd,
+      limitConcurrentSessions: validatedData.limitConcurrentSessions,
+      dailyResetMode: validatedData.dailyResetMode,
+      dailyResetTime: validatedData.dailyResetTime,
+      isEnabled: validatedData.isEnabled,
+      expiresAt: validatedData.expiresAt,
+      allowedClients: validatedData.allowedClients,
+      blockedClients: validatedData.blockedClients,
+      allowedModels: validatedData.allowedModels,
+    });
 
     if (
       validatedData.limit5hResetMode !== undefined &&
@@ -2065,9 +2061,7 @@ export async function renewUser(
       updateData.isEnabled = true;
     }
 
-    const updated = await updateUser(userId, updateData, {
-      resetCyberPolicyStrikes: reinstatingUser,
-    });
+    const updated = await updateUser(userId, updateData);
     if (!updated) {
       return {
         ok: false,
@@ -2128,7 +2122,7 @@ export async function toggleUserEnabled(userId: number, enabled: boolean): Promi
     if (reinstatingUser) {
       await reinstateCyberCheckPrincipalIfConfigured(String(userId));
     }
-    await updateUser(userId, { isEnabled: enabled }, { resetCyberPolicyStrikes: reinstatingUser });
+    await updateUser(userId, { isEnabled: enabled });
 
     revalidatePath("/dashboard/users");
     revalidatePath("/dashboard");

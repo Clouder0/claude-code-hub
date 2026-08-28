@@ -74,8 +74,6 @@ export const users = pgTable('users', {
 
   // User status and expiry management
   isEnabled: boolean('is_enabled').notNull().default(true),
-  // Manual reinstatement watermark: older cyber_policy events remain auditable but stop counting.
-  cyberPolicyResetAt: timestamp('cyber_policy_reset_at', { withTimezone: true }),
   expiresAt: timestamp('expires_at', { withTimezone: true }),
 
   // Allowed clients (CLI/IDE restrictions)
@@ -659,7 +657,7 @@ export const securityEvents = pgTable('security_event', {
     table.type
   ),
   securityEventsCreatedAtIdx: index('idx_security_event_created_at').on(table.createdAt.desc()),
-  // Strike counting: per-user cyber_policy events in a trailing window
+  // Audit and reporting: per-user policy observations over time
   securityEventsUserTypeCreatedAtIdx: index('idx_security_event_user_type_created_at').on(
     table.userId,
     table.type,

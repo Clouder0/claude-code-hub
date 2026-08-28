@@ -73,7 +73,7 @@ function finalResponse(
   options: {
     predictedDecision?: "allow" | "deny";
     enforcementMode?: "shadow" | "enforce";
-    reason?: "fast_path" | "active_restriction" | "reviewer_assessment";
+    reason?: "fast_path" | "known_bypass_profile" | "active_restriction" | "reviewer_assessment";
     restriction?: {
       scope: "session" | "client_instance" | "principal";
       subject_id: string;
@@ -249,7 +249,7 @@ describe("CCH cyber-check admission seam", () => {
     mocks.getEnvConfig.mockReturnValue(env("enforce"));
     vi.stubGlobal(
       "fetch",
-      vi.fn(async () => finalResponse("deny"))
+      vi.fn(async () => finalResponse("deny", { reason: "known_bypass_profile" }))
     );
 
     const error = await admitFinalResponsesRequest({
@@ -264,7 +264,7 @@ describe("CCH cyber-check admission seam", () => {
     expect(error).toMatchObject({ code: "gateway_cyber_restricted", statusCode: 403 });
   });
 
-  it("enforces an authoritative active client restriction even while local review is shadowed", async () => {
+  it("ignores every service denial while the gateway is in absolute shadow", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async () =>
@@ -280,18 +280,18 @@ describe("CCH cyber-check admission seam", () => {
       )
     );
 
-    const error = await admitFinalResponsesRequest({
-      session: session(),
-      provider: { id: 1, providerType: "codex" },
-      requestPath: "/v1/responses",
-      message,
-      bodyString: JSON.stringify(message),
-    }).catch((value: unknown) => value);
-
-    expect(error).toMatchObject({ code: "gateway_cyber_restricted", statusCode: 403 });
+    await expect(
+      admitFinalResponsesRequest({
+        session: session(),
+        provider: { id: 1, providerType: "codex" },
+        requestPath: "/v1/responses",
+        message,
+        bodyString: JSON.stringify(message),
+      })
+    ).resolves.toBeUndefined();
   });
 
-  it("fails closed when evidence or review-queue capacity cannot create an admission", async () => {
+  it("fails open for all service capacity outcomes in shadow and closed in enforce", async () => {
     for (const serviceCode of ["cyber_check_capacity", "reviewer_capacity", "review_queue_full"]) {
       vi.stubGlobal(
         "fetch",
@@ -303,6 +303,17 @@ describe("CCH cyber-check admission seam", () => {
         )
       );
 
+      await expect(
+        admitFinalResponsesRequest({
+          session: session(),
+          provider: { id: 1, providerType: "codex" },
+          requestPath: "/v1/responses",
+          message,
+          bodyString: JSON.stringify(message),
+        })
+      ).resolves.toBeUndefined();
+
+      mocks.getEnvConfig.mockReturnValue(env("enforce"));
       const error = await admitFinalResponsesRequest({
         session: session(),
         provider: { id: 1, providerType: "codex" },
@@ -310,12 +321,12 @@ describe("CCH cyber-check admission seam", () => {
         message,
         bodyString: JSON.stringify(message),
       }).catch((value: unknown) => value);
-
       expect(error).toMatchObject({ code: "cyber_check_capacity", statusCode: 503 });
+      mocks.getEnvConfig.mockReturnValue(env("shadow"));
     }
   });
 
-  it("fails closed before projection when the local encoding budget is exhausted", async () => {
+  it("fails open on local encoding exhaustion in shadow and closed in enforce", async () => {
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
     mocks.getEnvConfig.mockReturnValue({
@@ -323,6 +334,22 @@ describe("CCH cyber-check admission seam", () => {
       CYBER_CHECK_MAX_ENCODING_BYTES: 64 * 1024,
     });
 
+    await expect(
+      admitFinalResponsesRequest({
+        session: session(),
+        provider: { id: 1, providerType: "codex" },
+        requestPath: "/v1/responses",
+        message,
+        bodyString: JSON.stringify(message),
+      })
+    ).resolves.toBeUndefined();
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(cyberCheckEncodingCapacity.snapshot()).toBe(0);
+
+    mocks.getEnvConfig.mockReturnValue({
+      ...env("enforce"),
+      CYBER_CHECK_MAX_ENCODING_BYTES: 64 * 1024,
+    });
     const error = await admitFinalResponsesRequest({
       session: session(),
       provider: { id: 1, providerType: "codex" },
@@ -330,9 +357,7 @@ describe("CCH cyber-check admission seam", () => {
       message,
       bodyString: JSON.stringify(message),
     }).catch((value: unknown) => value);
-
     expect(error).toMatchObject({ code: "cyber_check_capacity", statusCode: 503 });
-    expect(fetchMock).not.toHaveBeenCalled();
     expect(cyberCheckEncodingCapacity.snapshot()).toBe(0);
   });
 

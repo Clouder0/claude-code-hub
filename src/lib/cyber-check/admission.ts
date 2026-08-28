@@ -88,9 +88,9 @@ export async function admitFinalResponsesRequest({
   } catch (error) {
     if (session.clientAbortSignal?.aborted) throw error;
     logAdmissionFailure("submission", error, session, provider.id);
+    if (config.mode === "shadow") return;
     if (isCapacityFailure(error)) throw await localizedRequestReviewError("capacity");
-    if (config.mode === "enforce") throw await localizedRequestReviewError("unavailable");
-    return;
+    throw await localizedRequestReviewError("unavailable");
   } finally {
     encodingLease?.release();
   }
@@ -158,7 +158,7 @@ export async function admitFinalResponsesRequest({
     mode: config.mode,
   });
 
-  if (submission.decision === "deny") {
+  if (config.mode === "enforce" && submission.decision === "deny") {
     throw await localizedRequestReviewError("restricted", submission.restriction);
   }
 }

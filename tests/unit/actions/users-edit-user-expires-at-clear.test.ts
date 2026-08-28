@@ -93,8 +93,7 @@ describe("editUser: expiresAt 清除应写入数据库更新", () => {
       123,
       expect.objectContaining({
         expiresAt: null,
-      }),
-      { resetCyberPolicyStrikes: false }
+      })
     );
   });
 
@@ -119,9 +118,7 @@ describe("editUser: expiresAt 清除应写入数据库更新", () => {
 
     expect(res.ok).toBe(true);
     expect(reinstateCyberCheckPrincipalMock).toHaveBeenCalledWith("123");
-    expect(updateUserMock).toHaveBeenCalledWith(123, expect.objectContaining({ isEnabled: true }), {
-      resetCyberPolicyStrikes: true,
-    });
+    expect(updateUserMock).toHaveBeenCalledWith(123, expect.objectContaining({ isEnabled: true }));
     expect(reinstateCyberCheckPrincipalMock.mock.invocationCallOrder[0]).toBeLessThan(
       updateUserMock.mock.invocationCallOrder[0] ?? Number.MAX_SAFE_INTEGER
     );
@@ -147,8 +144,6 @@ describe("editUser: expiresAt 清除应写入数据库更新", () => {
 
     expect(res.ok).toBe(true);
     expect(reinstateCyberCheckPrincipalMock).toHaveBeenCalledWith("123");
-    expect(updateUserMock).toHaveBeenCalledWith(123, expect.objectContaining({ isEnabled: true }), {
-      resetCyberPolicyStrikes: true,
-    });
+    expect(updateUserMock).toHaveBeenCalledWith(123, expect.objectContaining({ isEnabled: true }));
   });
 });

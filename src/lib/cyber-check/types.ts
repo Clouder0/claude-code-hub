@@ -19,7 +19,12 @@ export interface ReviewFinalDecision {
   decision: ReviewDecision;
   predicted_decision: ReviewDecision;
   enforcement_mode: "shadow" | "enforce";
-  reason: "fast_path" | "active_restriction" | "reviewer_assessment" | "reviewer_unavailable";
+  reason:
+    | "fast_path"
+    | "known_bypass_profile"
+    | "active_restriction"
+    | "reviewer_assessment"
+    | "reviewer_unavailable";
   review_disposition?: ReviewDisposition;
   restriction?: ActiveRestriction;
   coverage: ReviewCoveragePosture;
@@ -44,6 +49,7 @@ export type ReviewJob =
 export interface ProviderEventEnvelope {
   schema_version: "cyber-check.provider-event.v1";
   identity: ReviewRequestEnvelope["identity"];
+  enforcement_mode: Exclude<CyberCheckMode, "off">;
   upstream_provider_id: string;
   event: {
     type: "policy_rejection";

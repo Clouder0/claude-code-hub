@@ -208,6 +208,7 @@ function parseFinalDecision(object: Record<string, unknown>): ReviewFinalDecisio
     !isOneOf(object.enforcement_mode, ["shadow", "enforce"]) ||
     !isOneOf(object.reason, [
       "fast_path",
+      "known_bypass_profile",
       "active_restriction",
       "reviewer_assessment",
       "reviewer_unavailable",

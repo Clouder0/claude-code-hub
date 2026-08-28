@@ -85,6 +85,7 @@ describe("CCH provider cyber-event reporting", () => {
     expect(JSON.parse(String(init?.body))).toEqual({
       schema_version: "cyber-check.provider-event.v1",
       identity: correlation.identity,
+      enforcement_mode: "shadow",
       upstream_provider_id: "17",
       event: {
         type: "policy_rejection",
@@ -100,12 +101,34 @@ describe("CCH provider cyber-event reporting", () => {
         principalStrikes: 1,
         clientInstanceRestricted: true,
         principalRestricted: false,
+        mode: "shadow",
       })
     );
     expect(mocks.disableUserForCyberCheckContainment).not.toHaveBeenCalled();
   });
 
-  it("disables the complete CCH user after authoritative principal containment", async () => {
+  it("does not apply a principal restriction returned while the gateway is shadowing", async () => {
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            principal_strikes: 2,
+            session_restricted: true,
+            client_instance_restricted: true,
+            principal_restricted: true,
+          }),
+          { status: 200, headers: { "content-type": "application/json" } }
+        )
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await reportProviderPolicyEventBestEffort(session(), "cyber_policy");
+
+    expect(mocks.disableUserForCyberCheckContainment).not.toHaveBeenCalled();
+  });
+
+  it("disables the complete CCH user after an enforce-mode principal restriction", async () => {
+    mocks.getEnvConfig.mockReturnValue(env("enforce"));
     const fetchMock = vi.fn(
       async () =>
         new Response(
