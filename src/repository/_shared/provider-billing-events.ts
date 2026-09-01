@@ -66,6 +66,11 @@ export function buildRawLoserCandidates(
     ) WITH ORDINALITY AS item(value, ordinality)
     WHERE jsonb_typeof(item.value) = 'object'
       AND COALESCE(NULLIF(item.value ->> 'billingStatus', ''), 'settled') = 'settled'
+      -- 显式谓词:jsonb_typeof(x)='array' 蕴含 x IS NOT NULL,语义纯加强;
+      -- 让规划器得以使用 idx_usage_ledger_winner_hedge_losers 部分索引
+      -- (hedge 未启用时该索引为空,全历史输家分支从分钟级降为 ~0.1ms;
+      -- 2026-09-02 实测 431ms/日 → 0.11ms/allTime)。
+      AND ledger.hedge_losers IS NOT NULL
       ${sourceFilter}
   `;
 }
