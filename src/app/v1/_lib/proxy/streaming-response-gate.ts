@@ -707,6 +707,10 @@ function buildPrecommitHeartbeatResponse(
 
   const heartbeatChunk = new TextEncoder().encode(PRECOMMIT_HEARTBEAT_FRAME);
   const deadline = Date.now() + config.maxMs;
+  // 首拍在 wrapper 创建(= DELAY 到期)时立即发出,不等首个 interval——
+  // 语义是"DELAY 即首拍延迟";后续帧按 INTERVAL(sub2api 同款节拍)。
+  diagnostic.beats += 1;
+  queue.push({ kind: "frame", chunk: heartbeatChunk });
   timerId = setInterval(() => {
     if (cancelled || diagnostic.outcome !== "pending") return;
     if (Date.now() >= deadline) {

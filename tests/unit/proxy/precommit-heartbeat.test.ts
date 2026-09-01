@@ -132,6 +132,25 @@ describe("precommit heartbeat", () => {
     expect(result.response.headers.get("x-accel-buffering")).toBe("no");
   });
 
+  it("emits the first beat at DELAY, not at DELAY+INTERVAL", async () => {
+    // 大 INTERVAL(2000ms)+ 上游 300ms 出帧:语义要求首拍在 ~delayMs 立即
+    // 到达——若实现误把首拍放在 interval 计时器里,本测试将看不到任何心跳。
+    const response = delayedSseResponse([lifecycleEcho, contentFrame], 300);
+    const result = await inspectStreamingResponsePrefix(response, {
+      ...gateOptions,
+      precommitHeartbeat: heartbeatConfig({ delayMs: 30, intervalMs: 2_000 }),
+    });
+
+    expect(result.kind).toBe("pass");
+    if (result.kind !== "pass") return;
+    const text = await result.response.text();
+    expect(countHeartbeats(text)).toBe(1);
+    // 首拍位于真实内容之前。
+    expect(text.indexOf(PRECOMMIT_HEARTBEAT_FRAME)).toBe(0);
+    expect(text.endsWith(lifecycleEcho + contentFrame)).toBe(true);
+    expect(result.precommitHeartbeat?.beats).toBe(1);
+  });
+
   it("degrades a late fake-200 into a retryable response.failed terminal event", async () => {
     const onHeartbeat = vi.fn();
     const errorFrame = sse({
