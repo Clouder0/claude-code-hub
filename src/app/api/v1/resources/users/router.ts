@@ -7,6 +7,9 @@ import {
   StringListResponseSchema,
   UserAllLimitUsageResponseSchema,
   UserCreateSchema,
+  UserCyberClientInstanceResetSchema,
+  UserCyberPrincipalResetSchema,
+  UserCyberStateResponseSchema,
   UserDetailResponseSchema,
   UserEnableSchema,
   UserFilterSearchQuerySchema,
@@ -27,6 +30,7 @@ import {
   filterSearchUsers,
   getUser,
   getUserAllLimitUsage,
+  getUserCyberState,
   getUserKeyGroups,
   getUserLimitUsage,
   getUsersUsage,
@@ -34,6 +38,8 @@ import {
   listCurrentUser,
   listUsers,
   renewUser,
+  resetUserCyberClientInstance,
+  resetUserCyberPrincipal,
   resetUserLimits,
   resetUserStatistics,
   searchUsers,
@@ -300,6 +306,79 @@ usersRouter.openapi(
     },
   }),
   getUser as never
+);
+
+usersRouter.openapi(
+  createRoute({
+    method: "get",
+    path: "/users/{id}/cyber-state",
+    middleware: requireAuth("admin"),
+    tags: ["Users"],
+    summary: "Get user Cyber Check state",
+    description:
+      "Reads live principal and installation state from Cyber Check without a CCH mirror.",
+    "x-required-access": "admin",
+    security,
+    request: { params: UserIdParamSchema },
+    responses: {
+      200: {
+        description: "Live Cyber Check state.",
+        content: { "application/json": { schema: UserCyberStateResponseSchema } },
+      },
+      ...problemResponses,
+    },
+  }),
+  getUserCyberState as never
+);
+
+usersRouter.openapi(
+  createRoute({
+    method: "post",
+    path: "/users/{id}/cyber-state/client-instance-reset",
+    middleware: requireAuth("admin"),
+    tags: ["Users"],
+    summary: "Reset one user installation",
+    description: "Advances the installation strike watermark and removes only its restriction.",
+    "x-required-access": "admin",
+    security,
+    request: {
+      params: UserIdParamSchema,
+      body: {
+        required: true,
+        content: { "application/json": { schema: UserCyberClientInstanceResetSchema } },
+      },
+    },
+    responses: { 204: { description: "Installation state reset." }, ...problemResponses },
+  }),
+  resetUserCyberClientInstance as never
+);
+
+usersRouter.openapi(
+  createRoute({
+    method: "post",
+    path: "/users/{id}/cyber-state/principal-reset",
+    middleware: requireAuth("admin"),
+    tags: ["Users"],
+    summary: "Reset user principal Cyber state",
+    description: "Resets the principal epoch, then optionally enables the CCH user.",
+    "x-required-access": "admin",
+    security,
+    request: {
+      params: UserIdParamSchema,
+      body: {
+        required: true,
+        content: { "application/json": { schema: UserCyberPrincipalResetSchema } },
+      },
+    },
+    responses: {
+      200: {
+        description: "Principal state reset result.",
+        content: { "application/json": { schema: GenericUserResponseSchema } },
+      },
+      ...problemResponses,
+    },
+  }),
+  resetUserCyberPrincipal as never
 );
 
 usersRouter.openapi(

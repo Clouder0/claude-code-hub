@@ -12,5 +12,8 @@ describe("v1 users client migration surface", () => {
     expect(source).toContain('"/api/v1/users:batchUpdate"');
     expect(source).toContain("`/api/v1/users/${userId}`");
     expect(source).toContain("`/api/v1/users/${userId}/limits:reset`");
+    expect(source).toContain("`/api/v1/users/${userId}/cyber-state`");
+    expect(source).toContain("`/api/v1/users/${userId}/cyber-state/client-instance-reset`");
+    expect(source).toContain("`/api/v1/users/${userId}/cyber-state/principal-reset`");
   });
 });

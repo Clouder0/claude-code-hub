@@ -558,6 +558,45 @@ export class ProxyError extends Error {
   }
 }
 
+export type RequestReviewErrorCode =
+  | "gateway_cyber_restricted"
+  | "cyber_check_unavailable"
+  | "cyber_check_capacity";
+
+/** A local request-admission outcome. It is never attributed to an upstream provider. */
+export class RequestReviewError extends ProxyError {
+  private constructor(
+    public readonly code: RequestReviewErrorCode,
+    statusCode: 403 | 503,
+    message: string
+  ) {
+    super(message, statusCode);
+    this.name = "RequestReviewError";
+  }
+
+  static restricted(
+    message = "This request is restricted by the gateway cyber policy."
+  ): RequestReviewError {
+    return new RequestReviewError("gateway_cyber_restricted", 403, message);
+  }
+
+  static unavailable(
+    message = "The gateway request review service is temporarily unavailable."
+  ): RequestReviewError {
+    return new RequestReviewError("cyber_check_unavailable", 503, message);
+  }
+
+  static capacity(
+    message = "The gateway cyber review service has no evidence capacity available."
+  ): RequestReviewError {
+    return new RequestReviewError("cyber_check_capacity", 503, message);
+  }
+}
+
+export function isRequestReviewError(error: unknown): error is RequestReviewError {
+  return error instanceof RequestReviewError;
+}
+
 /**
  * 错误分类：区分供应商错误和系统错误
  */
@@ -978,6 +1017,12 @@ export async function categorizeErrorAsync(error: Error): Promise<ErrorCategory>
   // These are always SYSTEM_ERROR regardless of message content
   if (isTransportError(error)) {
     return ErrorCategory.SYSTEM_ERROR;
+  }
+
+  // Local admission decisions are request outcomes. They do not belong to a provider,
+  // must not affect provider health, and must not be retried through another provider.
+  if (isRequestReviewError(error)) {
+    return ErrorCategory.NON_RETRYABLE_CLIENT_ERROR;
   }
 
   // Upstream policy decisions are request outcomes, not provider-health failures. This exact

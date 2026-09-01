@@ -5,6 +5,7 @@ import {
   isPolicyRejectionError,
   policyRejectionCodeOf,
   ProxyError,
+  RequestReviewError,
 } from "@/app/v1/_lib/proxy/errors";
 
 describe("policy rejection error categorization", () => {
@@ -96,5 +97,13 @@ describe("policy rejection error categorization", () => {
     // invalid_prompt 落回通用 4xx 分类（规则或供应商错误），不属于策略拒绝短路。
     const category = await categorizeErrorAsync(error);
     expect(category).not.toBe(ErrorCategory.POLICY_REJECTION);
+  });
+
+  it("classifies local request-review outcomes as non-retryable without impersonating cyber_policy", async () => {
+    const error = RequestReviewError.restricted();
+
+    expect(await categorizeErrorAsync(error)).toBe(ErrorCategory.NON_RETRYABLE_CLIENT_ERROR);
+    expect(isPolicyRejectionError(error)).toBe(false);
+    expect(policyRejectionCodeOf(error)).toBeNull();
   });
 });

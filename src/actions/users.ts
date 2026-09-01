@@ -9,6 +9,12 @@ import { messageRequest, usageLedger, users as usersTable } from "@/drizzle/sche
 import { emitActionAudit } from "@/lib/audit/emit";
 import { type AuthSession, getSession, hasAdminAuthority } from "@/lib/auth";
 import { PROVIDER_GROUP } from "@/lib/constants/provider.constants";
+import {
+  getCyberCheckStateIfConfigured,
+  reinstateCyberCheckClientInstanceIfConfigured,
+  reinstateCyberCheckPrincipalIfConfigured,
+} from "@/lib/cyber-check/admin";
+import type { CyberState } from "@/lib/cyber-check/types";
 import { logger } from "@/lib/logger";
 import { getUnauthorizedFields } from "@/lib/permissions/user-field-permissions";
 import { clipStartByResetAt, resolveUser5hCostResetAt } from "@/lib/rate-limit/cost-reset-utils";
@@ -77,6 +83,184 @@ type UserActionSession = Pick<AuthSession, "user" | "key">;
 
 function canAdministerUsers(session: AuthSession): boolean {
   return hasAdminAuthority(session);
+}
+
+async function requireCyberPrincipalClearForEnable(principalId: string): Promise<ActionResult> {
+  try {
+    const state = await getCyberCheckStateIfConfigured(principalId);
+    if (!state?.principal.restricted) return { ok: true };
+    return {
+      ok: false,
+      error: ERROR_CODES.CYBER_PRINCIPAL_RESET_REQUIRED,
+      errorCode: ERROR_CODES.CYBER_PRINCIPAL_RESET_REQUIRED,
+    };
+  } catch (error) {
+    logger.warn("Failed to verify Cyber Check principal state before enabling user", {
+      principalId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return {
+      ok: false,
+      error: ERROR_CODES.CYBER_CHECK_UNAVAILABLE,
+      errorCode: ERROR_CODES.CYBER_CHECK_UNAVAILABLE,
+    };
+  }
+}
+
+export async function getUserCyberState(
+  userId: number
+): Promise<ActionResult<{ configured: boolean; state: CyberState | null }>> {
+  try {
+    const session = await getSession();
+    if (!session || !canAdministerUsers(session)) {
+      return {
+        ok: false,
+        error: ERROR_CODES.PERMISSION_DENIED,
+        errorCode: ERROR_CODES.PERMISSION_DENIED,
+      };
+    }
+    if (!(await findUserById(userId))) {
+      return {
+        ok: false,
+        error: ERROR_CODES.NOT_FOUND,
+        errorCode: ERROR_CODES.NOT_FOUND,
+      };
+    }
+    const state = await getCyberCheckStateIfConfigured(String(userId));
+    return { ok: true, data: { configured: state !== null, state } };
+  } catch (error) {
+    logger.warn("Failed to read Cyber Check state for user", {
+      userId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return {
+      ok: false,
+      error: ERROR_CODES.CYBER_CHECK_UNAVAILABLE,
+      errorCode: ERROR_CODES.CYBER_CHECK_UNAVAILABLE,
+    };
+  }
+}
+
+export async function resetUserClientInstanceCyberState(
+  userId: number,
+  clientInstanceId: string
+): Promise<ActionResult> {
+  try {
+    const session = await getSession();
+    if (!session || !canAdministerUsers(session)) {
+      return {
+        ok: false,
+        error: ERROR_CODES.PERMISSION_DENIED,
+        errorCode: ERROR_CODES.PERMISSION_DENIED,
+      };
+    }
+    const user = await findUserById(userId);
+    if (!user) {
+      return {
+        ok: false,
+        error: ERROR_CODES.NOT_FOUND,
+        errorCode: ERROR_CODES.NOT_FOUND,
+      };
+    }
+    const configured = await reinstateCyberCheckClientInstanceIfConfigured(
+      String(userId),
+      clientInstanceId
+    );
+    if (!configured) {
+      return {
+        ok: false,
+        error: ERROR_CODES.CYBER_CHECK_NOT_CONFIGURED,
+        errorCode: ERROR_CODES.CYBER_CHECK_NOT_CONFIGURED,
+      };
+    }
+    revalidatePath("/dashboard/users");
+    emitActionAudit({
+      category: "user",
+      action: "user.cyber_client_instance_reset",
+      targetType: "user",
+      targetId: String(userId),
+      targetName: user.name,
+      after: { clientInstanceId },
+      success: true,
+    });
+    return { ok: true };
+  } catch (error) {
+    logger.error("Failed to reset Cyber Check client instance state", {
+      userId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return {
+      ok: false,
+      error: ERROR_CODES.CYBER_CHECK_UNAVAILABLE,
+      errorCode: ERROR_CODES.CYBER_CHECK_UNAVAILABLE,
+    };
+  }
+}
+
+export async function resetUserPrincipalCyberState(
+  userId: number,
+  enableUser: boolean
+): Promise<ActionResult<{ enabled: boolean }>> {
+  try {
+    const session = await getSession();
+    if (!session || !canAdministerUsers(session)) {
+      return {
+        ok: false,
+        error: ERROR_CODES.PERMISSION_DENIED,
+        errorCode: ERROR_CODES.PERMISSION_DENIED,
+      };
+    }
+    const user = await findUserById(userId);
+    if (!user) {
+      return {
+        ok: false,
+        error: ERROR_CODES.NOT_FOUND,
+        errorCode: ERROR_CODES.NOT_FOUND,
+      };
+    }
+    const configured = await reinstateCyberCheckPrincipalIfConfigured(String(userId));
+    if (!configured) {
+      return {
+        ok: false,
+        error: ERROR_CODES.CYBER_CHECK_NOT_CONFIGURED,
+        errorCode: ERROR_CODES.CYBER_CHECK_NOT_CONFIGURED,
+      };
+    }
+    if (enableUser && !user.isEnabled) {
+      const updated = await updateUser(userId, { isEnabled: true });
+      if (!updated) {
+        return {
+          ok: false,
+          error: ERROR_CODES.NOT_FOUND,
+          errorCode: ERROR_CODES.NOT_FOUND,
+        };
+      }
+      await invalidateCachedUser(userId).catch(() => null);
+    }
+    revalidatePath("/dashboard/users");
+    revalidatePath("/dashboard");
+    emitActionAudit({
+      category: "user",
+      action: "user.cyber_principal_reset",
+      targetType: "user",
+      targetId: String(userId),
+      targetName: user.name,
+      before: { isEnabled: user.isEnabled },
+      after: { isEnabled: enableUser ? true : user.isEnabled },
+      success: true,
+    });
+    return { ok: true, data: { enabled: enableUser ? true : user.isEnabled } };
+  } catch (error) {
+    logger.error("Failed to reset Cyber Check principal state", {
+      userId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return {
+      ok: false,
+      error: ERROR_CODES.CYBER_CHECK_UNAVAILABLE,
+      errorCode: ERROR_CODES.CYBER_CHECK_UNAVAILABLE,
+    };
+  }
 }
 
 function normalizeLegacySearchTerm(params?: GetUsersBatchParams): string | undefined {
@@ -1787,6 +1971,11 @@ export async function editUser(
       validatedData.providerGroup === undefined
         ? undefined
         : normalizeProviderGroup(validatedData.providerGroup);
+    const reinstatingUser = validatedData.isEnabled === true && beforeUser?.isEnabled === false;
+    if (reinstatingUser) {
+      const cyberGuard = await requireCyberPrincipalClearForEnable(String(userId));
+      if (!cyberGuard.ok) return cyberGuard;
+    }
 
     // Update user with validated data
     await updateUser(userId, {
@@ -2048,6 +2237,11 @@ export async function renewUser(
       expiresAt,
     };
 
+    const reinstatingUser = data.enableUser === true && !user.isEnabled;
+    if (reinstatingUser) {
+      const cyberGuard = await requireCyberPrincipalClearForEnable(String(userId));
+      if (!cyberGuard.ok) return cyberGuard;
+    }
     if (data.enableUser === true) {
       updateData.isEnabled = true;
     }
@@ -2101,6 +2295,19 @@ export async function toggleUserEnabled(userId: number, enabled: boolean): Promi
       };
     }
 
+    const target = await findUserById(userId);
+    if (!target) {
+      return {
+        ok: false,
+        error: tError("USER_NOT_FOUND"),
+        errorCode: ERROR_CODES.NOT_FOUND,
+      };
+    }
+    const reinstatingUser = enabled && !target.isEnabled;
+    if (reinstatingUser) {
+      const cyberGuard = await requireCyberPrincipalClearForEnable(String(userId));
+      if (!cyberGuard.ok) return cyberGuard;
+    }
     await updateUser(userId, { isEnabled: enabled });
 
     revalidatePath("/dashboard/users");

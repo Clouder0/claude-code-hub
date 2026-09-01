@@ -4,10 +4,14 @@
 
 # Node modules and build artifacts
 node_modules
+**/node_modules
 .next
 out
 coverage
 dist
+
+# Git worktrees (huge, never part of the image)
+.worktrees
 
 # Local env files (will be provided via runtime)
 .env

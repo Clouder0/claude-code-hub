@@ -19,6 +19,7 @@ import {
   isEmptyResponseError,
   isPolicyRejectionError,
   isRateLimitError,
+  isRequestReviewError,
   ProxyError,
   policyRejectionCodeOf,
   type RateLimitError,
@@ -121,6 +122,10 @@ export function resolveFinalClientErrorMessage({
   settings?: Pick<SystemSettings, "passThroughUpstreamErrorMessage"> | null;
   override?: ErrorOverrideForMessageResolver;
 }): string {
+  if (isRequestReviewError(error)) {
+    return error.message;
+  }
+
   if (override?.response) {
     return currentFallbackMessage;
   }
@@ -283,7 +288,7 @@ export class ProxyErrorHandler {
 
     // 检测是否有覆写配置（响应体或状态码）
     // 使用异步版本确保错误规则已加载
-    if (error instanceof Error && !isPolicyRejectionError(error)) {
+    if (error instanceof Error && !isPolicyRejectionError(error) && !isRequestReviewError(error)) {
       const override = await getErrorOverrideAsync(error);
       if (override) {
         // 运行时校验覆写状态码范围（400-599），防止数据库脏数据导致 Response 抛 RangeError
@@ -515,7 +520,7 @@ export class ProxyErrorHandler {
         ? upstreamRequestId.trim()
         : undefined;
     const terminalErrorCode =
-      policyRejectionCodeOf(error) ??
+      (isRequestReviewError(error) ? error.code : policyRejectionCodeOf(error)) ??
       (error instanceof ProxyError && error.upstreamError?.isOverload
         ? "server_is_overloaded"
         : undefined);

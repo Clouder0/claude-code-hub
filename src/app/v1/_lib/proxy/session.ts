@@ -116,6 +116,35 @@ export interface MessageContext {
   apiKey: string;
 }
 
+export interface StableRequestIdentity {
+  requestId: number;
+  principalId: number;
+}
+
+export interface CyberCheckAdmissionCorrelation {
+  identity: {
+    request_id: string;
+    principal_id: string;
+    client_instance_id?: string;
+    session_id: string;
+    sequence: number;
+  };
+  upstreamProviderId: string;
+}
+
+export type CyberCheckObservationResult =
+  | {
+      status: "recorded";
+      correlation: CyberCheckAdmissionCorrelation;
+    }
+  | {
+      status: "capture_gap";
+    };
+
+export interface CyberCheckObservationHandle {
+  completion: Promise<CyberCheckObservationResult>;
+}
+
 export interface ProxyRequestPayload {
   message: Record<string, unknown>;
   buffer?: ArrayBuffer;
@@ -157,6 +186,10 @@ export class ProxySession {
   authState: AuthState | null;
   provider: Provider | null;
   messageContext: MessageContext | null;
+  // Hedge attempts intentionally drop messageContext so only the tracking session owns persistence.
+  // These three scalar IDs remain available for request-scoped admission and audit correlation.
+  private stableRequestIdentity: StableRequestIdentity | null = null;
+  private cyberCheckObservation: CyberCheckObservationHandle | null = null;
 
   // Time To First Byte (ms). Streaming: first chunk. Non-stream: equals durationMs.
   ttfbMs: number | null = null;
@@ -592,9 +625,35 @@ export class ProxySession {
 
   setMessageContext(context: MessageContext | null): void {
     this.messageContext = context;
+    if (context) {
+      this.stableRequestIdentity = {
+        requestId: context.id,
+        principalId: context.user.id,
+      };
+    }
     if (context?.user) {
       this.userName = context.user.name;
     }
+  }
+
+  getStableRequestIdentity(): StableRequestIdentity | null {
+    return this.stableRequestIdentity;
+  }
+
+  setCyberCheckObservation(observation: CyberCheckObservationHandle): void {
+    this.cyberCheckObservation = observation;
+  }
+
+  clearCyberCheckObservation(): void {
+    this.cyberCheckObservation = null;
+  }
+
+  getCyberCheckObservation(): CyberCheckObservationHandle | null {
+    return this.cyberCheckObservation;
+  }
+
+  copyCyberCheckObservationFrom(source: ProxySession): void {
+    this.cyberCheckObservation = source.cyberCheckObservation;
   }
 
   /**

@@ -121,6 +121,7 @@ describe("ProxyForwarder provider failure session release", () => {
     const setTargetCacheTtlResolved = vi.fn();
     const setTargetContext1mApplied = vi.fn();
     const copyForwardedRequestBodyFrom = vi.fn();
+    const copyCyberCheckObservationFrom = vi.fn();
     const target = {
       request: { message: null, buffer: null, log: null, note: null },
       requestUrl: new URL("https://example.com/v1/messages"),
@@ -135,6 +136,7 @@ describe("ProxyForwarder provider failure session release", () => {
       getContext1mApplied: vi.fn(() => false),
       setContext1mApplied: setTargetContext1mApplied,
       copyForwardedRequestBodyFrom,
+      copyCyberCheckObservationFrom,
     } as unknown as ProxySession;
     const source = {
       request: { message: "winner", buffer: null, log: null, note: null },
@@ -169,5 +171,6 @@ describe("ProxyForwarder provider failure session release", () => {
     expect(setTargetContext1mApplied).toHaveBeenCalledWith(true);
     // 赢家同步必须携带转发体缓存（字符串 + 已缓存解析对象）。
     expect(copyForwardedRequestBodyFrom).toHaveBeenCalledWith(source);
+    expect(copyCyberCheckObservationFrom).toHaveBeenCalledWith(source);
   });
 });

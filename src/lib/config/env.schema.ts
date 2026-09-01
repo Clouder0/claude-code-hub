@@ -196,6 +196,29 @@ export const EnvSchema = z.object({
     .max(64 * 1024 * 1024)
     .default(4 * 1024 * 1024),
 
+  // 独立请求审查服务。默认关闭；shadow 仅观察，enforce 才执行本地拒绝。
+  CYBER_CHECK_MODE: z.enum(["off", "shadow", "enforce"]).default("off"),
+  CYBER_CHECK_URL: optionalPreprocessed(
+    (value) => (typeof value === "string" && value.trim() === "" ? undefined : value),
+    z.string().url()
+  ),
+  CYBER_CHECK_GATEWAY_TOKEN: optionalPreprocessed(
+    (value) => (typeof value === "string" && value.length === 0 ? undefined : value),
+    z.string().min(1)
+  ),
+  CYBER_CHECK_ZSTD_MIN_BYTES: z.coerce
+    .number()
+    .int()
+    .min(0)
+    .max(16 * 1024 * 1024)
+    .default(256 * 1024),
+  CYBER_CHECK_MAX_ENCODING_BYTES: z.coerce
+    .number()
+    .int()
+    .min(64 * 1024)
+    .max(1024 * 1024 * 1024)
+    .default(256 * 1024 * 1024),
+
   DASHBOARD_LOGS_POLL_INTERVAL_MS: z.coerce.number().int().min(250).max(60000).default(5000),
 
   // Langfuse Observability (optional, auto-enabled when keys are set)

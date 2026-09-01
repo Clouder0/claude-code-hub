@@ -36,9 +36,11 @@ import {
 } from "@/lib/api-client/v1/actions/users";
 import { useZodForm } from "@/lib/hooks/use-zod-form";
 import { cn } from "@/lib/utils";
+import { getErrorMessage } from "@/lib/utils/error-messages";
 import { UpdateUserSchema } from "@/lib/validation/schemas";
 import type { UserDisplay } from "@/types/user";
 import { resetUser5hLimitOnly } from "./actions/reset-user-5h-limit";
+import { CyberStateSection } from "./cyber-state-section";
 import { DangerZone } from "./forms/danger-zone";
 import { UserEditSection } from "./forms/user-edit-section";
 import { useModelSuggestions } from "./hooks/use-model-suggestions";
@@ -92,6 +94,7 @@ function EditUserDialogInner({ onOpenChange, user, onSuccess }: EditUserDialogPr
   const queryClient = useQueryClient();
   const t = useTranslations("dashboard.userManagement");
   const tCommon = useTranslations("common");
+  const tErrors = useTranslations("errors");
   const locale = useLocale();
   const [isPending, startTransition] = useTransition();
   const [isResettingAll, setIsResettingAll] = useState(false);
@@ -207,7 +210,11 @@ function EditUserDialogInner({ onOpenChange, user, onSuccess }: EditUserDialogPr
     try {
       const res = await toggleUserEnabled(user.id, true);
       if (!res.ok) {
-        toast.error(res.error || t("editDialog.operationFailed"));
+        toast.error(
+          res.errorCode
+            ? getErrorMessage(tErrors, res.errorCode, res.errorParams)
+            : res.error || t("editDialog.operationFailed")
+        );
         return;
       }
       toast.success(t("editDialog.userEnabled"));
@@ -349,6 +356,16 @@ function EditUserDialogInner({ onOpenChange, user, onSuccess }: EditUserDialogPr
             onChange={handleUserChange}
             translations={userEditTranslations}
             modelSuggestions={modelSuggestions}
+          />
+
+          <CyberStateSection
+            userId={user.id}
+            userEnabled={user.isEnabled}
+            onPrincipalEnabled={() => {
+              onSuccess?.();
+              queryClient.invalidateQueries({ queryKey: ["users"] });
+              router.refresh();
+            }}
           />
 
           {/* Reset Data Section - Admin Only */}
