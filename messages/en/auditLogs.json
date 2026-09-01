@@ -39,6 +39,8 @@
       "create": "Create user",
       "update": "Update user",
       "delete": "Delete user",
+      "cyber_client_instance_reset": "Reset user Cyber installation",
+      "cyber_principal_reset": "Reset user Cyber account",
       "reset_5h_limit": "Reset user 5H limit",
       "reset_5h_limit_only": "Reset user-only 5H limit"
     },

@@ -42,6 +42,8 @@
   "GATEWAY_CYBER_PRINCIPAL_RESTRICTED": "このアカウントはゲートウェイのサイバーポリシーにより制限されています。管理者に連絡してください。",
   "CYBER_CHECK_UNAVAILABLE": "ゲートウェイのリクエスト審査サービスは一時的に利用できません。",
   "CYBER_CHECK_CAPACITY": "ゲートウェイのリクエスト審査サービスに利用可能な監査保存容量がありません。",
+  "CYBER_CHECK_NOT_CONFIGURED": "Cyber Check が設定されていないため、制限状態をリセットできません。",
+  "CYBER_PRINCIPAL_RESET_REQUIRED": "このユーザーには有効な Cyber Check アカウント制限があります。ユーザーを有効化する前に、明示的な Cyber リセット操作を使用してください。",
   "INVALID_NORMALIZED_BODY": "正規化されたリクエスト本文をシリアル化できません",
   "NOT_FOUND": "リソースが見つかりません",
   "OPERATION_FAILED": "操作に失敗しました",

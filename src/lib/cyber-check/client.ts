@@ -2,6 +2,8 @@ import { promisify } from "node:util";
 import { constants as zlibConstants, zstdCompress } from "node:zlib";
 import type { CyberCheckConfig } from "./config";
 import type {
+  ClientInstanceCyberState,
+  CyberState,
   ProviderContainment,
   ProviderEventEnvelope,
   RequestOutcomeEnvelope,
@@ -130,6 +132,46 @@ export async function reinstatePrincipal(
 ): Promise<void> {
   const response = await (options.fetchImpl ?? globalThis.fetch)(
     new URL(`/v1/principals/${encodeURIComponent(principalId)}/reinstatement`, config.baseUrl),
+    {
+      method: "POST",
+      headers: { authorization: `Bearer ${config.gatewayToken}` },
+      signal: boundedSignal(options.signal, EVENT_REPORT_TIMEOUT_MS),
+    }
+  );
+  if (response.status !== 204) throw await responseError(response);
+}
+
+export async function getCyberState(
+  config: CyberCheckConfig,
+  principalId: string,
+  options: RequestOptions = {}
+): Promise<CyberState> {
+  const response = await (options.fetchImpl ?? globalThis.fetch)(
+    new URL(`/v1/principals/${encodeURIComponent(principalId)}/cyber-state`, config.baseUrl),
+    {
+      headers: { authorization: `Bearer ${config.gatewayToken}` },
+      signal: boundedSignal(options.signal, JOB_READ_TIMEOUT_MS),
+    }
+  );
+  if (response.status !== 200) throw await responseError(response);
+  const state = parseCyberState(await response.json());
+  if (state.principal_id !== principalId) {
+    throw new CyberCheckClientError("review service returned cyber state for another principal");
+  }
+  return state;
+}
+
+export async function reinstateClientInstance(
+  config: CyberCheckConfig,
+  principalId: string,
+  clientInstanceId: string,
+  options: RequestOptions = {}
+): Promise<void> {
+  const response = await (options.fetchImpl ?? globalThis.fetch)(
+    new URL(
+      `/v1/principals/${encodeURIComponent(principalId)}/client-instances/${encodeURIComponent(clientInstanceId)}/reinstatement`,
+      config.baseUrl
+    ),
     {
       method: "POST",
       headers: { authorization: `Bearer ${config.gatewayToken}` },
@@ -275,6 +317,77 @@ function parseProviderContainment(payload: unknown): ProviderContainment {
     client_instance_restricted: object.client_instance_restricted,
     principal_restricted: object.principal_restricted,
   };
+}
+
+function parseCyberState(payload: unknown): CyberState {
+  const object = requireRecord(payload, "principal cyber state");
+  if (
+    typeof object.principal_id !== "string" ||
+    object.principal_id.length === 0 ||
+    !isPositiveSafeInteger(object.strike_window_seconds) ||
+    !isPositiveSafeInteger(object.disable_threshold) ||
+    !Array.isArray(object.client_instances)
+  ) {
+    throw new CyberCheckClientError("review service returned invalid principal cyber state");
+  }
+  return {
+    principal_id: object.principal_id,
+    strike_window_seconds: Number(object.strike_window_seconds),
+    disable_threshold: Number(object.disable_threshold),
+    principal: parseCyberScopeState(object.principal, "principal cyber state"),
+    client_instances: object.client_instances.map(parseClientInstanceCyberState),
+  };
+}
+
+function parseCyberScopeState(
+  value: unknown,
+  name: string
+): Pick<CyberState["principal"], "current_strikes" | "restricted"> & {
+  last_hit_at_ms?: number;
+  last_reset_at_ms?: number;
+} {
+  const object = requireRecord(value, name);
+  if (!isNonNegativeSafeInteger(object.current_strikes) || typeof object.restricted !== "boolean") {
+    throw new CyberCheckClientError(`review service returned invalid ${name}`);
+  }
+  const lastHitAtMs = optionalTimestamp(object.last_hit_at_ms, name);
+  const lastResetAtMs = optionalTimestamp(object.last_reset_at_ms, name);
+  return {
+    current_strikes: Number(object.current_strikes),
+    restricted: object.restricted,
+    ...(lastHitAtMs === undefined ? {} : { last_hit_at_ms: lastHitAtMs }),
+    ...(lastResetAtMs === undefined ? {} : { last_reset_at_ms: lastResetAtMs }),
+  };
+}
+
+function parseClientInstanceCyberState(value: unknown): ClientInstanceCyberState {
+  const object = requireRecord(value, "client instance cyber state");
+  if (typeof object.client_instance_id !== "string" || object.client_instance_id.length === 0) {
+    throw new CyberCheckClientError("review service returned invalid client instance cyber state");
+  }
+  const state = parseCyberScopeState(object, "client instance cyber state");
+  const expiresAtMs = optionalTimestamp(object.expires_at_ms, "client instance cyber state");
+  return {
+    client_instance_id: object.client_instance_id,
+    ...state,
+    ...(expiresAtMs === undefined ? {} : { expires_at_ms: expiresAtMs }),
+  };
+}
+
+function optionalTimestamp(value: unknown, name: string): number | undefined {
+  if (value === undefined) return undefined;
+  if (!isNonNegativeSafeInteger(value)) {
+    throw new CyberCheckClientError(`review service returned invalid ${name} timestamp`);
+  }
+  return Number(value);
+}
+
+function isNonNegativeSafeInteger(value: unknown): boolean {
+  return Number.isSafeInteger(value) && Number(value) >= 0;
+}
+
+function isPositiveSafeInteger(value: unknown): boolean {
+  return Number.isSafeInteger(value) && Number(value) > 0;
 }
 
 async function responseError(response: Response): Promise<CyberCheckClientError> {

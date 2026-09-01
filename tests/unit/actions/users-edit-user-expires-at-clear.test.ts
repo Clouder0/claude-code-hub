@@ -18,9 +18,18 @@ vi.mock("next-intl/server", () => ({
   getLocale: getLocaleMock,
 }));
 
-const reinstateCyberCheckPrincipalMock = vi.fn(async () => {});
+const getCyberCheckStateMock = vi.fn(async () => null);
+const reinstateCyberCheckPrincipalMock = vi.fn(async () => true);
+const reinstateCyberCheckClientInstanceMock = vi.fn(async () => true);
 vi.mock("@/lib/cyber-check/admin", () => ({
+  getCyberCheckStateIfConfigured: getCyberCheckStateMock,
   reinstateCyberCheckPrincipalIfConfigured: reinstateCyberCheckPrincipalMock,
+  reinstateCyberCheckClientInstanceIfConfigured: reinstateCyberCheckClientInstanceMock,
+}));
+
+const invalidateCachedUserMock = vi.fn(async () => {});
+vi.mock("@/lib/security/api-key-auth-cache", () => ({
+  invalidateCachedUser: invalidateCachedUserMock,
 }));
 
 vi.mock("@/lib/utils/timezone", () => ({
@@ -80,6 +89,9 @@ describe("editUser: expiresAt 清除应写入数据库更新", () => {
       activeSessionsDeleted: 0,
       durationMs: 1,
     });
+    getCyberCheckStateMock.mockResolvedValue(null);
+    reinstateCyberCheckPrincipalMock.mockResolvedValue(true);
+    reinstateCyberCheckClientInstanceMock.mockResolvedValue(true);
   });
 
   test("传入 expiresAt=null 应调用 updateUser(..., { expiresAt: null })", async () => {
@@ -111,30 +123,41 @@ describe("editUser: expiresAt 清除应写入数据库更新", () => {
     expect(findKeyListMock).not.toHaveBeenCalled();
   });
 
-  test("manual edit re-enable resets Cyber Check before making the user active", async () => {
+  test("ordinary edit re-enable checks Cyber state without resetting its epoch", async () => {
     const { editUser } = await import("@/actions/users");
 
     const res = await editUser(123, { isEnabled: true });
 
     expect(res.ok).toBe(true);
-    expect(reinstateCyberCheckPrincipalMock).toHaveBeenCalledWith("123");
+    expect(getCyberCheckStateMock).toHaveBeenCalledWith("123");
+    expect(reinstateCyberCheckPrincipalMock).not.toHaveBeenCalled();
     expect(updateUserMock).toHaveBeenCalledWith(123, expect.objectContaining({ isEnabled: true }));
-    expect(reinstateCyberCheckPrincipalMock.mock.invocationCallOrder[0]).toBeLessThan(
-      updateUserMock.mock.invocationCallOrder[0] ?? Number.MAX_SAFE_INTEGER
-    );
   });
 
-  test("a failed central reinstatement leaves the CCH user disabled", async () => {
-    reinstateCyberCheckPrincipalMock.mockRejectedValueOnce(new Error("review service unavailable"));
+  test("an active principal restriction requires the explicit reset flow", async () => {
+    getCyberCheckStateMock.mockResolvedValueOnce({
+      principal: { current_strikes: 2, restricted: true },
+    });
     const { toggleUserEnabled } = await import("@/actions/users");
 
     const res = await toggleUserEnabled(123, true);
 
-    expect(res).toMatchObject({ ok: false, errorCode: "UPDATE_FAILED" });
+    expect(res).toMatchObject({ ok: false, errorCode: "CYBER_PRINCIPAL_RESET_REQUIRED" });
+    expect(updateUserMock).not.toHaveBeenCalled();
+    expect(reinstateCyberCheckPrincipalMock).not.toHaveBeenCalled();
+  });
+
+  test("an unavailable authority leaves the CCH user disabled", async () => {
+    getCyberCheckStateMock.mockRejectedValueOnce(new Error("review service unavailable"));
+    const { toggleUserEnabled } = await import("@/actions/users");
+
+    const res = await toggleUserEnabled(123, true);
+
+    expect(res).toMatchObject({ ok: false, errorCode: "CYBER_CHECK_UNAVAILABLE" });
     expect(updateUserMock).not.toHaveBeenCalled();
   });
 
-  test("renew-and-enable also starts a fresh strike epoch", async () => {
+  test("renew-and-enable checks without silently starting a fresh strike epoch", async () => {
     const { renewUser } = await import("@/actions/users");
 
     const res = await renewUser(123, {
@@ -143,7 +166,60 @@ describe("editUser: expiresAt 清除应写入数据库更新", () => {
     });
 
     expect(res.ok).toBe(true);
-    expect(reinstateCyberCheckPrincipalMock).toHaveBeenCalledWith("123");
+    expect(getCyberCheckStateMock).toHaveBeenCalledWith("123");
+    expect(reinstateCyberCheckPrincipalMock).not.toHaveBeenCalled();
     expect(updateUserMock).toHaveBeenCalledWith(123, expect.objectContaining({ isEnabled: true }));
+  });
+
+  test("explicit principal reset reaches Cyber Check before enabling the CCH user", async () => {
+    const { resetUserPrincipalCyberState } = await import("@/actions/users");
+
+    const res = await resetUserPrincipalCyberState(123, true);
+
+    expect(res).toEqual({ ok: true, data: { enabled: true } });
+    expect(reinstateCyberCheckPrincipalMock).toHaveBeenCalledWith("123");
+    expect(reinstateCyberCheckPrincipalMock.mock.invocationCallOrder[0]).toBeLessThan(
+      updateUserMock.mock.invocationCallOrder[0] ?? Number.MAX_SAFE_INTEGER
+    );
+    expect(updateUserMock).toHaveBeenCalledWith(123, { isEnabled: true });
+    expect(invalidateCachedUserMock).toHaveBeenCalledWith(123);
+  });
+
+  test("explicit principal reset failure never enables the CCH user", async () => {
+    reinstateCyberCheckPrincipalMock.mockRejectedValueOnce(new Error("central reset failed"));
+    const { resetUserPrincipalCyberState } = await import("@/actions/users");
+
+    const res = await resetUserPrincipalCyberState(123, true);
+
+    expect(res).toMatchObject({ ok: false, errorCode: "CYBER_CHECK_UNAVAILABLE" });
+    expect(updateUserMock).not.toHaveBeenCalled();
+    expect(invalidateCachedUserMock).not.toHaveBeenCalled();
+  });
+
+  test("installation reset is scoped to the selected principal and installation", async () => {
+    const { resetUserClientInstanceCyberState } = await import("@/actions/users");
+
+    const res = await resetUserClientInstanceCyberState(123, "installation-7");
+
+    expect(res.ok).toBe(true);
+    expect(reinstateCyberCheckClientInstanceMock).toHaveBeenCalledWith("123", "installation-7");
+    expect(reinstateCyberCheckPrincipalMock).not.toHaveBeenCalled();
+    expect(updateUserMock).not.toHaveBeenCalled();
+  });
+
+  test("Cyber state and reset actions require effective admin authority", async () => {
+    getSessionMock.mockResolvedValue({ user: { id: 123, role: "user" } });
+    const { getUserCyberState, resetUserPrincipalCyberState } = await import("@/actions/users");
+
+    await expect(getUserCyberState(123)).resolves.toMatchObject({
+      ok: false,
+      errorCode: "PERMISSION_DENIED",
+    });
+    await expect(resetUserPrincipalCyberState(123, true)).resolves.toMatchObject({
+      ok: false,
+      errorCode: "PERMISSION_DENIED",
+    });
+    expect(getCyberCheckStateMock).not.toHaveBeenCalled();
+    expect(reinstateCyberCheckPrincipalMock).not.toHaveBeenCalled();
   });
 });

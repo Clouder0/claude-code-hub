@@ -42,6 +42,8 @@
   "GATEWAY_CYBER_PRINCIPAL_RESTRICTED": "This account is restricted by the gateway cyber policy. Contact an administrator.",
   "CYBER_CHECK_UNAVAILABLE": "The gateway request review service is temporarily unavailable.",
   "CYBER_CHECK_CAPACITY": "The gateway request review service has no evidence capacity available.",
+  "CYBER_CHECK_NOT_CONFIGURED": "Cyber Check is not configured, so its restriction state cannot be reset.",
+  "CYBER_PRINCIPAL_RESET_REQUIRED": "This user has an active Cyber Check account restriction. Use the explicit Cyber reset action before enabling the user.",
   "INVALID_NORMALIZED_BODY": "The normalized request body could not be serialized",
   "NOT_FOUND": "Resource not found",
   "OPERATION_FAILED": "Operation failed",

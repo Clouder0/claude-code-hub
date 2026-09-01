@@ -4,7 +4,11 @@ const mocks = vi.hoisted(() => ({ getEnvConfig: vi.fn() }));
 
 vi.mock("@/lib/config/env.schema", () => ({ getEnvConfig: mocks.getEnvConfig }));
 
-import { reinstateCyberCheckPrincipalIfConfigured } from "@/lib/cyber-check/admin";
+import {
+  getCyberCheckStateIfConfigured,
+  reinstateCyberCheckClientInstanceIfConfigured,
+  reinstateCyberCheckPrincipalIfConfigured,
+} from "@/lib/cyber-check/admin";
 
 function env(mode: "off" | "shadow" | "enforce") {
   return {
@@ -30,7 +34,7 @@ describe("Cyber Check principal administration", () => {
     const fetchMock = vi.fn(async () => new Response(null, { status: 204 }));
     vi.stubGlobal("fetch", fetchMock);
 
-    await reinstateCyberCheckPrincipalIfConfigured("7");
+    await expect(reinstateCyberCheckPrincipalIfConfigured("7")).resolves.toBe(true);
 
     expect(String(fetchMock.mock.calls[0]?.[0])).toBe(
       "http://127.0.0.1:8090/v1/principals/7/reinstatement"
@@ -43,7 +47,7 @@ describe("Cyber Check principal administration", () => {
     vi.stubGlobal("fetch", fetchMock);
     mocks.getEnvConfig.mockReturnValue(env("off"));
 
-    await reinstateCyberCheckPrincipalIfConfigured("7");
+    await expect(reinstateCyberCheckPrincipalIfConfigured("7")).resolves.toBe(false);
 
     expect(fetchMock).not.toHaveBeenCalled();
   });
@@ -57,5 +61,34 @@ describe("Cyber Check principal administration", () => {
     await expect(reinstateCyberCheckPrincipalIfConfigured("7")).rejects.toMatchObject({
       status: 503,
     });
+  });
+
+  it("reads live state and resets one installation without exposing the token", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        Response.json({
+          principal_id: "7",
+          strike_window_seconds: 2_592_000,
+          disable_threshold: 2,
+          principal: { current_strikes: 1, restricted: false },
+          client_instances: [],
+        })
+      )
+      .mockResolvedValueOnce(new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(getCyberCheckStateIfConfigured("7")).resolves.toMatchObject({
+      principal_id: "7",
+      principal: { current_strikes: 1 },
+    });
+    await expect(
+      reinstateCyberCheckClientInstanceIfConfigured("7", "installation/1")
+    ).resolves.toBe(true);
+
+    expect(String(fetchMock.mock.calls[0]?.[0])).toContain("/v1/principals/7/cyber-state");
+    expect(String(fetchMock.mock.calls[1]?.[0])).toContain(
+      "/v1/principals/7/client-instances/installation%2F1/reinstatement"
+    );
   });
 });

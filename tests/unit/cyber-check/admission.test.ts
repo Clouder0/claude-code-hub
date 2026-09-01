@@ -326,6 +326,36 @@ describe("CCH cyber-check admission seam", () => {
     expect(error).toMatchObject({ code: "gateway_cyber_restricted", statusCode: 403 });
   });
 
+  it("includes the retry timestamp for a temporary installation restriction", async () => {
+    mocks.getEnvConfig.mockReturnValue(env("enforce"));
+    const expiresAtMs = Date.parse("2030-01-02T03:04:05.000Z");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        finalResponse("deny", {
+          reason: "active_restriction",
+          restriction: {
+            scope: "client_instance",
+            subject_id: "installation-admission-test",
+            reason: "provider_cyber_policy",
+            expires_at_ms: expiresAtMs,
+          },
+        })
+      )
+    );
+
+    const error = await admitFinalResponsesRequest({
+      session: session(),
+      provider: { id: 1, providerType: "codex" },
+      requestPath: "/v1/responses",
+      message,
+      bodyString: JSON.stringify(message),
+    }).catch((value: unknown) => value);
+
+    expect(error).toBeInstanceOf(RequestReviewError);
+    expect((error as Error).message).toContain("Retry after 2030-01-02T03:04:05.000Z");
+  });
+
   it("ignores every service denial while the gateway is in absolute shadow", async () => {
     vi.stubGlobal(
       "fetch",

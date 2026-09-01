@@ -2,7 +2,9 @@ import { describe, expect, it, vi } from "vitest";
 import { zstdDecompressSync } from "node:zlib";
 import {
   CyberCheckClientError,
+  getCyberState,
   getReviewJob,
+  reinstateClientInstance,
   reinstatePrincipal,
   reportProviderEvent,
   reportRequestOutcome,
@@ -261,6 +263,106 @@ describe("cyber-check client", () => {
 
     const [url, init] = fetchMock.mock.calls[0] ?? [];
     expect(String(url)).toBe("http://127.0.0.1:8090/v1/principals/principal%2F7/reinstatement");
+    expect(init?.method).toBe("POST");
+    expect(new Headers(init?.headers).get("authorization")).toBe("Bearer gateway-test-token");
+  });
+
+  it("reads and validates the derived principal and installation cyber state", async () => {
+    const fetchMock = vi.fn(async () =>
+      jsonResponse(
+        {
+          principal_id: "principal/7",
+          strike_window_seconds: 2_592_000,
+          disable_threshold: 2,
+          principal: {
+            current_strikes: 2,
+            restricted: true,
+            last_hit_at_ms: 1_800_000_000_000,
+          },
+          client_instances: [
+            {
+              client_instance_id: "installation/1",
+              current_strikes: 1,
+              restricted: true,
+              expires_at_ms: 1_800_086_400_000,
+              last_hit_at_ms: 1_800_000_000_000,
+              last_reset_at_ms: 1_700_000_000_000,
+            },
+          ],
+        },
+        200
+      )
+    );
+
+    const state = await getCyberState(config, "principal/7", {
+      fetchImpl: fetchMock as unknown as typeof fetch,
+    });
+
+    expect(state).toMatchObject({
+      principal_id: "principal/7",
+      disable_threshold: 2,
+      principal: { current_strikes: 2, restricted: true },
+      client_instances: [
+        { client_instance_id: "installation/1", current_strikes: 1, restricted: true },
+      ],
+    });
+    expect(String(fetchMock.mock.calls[0]?.[0])).toBe(
+      "http://127.0.0.1:8090/v1/principals/principal%2F7/cyber-state"
+    );
+    expect(new Headers(fetchMock.mock.calls[0]?.[1]?.headers).get("authorization")).toBe(
+      "Bearer gateway-test-token"
+    );
+  });
+
+  it("rejects a malformed cyber state instead of inventing an unblocked state", async () => {
+    const fetchMock = vi.fn(async () =>
+      jsonResponse(
+        {
+          principal_id: "7",
+          strike_window_seconds: 2_592_000,
+          disable_threshold: 2,
+          principal: { current_strikes: -1, restricted: false },
+          client_instances: [],
+        },
+        200
+      )
+    );
+
+    await expect(
+      getCyberState(config, "7", { fetchImpl: fetchMock as unknown as typeof fetch })
+    ).rejects.toThrow("invalid principal cyber state");
+  });
+
+  it("rejects a valid state document for a different principal", async () => {
+    const fetchMock = vi.fn(async () =>
+      jsonResponse(
+        {
+          principal_id: "8",
+          strike_window_seconds: 2_592_000,
+          disable_threshold: 2,
+          principal: { current_strikes: 0, restricted: false },
+          client_instances: [],
+        },
+        200
+      )
+    );
+
+    await expect(
+      getCyberState(config, "7", { fetchImpl: fetchMock as unknown as typeof fetch })
+    ).rejects.toThrow("another principal");
+  });
+
+  it("reinstates one principal-scoped installation through its explicit resource", async () => {
+    const fetchMock = vi.fn(async () => new Response(null, { status: 204 }));
+
+    await reinstateClientInstance(config, "principal/7", "installation/1", {
+      fetchImpl: fetchMock as unknown as typeof fetch,
+    });
+
+    const [url, init] = fetchMock.mock.calls[0] ?? [];
+    expect(String(url)).toBe(
+      "http://127.0.0.1:8090/v1/principals/principal%2F7/client-instances/installation%2F1/reinstatement"
+    );
     expect(init?.method).toBe("POST");
     expect(new Headers(init?.headers).get("authorization")).toBe("Bearer gateway-test-token");
   });

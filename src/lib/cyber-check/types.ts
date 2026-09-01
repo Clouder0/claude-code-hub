@@ -64,6 +64,30 @@ export interface ProviderContainment {
   principal_restricted: boolean;
 }
 
+export interface PrincipalCyberState {
+  current_strikes: number;
+  restricted: boolean;
+  last_hit_at_ms?: number;
+  last_reset_at_ms?: number;
+}
+
+export interface ClientInstanceCyberState {
+  client_instance_id: string;
+  current_strikes: number;
+  restricted: boolean;
+  expires_at_ms?: number;
+  last_hit_at_ms?: number;
+  last_reset_at_ms?: number;
+}
+
+export interface CyberState {
+  principal_id: string;
+  strike_window_seconds: number;
+  disable_threshold: number;
+  principal: PrincipalCyberState;
+  client_instances: ClientInstanceCyberState[];
+}
+
 export interface RequestOutcomeEnvelope {
   schema_version: "cyber-check.request-outcome.v1";
   identity: ReviewRequestEnvelope["identity"];

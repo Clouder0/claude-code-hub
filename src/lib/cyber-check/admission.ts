@@ -408,21 +408,21 @@ async function localizedRequestReviewError(
   kind: "restricted" | "unavailable" | "capacity",
   restriction?: ActiveRestriction
 ): Promise<RequestReviewError> {
+  let message: string | undefined;
   try {
     const { getLocale } = await import("next-intl/server");
     const code = errorMessageCode(kind, restriction);
-    let message = await getErrorMessageServer(await getLocale(), code);
-    if (restriction?.scope === "session" && restriction.expires_at_ms !== undefined) {
-      message = `${message} Retry after ${new Date(restriction.expires_at_ms).toISOString()}.`;
-    }
-    if (kind === "restricted") return RequestReviewError.restricted(message);
-    if (kind === "capacity") return RequestReviewError.capacity(message);
-    return RequestReviewError.unavailable(message);
+    message = await getErrorMessageServer(await getLocale(), code);
   } catch {
-    if (kind === "restricted") return RequestReviewError.restricted();
-    if (kind === "capacity") return RequestReviewError.capacity();
-    return RequestReviewError.unavailable();
+    // The protocol outcome must not depend on request-locale infrastructure.
   }
+  if (restriction?.expires_at_ms !== undefined) {
+    const base = message ?? "This request is restricted by the gateway cyber policy.";
+    message = `${base} Retry after ${new Date(restriction.expires_at_ms).toISOString()}.`;
+  }
+  if (kind === "restricted") return RequestReviewError.restricted(message);
+  if (kind === "capacity") return RequestReviewError.capacity(message);
+  return RequestReviewError.unavailable(message);
 }
 
 function errorMessageCode(

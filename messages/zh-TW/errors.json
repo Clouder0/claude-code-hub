@@ -42,6 +42,8 @@
   "GATEWAY_CYBER_PRINCIPAL_RESTRICTED": "此帳戶已被閘道網路安全政策限制，請聯絡管理員。",
   "CYBER_CHECK_UNAVAILABLE": "閘道請求審查服務暫時無法使用。",
   "CYBER_CHECK_CAPACITY": "閘道請求審查服務目前沒有可用的稽核儲存容量。",
+  "CYBER_CHECK_NOT_CONFIGURED": "Cyber Check 尚未設定，無法重設其風控狀態。",
+  "CYBER_PRINCIPAL_RESET_REQUIRED": "此使用者有有效的 Cyber Check 帳戶限制，請先使用明確的 Cyber 重設操作，再啟用使用者。",
   "INVALID_NORMALIZED_BODY": "規範化後的請求體無法序列化",
   "NOT_FOUND": "資源不存在",
   "OPERATION_FAILED": "操作失敗",

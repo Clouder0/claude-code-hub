@@ -48,6 +48,12 @@ const mockResetUserAllStatistics = vi.fn().mockResolvedValue({ ok: true });
 const mockAddKey = vi.fn().mockResolvedValue({ ok: true, data: { key: "sk-test-key" } });
 const mockEditKey = vi.fn().mockResolvedValue({ ok: true });
 const mockCreateUserOnly = vi.fn().mockResolvedValue({ ok: true, data: { user: { id: 1 } } });
+const mockGetUserCyberState = vi.fn().mockResolvedValue({ configured: false, state: null });
+const mockResetUserCyberClientInstance = vi.fn().mockResolvedValue({ ok: true });
+const mockResetUserCyberPrincipal = vi.fn().mockResolvedValue({
+  ok: true,
+  data: { enabled: true },
+});
 
 vi.mock("@/actions/users", () => ({
   editUser: (...args: unknown[]) => mockEditUser(...args),
@@ -56,6 +62,19 @@ vi.mock("@/actions/users", () => ({
   resetUserLimitsOnly: (...args: unknown[]) => mockResetUserLimitsOnly(...args),
   resetUserAllStatistics: (...args: unknown[]) => mockResetUserAllStatistics(...args),
   createUserOnly: (...args: unknown[]) => mockCreateUserOnly(...args),
+}));
+
+vi.mock("@/lib/api-client/v1/actions/users", () => ({
+  editUser: (...args: unknown[]) => mockEditUser(...args),
+  removeUser: (...args: unknown[]) => mockRemoveUser(...args),
+  toggleUserEnabled: (...args: unknown[]) => mockToggleUserEnabled(...args),
+  resetUserLimitsOnly: (...args: unknown[]) => mockResetUserLimitsOnly(...args),
+  resetUserAllStatistics: (...args: unknown[]) => mockResetUserAllStatistics(...args),
+  createUserOnly: (...args: unknown[]) => mockCreateUserOnly(...args),
+  getUserCyberState: async (...args: unknown[]) =>
+    (await mockGetUserCyberState(...args)) ?? { configured: false, state: null },
+  resetUserCyberClientInstance: (...args: unknown[]) => mockResetUserCyberClientInstance(...args),
+  resetUserCyberPrincipal: (...args: unknown[]) => mockResetUserCyberPrincipal(...args),
 }));
 
 vi.mock("@/app/[locale]/dashboard/_components/user/actions/reset-user-5h-limit", () => ({
@@ -258,6 +277,7 @@ describe("EditUserDialog", () => {
       defaultOptions: { queries: { retry: false } },
     });
     vi.clearAllMocks();
+    mockGetUserCyberState.mockResolvedValue({ configured: false, state: null });
   });
 
   afterEach(() => {
@@ -276,8 +296,42 @@ describe("EditUserDialog", () => {
       messages.dashboard.userManagement.editDialog.title
     );
     expect(container.querySelector('[data-testid="user-edit-section"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="cyber-state"]')).not.toBeNull();
     expect(container.querySelector('[data-testid="danger-zone"]')).not.toBeNull();
 
+    unmount();
+  });
+
+  test("renders live principal and installation Cyber state only after the dialog opens", async () => {
+    mockGetUserCyberState.mockResolvedValueOnce({
+      configured: true,
+      state: {
+        principal_id: "1",
+        strike_window_seconds: 2_592_000,
+        disable_threshold: 2,
+        principal: { current_strikes: 2, restricted: true },
+        client_instances: [
+          {
+            client_instance_id: "installation-visible-7",
+            current_strikes: 1,
+            restricted: false,
+          },
+        ],
+      },
+    });
+    const { container, unmount } = renderWithProviders(
+      <EditUserDialog open={true} onOpenChange={vi.fn()} user={mockUser} />
+    );
+
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+
+    expect(mockGetUserCyberState).toHaveBeenCalledWith(1);
+    expect(container.textContent).toContain("installation-visible-7");
+    expect(container.textContent).toContain(
+      messages.dashboard.userManagement.editDialog.cyberState.resetPrincipal
+    );
     unmount();
   });
 

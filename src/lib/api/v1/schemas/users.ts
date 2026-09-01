@@ -119,6 +119,48 @@ export const UserEnableSchema = z
   })
   .strict();
 
+const CyberTimestampSchema = z.number().int().nonnegative();
+const CyberScopeStateSchema = z.object({
+  current_strikes: z.number().int().nonnegative(),
+  restricted: z.boolean(),
+  last_hit_at_ms: CyberTimestampSchema.optional(),
+  last_reset_at_ms: CyberTimestampSchema.optional(),
+});
+
+export const UserCyberStateResponseSchema = z.object({
+  configured: z.boolean().describe("Whether Cyber Check is configured for this CCH process."),
+  state: z
+    .object({
+      principal_id: z.string(),
+      strike_window_seconds: z.number().int().positive(),
+      disable_threshold: z.number().int().positive(),
+      principal: CyberScopeStateSchema,
+      client_instances: z.array(
+        CyberScopeStateSchema.extend({
+          client_instance_id: z.string(),
+          expires_at_ms: CyberTimestampSchema.optional(),
+        })
+      ),
+    })
+    .nullable(),
+});
+
+export const UserCyberClientInstanceResetSchema = z
+  .object({
+    clientInstanceId: z
+      .string()
+      .min(1)
+      .max(256)
+      .refine((value) => !value.includes("\n") && !value.includes("\r")),
+  })
+  .strict();
+
+export const UserCyberPrincipalResetSchema = z
+  .object({
+    enableUser: z.boolean().describe("Enable the CCH user only after central reset succeeds."),
+  })
+  .strict();
+
 export const UsersUsageBatchSchema = z
   .object({
     userIds: z.array(z.number().int().positive()).max(500).describe("User ids."),

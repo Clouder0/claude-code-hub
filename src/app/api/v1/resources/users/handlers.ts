@@ -15,6 +15,8 @@ import {
 } from "@/lib/api/v1/_shared/response-helpers";
 import {
   UserCreateSchema,
+  UserCyberClientInstanceResetSchema,
+  UserCyberPrincipalResetSchema,
   UserEnableSchema,
   UserFilterSearchQuerySchema,
   UserIdParamSchema,
@@ -110,6 +112,49 @@ export async function getUser(c: Context): Promise<Response> {
   const result = await callAction(c, actions.getUserById, [params.id] as never[], c.get("auth"));
   if (!result.ok) return actionError(c, result);
   return jsonResponse(redactUserKeys(result.data));
+}
+
+export async function getUserCyberState(c: Context): Promise<Response> {
+  const params = parseUserParams(c);
+  if (params instanceof Response) return params;
+  const actions = await import("@/actions/users");
+  return actionJson(
+    c,
+    await callAction(c, actions.getUserCyberState, [params.id] as never[], c.get("auth"))
+  );
+}
+
+export async function resetUserCyberClientInstance(c: Context): Promise<Response> {
+  const params = parseUserParams(c);
+  if (params instanceof Response) return params;
+  const body = await parseHonoJsonBody(c, UserCyberClientInstanceResetSchema);
+  if (!body.ok) return body.response;
+  const actions = await import("@/actions/users");
+  const result = await callAction(
+    c,
+    actions.resetUserClientInstanceCyberState,
+    [params.id, body.data.clientInstanceId] as never[],
+    c.get("auth")
+  );
+  if (!result.ok) return actionError(c, result);
+  return noContentResponse();
+}
+
+export async function resetUserCyberPrincipal(c: Context): Promise<Response> {
+  const params = parseUserParams(c);
+  if (params instanceof Response) return params;
+  const body = await parseHonoJsonBody(c, UserCyberPrincipalResetSchema);
+  if (!body.ok) return body.response;
+  const actions = await import("@/actions/users");
+  return actionJson(
+    c,
+    await callAction(
+      c,
+      actions.resetUserPrincipalCyberState,
+      [params.id, body.data.enableUser] as never[],
+      c.get("auth")
+    )
+  );
 }
 
 export async function createUser(c: Context): Promise<Response> {
@@ -340,6 +385,7 @@ function getActionErrorStatus(
   if (code === "PERMISSION_DENIED") return 403;
   if (code === "NOT_FOUND" || detail.includes("不存在") || detail.includes("not found")) return 404;
   if (code === "DATABASE_ERROR") return 503;
+  if (code === "CYBER_CHECK_UNAVAILABLE") return 503;
   if (code === "CONNECTION_FAILED" || code === "TIMEOUT" || code === "NETWORK_ERROR") return 503;
   if (
     code === "INTERNAL_ERROR" ||

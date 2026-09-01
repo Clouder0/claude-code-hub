@@ -39,6 +39,8 @@
       "create": "创建用户",
       "update": "更新用户",
       "delete": "删除用户",
+      "cyber_client_instance_reset": "重置用户 Cyber installation",
+      "cyber_principal_reset": "重置用户 Cyber 账户",
       "reset_5h_limit": "重置用户 5H 限额",
       "reset_5h_limit_only": "重置用户专属 5H 限额"
     },
