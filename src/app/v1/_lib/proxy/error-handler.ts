@@ -519,11 +519,14 @@ export class ProxyErrorHandler {
       typeof upstreamRequestId === "string" && upstreamRequestId.trim()
         ? upstreamRequestId.trim()
         : undefined;
+    // 终态 overload 的客户端码改写为 server_error:Codex CLI 将
+    // server_is_overloaded/slow_down 按致命闭集处理("Model at capacity"
+    // 并终止会话),而 server_error 落在其内置退避重试集合内(与 sub2api 的
+    // sanitizeOpenAICapacityShedErrorCodeForClient 同一策略)。仅改写客户端
+    // payload;内部日志与决策链保留 isOverload 原始分类(verbose details 不变)。
     const terminalErrorCode =
       (isRequestReviewError(error) ? error.code : policyRejectionCodeOf(error)) ??
-      (error instanceof ProxyError && error.upstreamError?.isOverload
-        ? "server_is_overloaded"
-        : undefined);
+      (error instanceof ProxyError && error.upstreamError?.isOverload ? "server_error" : undefined);
     const settings = await getSettings();
     const finalClientErrorMessage = resolveFinalClientErrorMessage({
       error,

@@ -137,7 +137,7 @@ describe("handleProxyRequest - hedge terminal error pipeline", async () => {
     expect(body.error.details).toBeUndefined();
   });
 
-  test("终态 overload 应返回真实 503 与 Codex 可识别的错误 code", async () => {
+  test("终态 overload 应返回真实 503 与客户端可重试的 server_error code", async () => {
     h.forwarderError = new ProxyError("所有供应商暂时不可用，请稍后重试", 503, {
       body: "",
       isOverload: true,
@@ -149,11 +149,16 @@ describe("handleProxyRequest - hedge terminal error pipeline", async () => {
     expect(res.status).toBe(503);
     expect(res.headers.get("content-type")).toContain("application/json");
     const body = await res.json();
+    // 2026-08-21 决策(2026-09-02 落地):终态 overload 的客户端码改写为
+    // server_error——server_is_overloaded/slow_down 属 Codex CLI 致命闭集
+    // ("Model at capacity"并终止会话),server_error 落在其内置退避重试集合内。
+    // 503 与脱敏 message 语义不变;内部分类(isOverload)不在客户端 payload 上。
     expect(body.error).toMatchObject({
       message: expect.stringContaining("Our servers are currently overloaded"),
       type: "service_unavailable_error",
-      code: "server_is_overloaded",
+      code: "server_error",
     });
+    expect(JSON.stringify(body)).not.toContain("server_is_overloaded");
   });
 
   test("新开关开启且 hedge 终态带 safe candidate 时，应透传脱敏后的上游 message", async () => {
