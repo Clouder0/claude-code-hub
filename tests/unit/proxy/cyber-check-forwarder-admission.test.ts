@@ -1,5 +1,8 @@
 import { createHash } from "node:crypto";
+import { createServer, type Server, type ServerResponse } from "node:http";
+import type { AddressInfo } from "node:net";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { fetch as undiciFetch } from "undici";
 import { resolveEndpointPolicy } from "@/app/v1/_lib/proxy/endpoint-policy";
 import { RequestReviewError } from "@/app/v1/_lib/proxy/errors";
 import { ProxyForwarder } from "@/app/v1/_lib/proxy/forwarder";
@@ -38,12 +41,12 @@ vi.mock("@/lib/request-filter-engine", () => ({
   requestFilterEngine: { applyFinal: mocks.applyFinal },
 }));
 
-function createProvider(): Provider {
+function createProvider(url = "https://codex.example.com/v1"): Provider {
   return {
     id: 41,
     name: "codex-upstream",
     providerType: "codex",
-    url: "https://codex.example.com/v1",
+    url,
     key: "upstream-key",
     preserveClientIp: false,
     priority: 0,
@@ -162,6 +165,25 @@ async function forward(session: ProxySession, provider: Provider): Promise<Respo
   return doForward(session, provider, provider.url);
 }
 
+async function listen(server: Server): Promise<string> {
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      server.off("error", reject);
+      resolve();
+    });
+  });
+  const address = server.address() as AddressInfo;
+  return `http://127.0.0.1:${address.port}`;
+}
+
+async function close(server: Server): Promise<void> {
+  server.closeAllConnections();
+  await new Promise<void>((resolve, reject) => {
+    server.close((error) => (error ? reject(error) : resolve()));
+  });
+}
+
 describe("ProxyForwarder cyber-check admission boundary", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -177,6 +199,124 @@ describe("ProxyForwarder cyber-check admission boundary", () => {
   afterEach(() => {
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
+  });
+
+  it("initiates upstream before shadow observation and does not await Cyber Check", async () => {
+    mocks.getEnvConfig.mockReturnValue({
+      CYBER_CHECK_MODE: "shadow",
+      CYBER_CHECK_URL: "http://127.0.0.1:8090",
+      CYBER_CHECK_GATEWAY_TOKEN: "gateway-token",
+      CYBER_CHECK_ZSTD_MIN_BYTES: 256 * 1024,
+      CYBER_CHECK_MAX_ENCODING_BYTES: 256 * 1024 * 1024,
+    });
+    const events: string[] = [];
+    const message = {
+      model: "gpt-5.6-sol",
+      input: "Observe this request without gating it.",
+      stream: true,
+    };
+    const session = createSession(message);
+    const provider = createProvider();
+    let releaseReview!: (response: Response) => void;
+    const reviewResponsePromise = new Promise<Response>((resolve) => {
+      releaseReview = resolve;
+    });
+    const reviewFetch = vi.fn(() => {
+      events.push("review");
+      return reviewResponsePromise;
+    });
+    vi.stubGlobal("fetch", reviewFetch);
+    const upstreamFetch = vi
+      .spyOn(ProxyForwarder as never, "fetchWithoutAutoDecode")
+      .mockImplementationOnce(async () => {
+        events.push("upstream");
+        return new Response("ok", { status: 200 });
+      });
+
+    await expect(forward(session, provider)).resolves.toBeInstanceOf(Response);
+
+    expect(upstreamFetch).toHaveBeenCalledOnce();
+    await vi.waitFor(() => expect(reviewFetch).toHaveBeenCalledOnce());
+    expect(events).toEqual(["upstream", "review"]);
+
+    const observation = session.getCyberCheckObservation();
+    expect(observation).not.toBeNull();
+    let observationSettled = false;
+    void observation!.completion.then(() => {
+      observationSettled = true;
+    });
+    await Promise.resolve();
+    expect(observationSettled).toBe(false);
+
+    releaseReview(reviewResponse("allow"));
+    await expect(observation!.completion).resolves.toMatchObject({ status: "recorded" });
+
+    const packet = reviewPacketFrom(reviewFetch.mock.calls[0]);
+    expect(packet.source.body_sha256).toBe(
+      createHash("sha256").update(String(session.forwardedRequestBody)).digest("hex")
+    );
+  });
+
+  it("completes a real loopback upstream response while the Cyber HTTP response is held", async () => {
+    vi.stubGlobal("fetch", undiciFetch);
+    let reviewArrived!: () => void;
+    const reviewStarted = new Promise<void>((resolve) => {
+      reviewArrived = resolve;
+    });
+    let reviewResponseWriter: ServerResponse | null = null;
+    const cyberServer = createServer((request, response) => {
+      request.resume();
+      request.once("end", () => {
+        reviewResponseWriter = response;
+        reviewArrived();
+      });
+    });
+    const upstreamServer = createServer((request, response) => {
+      request.resume();
+      response.writeHead(200, { "content-type": "text/plain" });
+      response.end("upstream-ok");
+    });
+
+    try {
+      const [cyberOrigin, upstreamOrigin] = await Promise.all([
+        listen(cyberServer),
+        listen(upstreamServer),
+      ]);
+      mocks.getEnvConfig.mockReturnValue({
+        CYBER_CHECK_MODE: "shadow",
+        CYBER_CHECK_URL: cyberOrigin,
+        CYBER_CHECK_GATEWAY_TOKEN: "gateway-token",
+        CYBER_CHECK_ZSTD_MIN_BYTES: 256 * 1024,
+        CYBER_CHECK_MAX_ENCODING_BYTES: 256 * 1024 * 1024,
+      });
+      const message = {
+        model: "gpt-5.6-sol",
+        input: "Exercise actual loopback transports.",
+        stream: false,
+      };
+      const session = createSession(message);
+      const provider = createProvider(`${upstreamOrigin}/v1`);
+
+      const upstreamResponse = await forward(session, provider);
+      await expect(upstreamResponse.text()).resolves.toBe("upstream-ok");
+      await reviewStarted;
+
+      const observation = session.getCyberCheckObservation();
+      expect(observation).not.toBeNull();
+      let observationSettled = false;
+      void observation!.completion.then(() => {
+        observationSettled = true;
+      });
+      await Promise.resolve();
+      expect(observationSettled).toBe(false);
+
+      const reviewBody = await reviewResponse("allow").text();
+      reviewResponseWriter!.writeHead(200, { "content-type": "application/json" });
+      reviewResponseWriter!.end(reviewBody);
+      await expect(observation!.completion).resolves.toMatchObject({ status: "recorded" });
+    } finally {
+      await Promise.all([close(cyberServer), close(upstreamServer)]);
+    }
   });
 
   it("reviews the final filtered body before sending those exact bytes upstream", async () => {

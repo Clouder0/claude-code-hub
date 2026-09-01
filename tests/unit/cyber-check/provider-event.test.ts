@@ -17,7 +17,10 @@ vi.mock("@/lib/security/policy-containment", () => ({
   disableUserForCyberCheckContainment: mocks.disableUserForCyberCheckContainment,
 }));
 
-import type { CyberCheckAdmissionCorrelation } from "@/app/v1/_lib/proxy/session";
+import type {
+  CyberCheckAdmissionCorrelation,
+  CyberCheckObservationHandle,
+} from "@/app/v1/_lib/proxy/session";
 import { reportProviderPolicyEventBestEffort } from "@/lib/cyber-check/provider-event";
 
 const correlation: CyberCheckAdmissionCorrelation = {
@@ -41,10 +44,16 @@ function env(mode: "off" | "shadow" | "enforce") {
   };
 }
 
-function session(marker: CyberCheckAdmissionCorrelation | null = correlation) {
+function recordedObservation(): CyberCheckObservationHandle {
+  return {
+    completion: Promise.resolve({ status: "recorded", correlation }),
+  };
+}
+
+function session(observation: CyberCheckObservationHandle | null = recordedObservation()) {
   return {
     sessionId: "session-provider-event-test",
-    getCyberCheckAdmissionCorrelation: () => marker,
+    getCyberCheckObservation: () => observation,
   };
 }
 
@@ -58,7 +67,16 @@ describe("CCH provider cyber-event reporting", () => {
     vi.unstubAllGlobals();
   });
 
-  it("reports an exact correlated cyber event", async () => {
+  it("returns immediately in shadow, then reports the exact correlated cyber event", async () => {
+    let settleObservation!: (value: {
+      status: "recorded";
+      correlation: CyberCheckAdmissionCorrelation;
+    }) => void;
+    const observation: CyberCheckObservationHandle = {
+      completion: new Promise((resolve) => {
+        settleObservation = resolve;
+      }),
+    };
     const fetchMock = vi.fn(
       async () =>
         new Response(
@@ -73,12 +91,13 @@ describe("CCH provider cyber-event reporting", () => {
     );
     vi.stubGlobal("fetch", fetchMock);
 
-    await expect(reportProviderPolicyEventBestEffort(session(), "cyber_policy")).resolves.toEqual({
-      principal_strikes: 1,
-      session_restricted: true,
-      client_instance_restricted: true,
-      principal_restricted: false,
-    });
+    await expect(
+      reportProviderPolicyEventBestEffort(session(observation), "cyber_policy")
+    ).resolves.toBeNull();
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    settleObservation({ status: "recorded", correlation });
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
 
     const [url, init] = fetchMock.mock.calls[0] ?? [];
     expect(String(url)).toBe("http://127.0.0.1:8090/v1/provider-events");
@@ -122,7 +141,15 @@ describe("CCH provider cyber-event reporting", () => {
     );
     vi.stubGlobal("fetch", fetchMock);
 
-    await reportProviderPolicyEventBestEffort(session(), "cyber_policy");
+    await expect(
+      reportProviderPolicyEventBestEffort(session(), "cyber_policy")
+    ).resolves.toBeNull();
+    await vi.waitFor(() =>
+      expect(mocks.logger.info).toHaveBeenCalledWith(
+        "CyberCheck: authoritative provider cyber event reported",
+        expect.anything()
+      )
+    );
 
     expect(mocks.disableUserForCyberCheckContainment).not.toHaveBeenCalled();
   });
@@ -161,6 +188,24 @@ describe("CCH provider cyber-event reporting", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it("skips a provider event when its matching observation was not recorded", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const observation: CyberCheckObservationHandle = {
+      completion: Promise.resolve({ status: "capture_gap" }),
+    };
+
+    await expect(
+      reportProviderPolicyEventBestEffort(session(observation), "cyber_policy")
+    ).resolves.toBeNull();
+    await vi.waitFor(() =>
+      expect(mocks.logger.warn).toHaveBeenCalledWith(
+        "CyberCheck: authoritative provider cyber event skipped after observation capture gap"
+      )
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("contains service failures without logging response content", async () => {
     const fetchMock = vi.fn(
       async () =>
@@ -176,15 +221,17 @@ describe("CCH provider cyber-event reporting", () => {
     await expect(
       reportProviderPolicyEventBestEffort(session(), "cyber_policy")
     ).resolves.toBeNull();
-
-    expect(mocks.logger.warn).toHaveBeenCalledWith(
-      "CyberCheck: authoritative provider cyber event could not be reported",
-      expect.objectContaining({
-        errorType: "CyberCheckClientError",
-        status: 409,
-        serviceCode: "provider_event_conflict",
-      })
+    await vi.waitFor(() =>
+      expect(mocks.logger.warn).toHaveBeenCalledWith(
+        "CyberCheck: authoritative provider cyber event could not be reported",
+        expect.objectContaining({
+          errorType: "CyberCheckClientError",
+          status: 409,
+          serviceCode: "provider_event_conflict",
+        })
+      )
     );
+
     expect(JSON.stringify(mocks.logger.warn.mock.calls)).not.toContain(
       "sensitive response details"
     );

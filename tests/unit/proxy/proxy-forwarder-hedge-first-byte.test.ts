@@ -515,7 +515,7 @@ describe("ProxyForwarder - first-byte hedge scheduling", () => {
     expect(sessionState.currentModelRedirect.redirect.redirectedModel).toBe(fireworksRedirect);
   });
 
-  test("attempt sessions retain stable request identity without owning persistence", () => {
+  test("attempt sessions retain stable request identity without owning persistence", async () => {
     const provider = createProvider({ id: 2, name: "attempt" });
     const session = createSession();
     session.setMessageContext({
@@ -523,15 +523,20 @@ describe("ProxyForwarder - first-byte hedge scheduling", () => {
       user: { id: 7, name: "test-user" },
       key: { id: 9 },
     } as never);
-    session.setCyberCheckAdmissionCorrelation({
-      identity: {
-        request_id: "tracking:digest",
-        principal_id: "7",
-        client_instance_id: "installation-1",
-        session_id: "sess-hedge",
-        sequence: 1,
-      },
-      upstreamProviderId: "1",
+    session.setCyberCheckObservation({
+      completion: Promise.resolve({
+        status: "recorded",
+        correlation: {
+          identity: {
+            request_id: "tracking:digest",
+            principal_id: "7",
+            client_instance_id: "installation-1",
+            session_id: "sess-hedge",
+            sequence: 1,
+          },
+          upstreamProviderId: "1",
+        },
+      }),
     });
 
     const attempt = (
@@ -546,28 +551,37 @@ describe("ProxyForwarder - first-byte hedge scheduling", () => {
       requestId: 123,
       principalId: 7,
     });
-    expect(attempt.getCyberCheckAdmissionCorrelation()).toBeNull();
+    expect(attempt.getCyberCheckObservation()).toBeNull();
     expect(attempt.shouldPersistSessionDebugArtifacts()).toBe(false);
     expect(attempt.shouldTrackSessionObservability()).toBe(false);
 
-    attempt.setCyberCheckAdmissionCorrelation({
-      identity: {
-        request_id: "attempt:digest",
-        principal_id: "7",
-        client_instance_id: "installation-1",
-        session_id: "sess-hedge",
-        sequence: 1,
-      },
-      upstreamProviderId: "2",
+    attempt.setCyberCheckObservation({
+      completion: Promise.resolve({
+        status: "recorded",
+        correlation: {
+          identity: {
+            request_id: "attempt:digest",
+            principal_id: "7",
+            client_instance_id: "installation-1",
+            session_id: "sess-hedge",
+            sequence: 1,
+          },
+          upstreamProviderId: "2",
+        },
+      }),
     });
     (
       ProxyForwarder as unknown as {
         syncWinningAttemptSession: (target: ProxySession, source: ProxySession) => void;
       }
     ).syncWinningAttemptSession(session, attempt);
-    expect(session.getCyberCheckAdmissionCorrelation()).toMatchObject({
-      identity: { request_id: "attempt:digest" },
-      upstreamProviderId: "2",
+    const result = await session.getCyberCheckObservation()!.completion;
+    expect(result).toMatchObject({
+      status: "recorded",
+      correlation: {
+        identity: { request_id: "attempt:digest" },
+        upstreamProviderId: "2",
+      },
     });
   });
 
@@ -2040,15 +2054,20 @@ describe("ProxyForwarder - first-byte hedge scheduling", () => {
     );
     doForward.mockImplementationOnce(async (attemptSession) => {
       const correlatedAttempt = attemptSession as ProxySession;
-      correlatedAttempt.setCyberCheckAdmissionCorrelation({
-        identity: {
-          request_id: "attempt-17:digest",
-          principal_id: "7",
-          client_instance_id: "installation-1",
-          session_id: "sess-hedge",
-          sequence: 1,
-        },
-        upstreamProviderId: "17",
+      correlatedAttempt.setCyberCheckObservation({
+        completion: Promise.resolve({
+          status: "recorded",
+          correlation: {
+            identity: {
+              request_id: "attempt-17:digest",
+              principal_id: "7",
+              client_instance_id: "installation-1",
+              session_id: "sess-hedge",
+              sequence: 1,
+            },
+            upstreamProviderId: "17",
+          },
+        }),
       });
       throw originalError;
     });
@@ -2062,9 +2081,13 @@ describe("ProxyForwarder - first-byte hedge scheduling", () => {
     const [reportedSession, reportedPolicy] =
       mocks.reportProviderPolicyEventBestEffort.mock.calls[0] ?? [];
     expect(reportedSession).not.toBe(session);
-    expect((reportedSession as ProxySession).getCyberCheckAdmissionCorrelation()).toMatchObject({
-      identity: { request_id: "attempt-17:digest" },
-      upstreamProviderId: "17",
+    const result = await (reportedSession as ProxySession).getCyberCheckObservation()!.completion;
+    expect(result).toMatchObject({
+      status: "recorded",
+      correlation: {
+        identity: { request_id: "attempt-17:digest" },
+        upstreamProviderId: "17",
+      },
     });
     expect(reportedPolicy).toBe("cyber_policy");
     expect(mocks.containPolicyRejection).toHaveBeenCalledWith(session, "cyber_policy");
