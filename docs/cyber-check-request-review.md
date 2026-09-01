@@ -1,9 +1,10 @@
 # Codex 请求审查适配器
 
 CCH 把最终将发往 Codex 的 `/v1/responses` HTTP/SSE 请求投影给独立的 `cyber-check`
-服务。调用点位于最终 request filter、provider override、校验与序列化之后、任何上游 I/O
-之前。因此 Reviewer 看到的是完整有序的出站上下文，而不是仅看最新 user message；tool result、
-assistant tool call、developer instruction、tool schema 和受支持的内联图片都不会漏掉。
+服务。最终 request filter、provider override、校验与序列化先生成唯一的出站 body，因此 Reviewer
+看到的是完整有序的出站上下文，而不是仅看最新 user message；tool result、assistant tool call、
+developer instruction、tool schema 和受支持的内联图片都不会漏掉。`enforce` 在任何上游 I/O 前
+同步取得 admission；`shadow` 先发起上游 transport，再在后台投影并提交同一个最终 body。
 
 ## 启用
 
@@ -17,8 +18,8 @@ CYBER_CHECK_ZSTD_MIN_BYTES=262144
 `CYBER_CHECK_MODE`：
 
 - `off`：默认，不调用服务；
-- `shadow`：绝对只观察；任何 Cyber Check deny、已有限制、容量、磁盘/SQLite、Reviewer、超时、
-  网络或配置故障都只记录，不阻止原本会发往上游的请求；
+- `shadow`：绝对只观察；上游请求不等待投影、压缩、Cyber Check 网络或持久化，任何 deny、已有限制、
+  容量、磁盘/SQLite、Reviewer、超时、网络或配置故障也不改变原本的上游结果；
 - `enforce`：投影、协议、同步 Reviewer 或服务故障 fail closed，返回
   `cyber_check_unavailable`。
 
@@ -26,6 +27,10 @@ CCH 和服务端的 rollout mode 通常应一起调整，但正确性不依赖�
 总是忽略服务 deny 和所有审查故障；服务端 shadow 也会把负面判断表达为 `decision: allow` 加
 `predicted_decision: deny`。容量错误只在 enforce 映射为 `cyber_check_capacity` 并停止转发。
 非 loopback 服务必须使用 HTTPS。
+
+Shadow 为每个实际 upstream attempt 安装一个进程内 observation handle。它只保证当前进程中的关联
+顺序，不是队列或 durable outbox：进程退出、25 秒提交超时、容量耗尽或网络故障都可能形成明确的
+capture gap。该模式不重试，也不为此新增 CCH 数据库、Redis key 或后台任务系统。
 
 达到 `CYBER_CHECK_ZSTD_MIN_BYTES` 的审查包使用 Node 异步 zstd level 1；压缩后没有更小时仍发送
 普通 JSON。低级别用于降低跨服务字节数且不把 admission 变成 CPU 热点。服务端分别限制 wire body
@@ -60,8 +65,9 @@ GET /v1/review-jobs/{job_id}
 仍使用统一的 `gateway_cyber_restricted` 本地错误。Shadow 忽略该 deny，并由服务端保留 Reviewer
 校准 case。
 
-`202` 后 CCH 只在客户端连接仍存活时短期观察 Job。负面异步结果在终态可见前由服务端安装后续
-session restriction；停止轮询不会丢掉限制。V1 不承诺撤回已经发出的当前上游请求。
+`202` 后 CCH 只在客户端连接仍存活时短期观察 Job。Shadow 下提交与 Job 观察都在用户响应链之外；
+enforce 下只有取得 durable `202` admission 后才发起上游。负面异步结果在终态可见前由服务端安装
+后续 session restriction；停止轮询不会丢掉限制。V1 不承诺撤回已经发出的当前上游请求。
 
 ## 上游事件、错误与人工解禁
 
@@ -78,8 +84,10 @@ actionable：一次 hit 封锁当前 session 24 小时，并在存在 installati
 instance；30 天新 epoch 内两个去重 actionable hit 会限制 principal。Shadow 事件仍保存为 audit/risk
 事实并提高审查频率，但永远不会在切换模式后追溯成 strike。Cyber Check 是 cyber strike、restriction
 和 reset 的唯一权威；CCH 既有 `security_event` 仅审计，不再用 Redis/PostgreSQL 复制 cyber 风控状态。
-provider event 只做一次有指标的 best-effort 回报，失败可能漏掉 containment。只有 enforce 中心响应
-确认 principal restriction 后，CCH 才更新既有 `users.is_enabled` 并失效鉴权缓存。
+provider event 只做一次有指标的 best-effort 回报，失败可能漏掉 containment。Shadow 会等待匹配的
+observation 成功后在后台回报，但不会延迟真实上游错误；如果 observation 是 capture gap，当前协议
+无法关联 admission，因此跳过 dependent event。只有 enforce 中心响应确认 principal restriction 后，
+CCH 才更新既有 `users.is_enabled` 并失效鉴权缓存。
 
 触发请求仍返回真实上游 `cyber_policy`。后续网关拒绝使用 `gateway_cyber_restricted`；session 文案可
 携带 retry time，client/principal 文案提示联系管理员，但不会泄露匹配规则或 Reviewer rationale。
@@ -96,9 +104,10 @@ POST /v1/principals/{principal_id}/reinstatement
 
 ## 证据生命周期与 V1 边界
 
-成功且无权威事件的终态 best-effort 回报 `POST /v1/request-outcomes`。普通候选从 `pending/` 删除，
-选中的 allowed 校准样本进入滚动 `samples/`，风险与 provider evidence 留在 `cases/`。仍可能产生
-provider event 的 billable hedge loser 不会被过早 clean；交给有界 TTL 清理。
+成功且无权威事件的终态在匹配 observation 成功后，后台 best-effort 回报
+`POST /v1/request-outcomes`。普通候选从 `pending/` 删除，选中的 allowed 校准样本进入滚动
+`samples/`，风险与 provider evidence 留在 `cases/`。仍可能产生 provider event 的 billable hedge
+loser 不会被过早 clean；交给有界 TTL 清理。
 
 V1 只处理 Codex provider 的 `/v1/responses` HTTP/SSE。Inbound Responses WebSocket、
 `/v1/responses/compact` 和其他协议保持原行为。Referenced provider context、远程媒体、新 item/content

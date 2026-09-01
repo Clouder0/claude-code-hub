@@ -20,7 +20,10 @@ import { getCachedSystemSettings, isHttp2Enabled } from "@/lib/config";
 import { getEnvConfig } from "@/lib/config/env.schema";
 import { PROVIDER_DEFAULTS, PROVIDER_LIMITS } from "@/lib/constants/provider.constants";
 import { PROTECTED_AUTH_HEADER_NAMES } from "@/lib/custom-headers";
-import { admitFinalResponsesRequest } from "@/lib/cyber-check/admission";
+import {
+  admitFinalResponsesRequest,
+  prepareFinalResponsesShadowObservation,
+} from "@/lib/cyber-check/admission";
 import { reportProviderPolicyEventBestEffort } from "@/lib/cyber-check/provider-event";
 import { recordEndpointFailure, recordEndpointSuccess } from "@/lib/endpoint-circuit-breaker";
 import { applyGeminiGoogleSearchOverrideWithAudit } from "@/lib/gemini/provider-overrides";
@@ -2484,10 +2487,10 @@ export class ProxyForwarder {
       throw new Error("Provider is required");
     }
 
-    // Correlation belongs to one concrete upstream attempt. Clear it before any provider-specific
+    // Observation state belongs to one concrete upstream attempt. Clear it before provider-specific
     // preparation so protocol changes, raw passthrough, and failed admission cannot inherit a
-    // previous attempt's provider identity.
-    session.clearCyberCheckAdmissionCorrelation();
+    // previous attempt's completion or provider identity.
+    session.clearCyberCheckObservation();
 
     const resolvedCacheTtl = resolveCacheTtlPreference(
       session.authState?.key?.cacheTtlPreference,
@@ -2517,6 +2520,7 @@ export class ProxyForwarder {
     let isStreaming = false;
     let proxyUrl: string;
     let isApiKey = false;
+    let startCyberCheckShadowObservation: (() => void) | null = null;
 
     // --- GEMINI HANDLING ---
     if (provider.providerType === "gemini" || provider.providerType === "gemini-cli") {
@@ -3011,13 +3015,19 @@ export class ProxyForwarder {
           requestBody = bodyString;
           session.setForwardedRequestBody(bodyString, messageToSend);
 
-          await admitFinalResponsesRequest({
+          const cyberCheckInput = {
             session,
             provider,
             requestPath,
             message: messageToSend,
             bodyString,
-          });
+          };
+          if (getEnvConfig().CYBER_CHECK_MODE === "shadow") {
+            startCyberCheckShadowObservation =
+              prepareFinalResponsesShadowObservation(cyberCheckInput)?.start ?? null;
+          } else {
+            await admitFinalResponsesRequest(cyberCheckInput);
+          }
 
           // messageToSend 就是 bodyString 的序列化来源；直接读取 stream 字段，
           // 避免对多 MB 请求体做一次只为读布尔值的 JSON.parse（该解析位于 TTFB 路径）。
@@ -3285,10 +3295,10 @@ export class ProxyForwarder {
       // ⭐ 所有供应商使用 undici.request 绕过 fetch 的自动解压
       // 原因：undici fetch 无法关闭自动解压，上游可能无视 accept-encoding: identity 返回 gzip
       // 当 gzip 流被提前终止时（如连接关闭），undici Gunzip 会抛出 "TypeError: terminated"
-      response = responsesWsResponse
-        ? responsesWsResponse
+      const upstreamResponsePromise = responsesWsResponse
+        ? Promise.resolve(responsesWsResponse)
         : useErrorTolerantFetch
-          ? await ProxyForwarder.fetchWithoutAutoDecode(
+          ? ProxyForwarder.fetchWithoutAutoDecode(
               proxyUrl,
               init,
               provider.id,
@@ -3296,7 +3306,10 @@ export class ProxyForwarder {
               session,
               deferDetailSnapshotPersistence
             )
-          : await fetch(proxyUrl, init);
+          : fetch(proxyUrl, init);
+      startCyberCheckShadowObservation?.();
+      startCyberCheckShadowObservation = null;
+      response = await upstreamResponsePromise;
       // ⭐ fetch 成功：收到 HTTP 响应头，保留响应超时继续监控
       // 注意：undici 的 fetch 在收到 HTTP 响应头后就 resolve，但实际数据（SSE 首字节 / 完整 JSON）
       // 还没到达。responseTimeoutId 需要延续到 response-handler 中才能真正控制"首字节"或"总耗时"
@@ -5139,7 +5152,7 @@ export class ProxyForwarder {
     shadow.setContext1mApplied(session.getContext1mApplied());
     // 浅拷贝会带上 tracking session 的缓存解析树；成对清掉，避免影子持有大对象。
     shadow.clearForwardedRequestBody();
-    shadow.clearCyberCheckAdmissionCorrelation();
+    shadow.clearCyberCheckObservation();
     // Keep stable request identity for metadata/cache-affinity shaping, but prevent each racing
     // attempt from independently persisting debug/session state. The tracking session owns writes.
     shadow.shouldPersistSessionDebugArtifacts = () => false;
@@ -5161,7 +5174,7 @@ export class ProxyForwarder {
     );
     target.requestUrl = new URL(source.requestUrl.toString());
     target.copyForwardedRequestBodyFrom(source);
-    target.copyCyberCheckAdmissionCorrelationFrom(source);
+    target.copyCyberCheckObservationFrom(source);
     target.setCacheTtlResolved(source.getCacheTtlResolved());
     target.setContext1mApplied(source.getContext1mApplied());
 

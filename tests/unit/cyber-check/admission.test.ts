@@ -19,7 +19,11 @@ vi.mock("@/lib/config/env.schema", () => ({ getEnvConfig: mocks.getEnvConfig }))
 vi.mock("@/lib/logger", () => ({ logger: mocks.logger }));
 
 import { RequestReviewError } from "@/app/v1/_lib/proxy/errors";
-import type { CyberCheckAdmissionCorrelation, ProxySession } from "@/app/v1/_lib/proxy/session";
+import type {
+  CyberCheckObservationHandle,
+  CyberCheckObservationResult,
+  ProxySession,
+} from "@/app/v1/_lib/proxy/session";
 import { admitFinalResponsesRequest } from "@/lib/cyber-check/admission";
 import { cyberCheckEncodingCapacity } from "@/lib/cyber-check/capacity";
 
@@ -37,7 +41,7 @@ const message = {
 };
 
 function session(): ProxySession {
-  let admissionCorrelation: CyberCheckAdmissionCorrelation | null = null;
+  let observation: CyberCheckObservationHandle | null = null;
   return {
     headers: new Headers(),
     clientAbortSignal: null,
@@ -48,14 +52,20 @@ function session(): ProxySession {
     },
     sessionId: "session-admission-test",
     requestSequence: 3,
-    clearCyberCheckAdmissionCorrelation: () => {
-      admissionCorrelation = null;
+    clearCyberCheckObservation: () => {
+      observation = null;
     },
-    setCyberCheckAdmissionCorrelation: (correlation) => {
-      admissionCorrelation = correlation;
+    setCyberCheckObservation: (value) => {
+      observation = value;
     },
-    getCyberCheckAdmissionCorrelation: () => admissionCorrelation,
+    getCyberCheckObservation: () => observation,
   } as unknown as ProxySession;
+}
+
+async function awaitObservation(reviewSession: ProxySession): Promise<CyberCheckObservationResult> {
+  const observation = reviewSession.getCyberCheckObservation();
+  expect(observation).not.toBeNull();
+  return observation!.completion;
 }
 
 function env(mode: "off" | "shadow" | "enforce") {
@@ -182,14 +192,12 @@ describe("CCH cyber-check admission seam", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it("sends the final body and honors a shadow prediction without blocking", async () => {
-    const fetchMock = vi.fn(async () =>
-      finalResponse("allow", {
-        predictedDecision: "deny",
-        enforcementMode: "shadow",
-        reviewDisposition: "restricted",
-      })
-    );
+  it("starts a shadow observation without waiting for its response", async () => {
+    let releaseReview!: (response: Response) => void;
+    const reviewResponse = new Promise<Response>((resolve) => {
+      releaseReview = resolve;
+    });
+    const fetchMock = vi.fn(() => reviewResponse);
     vi.stubGlobal("fetch", fetchMock);
     const reviewSession = session();
 
@@ -203,7 +211,27 @@ describe("CCH cyber-check admission seam", () => {
       })
     ).resolves.toBeUndefined();
 
-    expect(fetchMock).toHaveBeenCalledOnce();
+    const observation = reviewSession.getCyberCheckObservation();
+    expect(observation).not.toBeNull();
+    const completion = vi.fn();
+    void observation!.completion.then(completion);
+    await Promise.resolve();
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(completion).not.toHaveBeenCalled();
+
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
+    expect(cyberCheckEncodingCapacity.snapshot()).toBeGreaterThan(0);
+
+    releaseReview(
+      finalResponse("allow", {
+        predictedDecision: "deny",
+        enforcementMode: "shadow",
+        reviewDisposition: "restricted",
+      })
+    );
+    const result = await observation!.completion;
+    expect(result.status).toBe("recorded");
+    expect(cyberCheckEncodingCapacity.snapshot()).toBe(0);
     const packet = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body));
     expect(packet.identity).toMatchObject({
       principal_id: "7",
@@ -211,9 +239,12 @@ describe("CCH cyber-check admission seam", () => {
       session_id: "session-admission-test",
       sequence: 3,
     });
-    expect(reviewSession.getCyberCheckAdmissionCorrelation()).toEqual({
-      identity: packet.identity,
-      upstreamProviderId: "1",
+    expect(result).toEqual({
+      status: "recorded",
+      correlation: {
+        identity: packet.identity,
+        upstreamProviderId: "1",
+      },
     });
   });
 
@@ -234,11 +265,42 @@ describe("CCH cyber-check admission seam", () => {
       message,
       bodyString: JSON.stringify(message),
     });
+    await expect(awaitObservation(attempt)).resolves.toMatchObject({ status: "recorded" });
 
     const packet = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body));
     expect(packet.identity).toMatchObject({
       principal_id: "7",
       client_instance_id: "installation-admission-test",
+      session_id: "session-admission-test",
+      sequence: 3,
+    });
+    expect(packet.identity.request_id).toMatch(/^42:/);
+  });
+
+  it("captures attempt identity before deferred shadow projection", async () => {
+    const fetchMock = vi.fn(async () => finalResponse("allow"));
+    vi.stubGlobal("fetch", fetchMock);
+    const reviewSession = session();
+
+    await admitFinalResponsesRequest({
+      session: reviewSession,
+      provider: { id: 1, providerType: "codex" },
+      requestPath: "/v1/responses",
+      message,
+      bodyString: JSON.stringify(message),
+    });
+    reviewSession.messageContext = {
+      id: 99,
+      user: { id: 88 },
+      key: { id: 77 },
+    };
+    reviewSession.sessionId = "later-session";
+    reviewSession.requestSequence = 4;
+
+    await expect(awaitObservation(reviewSession)).resolves.toMatchObject({ status: "recorded" });
+    const packet = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body));
+    expect(packet.identity).toMatchObject({
+      principal_id: "7",
       session_id: "session-admission-test",
       sequence: 3,
     });
@@ -280,15 +342,17 @@ describe("CCH cyber-check admission seam", () => {
       )
     );
 
+    const reviewSession = session();
     await expect(
       admitFinalResponsesRequest({
-        session: session(),
+        session: reviewSession,
         provider: { id: 1, providerType: "codex" },
         requestPath: "/v1/responses",
         message,
         bodyString: JSON.stringify(message),
       })
     ).resolves.toBeUndefined();
+    await expect(awaitObservation(reviewSession)).resolves.toMatchObject({ status: "recorded" });
   });
 
   it("fails open for all service capacity outcomes in shadow and closed in enforce", async () => {
@@ -303,15 +367,17 @@ describe("CCH cyber-check admission seam", () => {
         )
       );
 
+      const shadowSession = session();
       await expect(
         admitFinalResponsesRequest({
-          session: session(),
+          session: shadowSession,
           provider: { id: 1, providerType: "codex" },
           requestPath: "/v1/responses",
           message,
           bodyString: JSON.stringify(message),
         })
       ).resolves.toBeUndefined();
+      await expect(awaitObservation(shadowSession)).resolves.toEqual({ status: "capture_gap" });
 
       mocks.getEnvConfig.mockReturnValue(env("enforce"));
       const error = await admitFinalResponsesRequest({
@@ -334,15 +400,17 @@ describe("CCH cyber-check admission seam", () => {
       CYBER_CHECK_MAX_ENCODING_BYTES: 64 * 1024,
     });
 
+    const shadowSession = session();
     await expect(
       admitFinalResponsesRequest({
-        session: session(),
+        session: shadowSession,
         provider: { id: 1, providerType: "codex" },
         requestPath: "/v1/responses",
         message,
         bodyString: JSON.stringify(message),
       })
     ).resolves.toBeUndefined();
+    await expect(awaitObservation(shadowSession)).resolves.toEqual({ status: "capture_gap" });
     expect(fetchMock).not.toHaveBeenCalled();
     expect(cyberCheckEncodingCapacity.snapshot()).toBe(0);
 
@@ -365,15 +433,17 @@ describe("CCH cyber-check admission seam", () => {
     const fetchMock = vi.fn(async () => new Response("unavailable", { status: 503 }));
     vi.stubGlobal("fetch", fetchMock);
 
+    const shadowSession = session();
     await expect(
       admitFinalResponsesRequest({
-        session: session(),
+        session: shadowSession,
         provider: { id: 1, providerType: "codex" },
         requestPath: "/v1/responses",
         message,
         bodyString: JSON.stringify(message),
       })
     ).resolves.toBeUndefined();
+    await expect(awaitObservation(shadowSession)).resolves.toEqual({ status: "capture_gap" });
 
     mocks.getEnvConfig.mockReturnValue(env("enforce"));
     const error = await admitFinalResponsesRequest({
@@ -396,15 +466,17 @@ describe("CCH cyber-check admission seam", () => {
       .mockResolvedValueOnce(jobResponse("completed"));
     vi.stubGlobal("fetch", fetchMock);
 
+    const reviewSession = session();
     await expect(
       admitFinalResponsesRequest({
-        session: session(),
+        session: reviewSession,
         provider: { id: 1, providerType: "codex" },
         requestPath: "/v1/responses",
         message,
         bodyString: JSON.stringify(message),
       })
     ).resolves.toBeUndefined();
+    await expect(awaitObservation(reviewSession)).resolves.toMatchObject({ status: "recorded" });
 
     await vi.waitFor(() =>
       expect(mocks.logger.warn).toHaveBeenCalledWith(
@@ -432,15 +504,17 @@ describe("CCH cyber-check admission seam", () => {
       CYBER_CHECK_URL: "http://review.internal.example",
     });
 
+    const shadowSession = session();
     await expect(
       admitFinalResponsesRequest({
-        session: session(),
+        session: shadowSession,
         provider: { id: 1, providerType: "codex" },
         requestPath: "/v1/responses",
         message,
         bodyString: JSON.stringify(message),
       })
     ).resolves.toBeUndefined();
+    await expect(awaitObservation(shadowSession)).resolves.toEqual({ status: "capture_gap" });
     expect(fetchMock).not.toHaveBeenCalled();
 
     mocks.getEnvConfig.mockReturnValue({
@@ -459,7 +533,37 @@ describe("CCH cyber-check admission seam", () => {
     expect(error).toMatchObject({ code: "cyber_check_unavailable", statusCode: 503 });
   });
 
-  it("does not reinterpret client cancellation as a review service failure", async () => {
+  it("contains shadow client cancellation as a capture gap", async () => {
+    const controller = new AbortController();
+    controller.abort(new Error("client disconnected"));
+    const cancelledSession = session();
+    cancelledSession.clientAbortSignal = controller.signal;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw controller.signal.reason;
+      })
+    );
+
+    await expect(
+      admitFinalResponsesRequest({
+        session: cancelledSession,
+        provider: { id: 1, providerType: "codex" },
+        requestPath: "/v1/responses",
+        message,
+        bodyString: JSON.stringify(message),
+      })
+    ).resolves.toBeUndefined();
+    await expect(awaitObservation(cancelledSession)).resolves.toEqual({ status: "capture_gap" });
+    expect(cyberCheckEncodingCapacity.snapshot()).toBe(0);
+    expect(mocks.logger.warn).not.toHaveBeenCalledWith(
+      "CyberCheck: request review could not be completed",
+      expect.anything()
+    );
+  });
+
+  it("preserves client cancellation in enforce mode", async () => {
+    mocks.getEnvConfig.mockReturnValue(env("enforce"));
     const controller = new AbortController();
     controller.abort(new Error("client disconnected"));
     const cancelledSession = session();
@@ -481,9 +585,5 @@ describe("CCH cyber-check admission seam", () => {
       })
     ).rejects.toThrow("client disconnected");
     expect(cyberCheckEncodingCapacity.snapshot()).toBe(0);
-    expect(mocks.logger.warn).not.toHaveBeenCalledWith(
-      "CyberCheck: request review could not be completed",
-      expect.anything()
-    );
   });
 });

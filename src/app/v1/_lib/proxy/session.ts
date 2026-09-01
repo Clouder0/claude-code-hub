@@ -132,6 +132,19 @@ export interface CyberCheckAdmissionCorrelation {
   upstreamProviderId: string;
 }
 
+export type CyberCheckObservationResult =
+  | {
+      status: "recorded";
+      correlation: CyberCheckAdmissionCorrelation;
+    }
+  | {
+      status: "capture_gap";
+    };
+
+export interface CyberCheckObservationHandle {
+  completion: Promise<CyberCheckObservationResult>;
+}
+
 export interface ProxyRequestPayload {
   message: Record<string, unknown>;
   buffer?: ArrayBuffer;
@@ -176,7 +189,7 @@ export class ProxySession {
   // Hedge attempts intentionally drop messageContext so only the tracking session owns persistence.
   // These three scalar IDs remain available for request-scoped admission and audit correlation.
   private stableRequestIdentity: StableRequestIdentity | null = null;
-  private cyberCheckAdmissionCorrelation: CyberCheckAdmissionCorrelation | null = null;
+  private cyberCheckObservation: CyberCheckObservationHandle | null = null;
 
   // Time To First Byte (ms). Streaming: first chunk. Non-stream: equals durationMs.
   ttfbMs: number | null = null;
@@ -627,20 +640,20 @@ export class ProxySession {
     return this.stableRequestIdentity;
   }
 
-  setCyberCheckAdmissionCorrelation(correlation: CyberCheckAdmissionCorrelation): void {
-    this.cyberCheckAdmissionCorrelation = correlation;
+  setCyberCheckObservation(observation: CyberCheckObservationHandle): void {
+    this.cyberCheckObservation = observation;
   }
 
-  clearCyberCheckAdmissionCorrelation(): void {
-    this.cyberCheckAdmissionCorrelation = null;
+  clearCyberCheckObservation(): void {
+    this.cyberCheckObservation = null;
   }
 
-  getCyberCheckAdmissionCorrelation(): CyberCheckAdmissionCorrelation | null {
-    return this.cyberCheckAdmissionCorrelation;
+  getCyberCheckObservation(): CyberCheckObservationHandle | null {
+    return this.cyberCheckObservation;
   }
 
-  copyCyberCheckAdmissionCorrelationFrom(source: ProxySession): void {
-    this.cyberCheckAdmissionCorrelation = source.cyberCheckAdmissionCorrelation;
+  copyCyberCheckObservationFrom(source: ProxySession): void {
+    this.cyberCheckObservation = source.cyberCheckObservation;
   }
 
   /**

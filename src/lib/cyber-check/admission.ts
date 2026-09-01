@@ -1,7 +1,11 @@
 import { setTimeout as delay } from "node:timers/promises";
 import { normalizeEndpointPath, V1_ENDPOINT_PATHS } from "@/app/v1/_lib/proxy/endpoint-paths";
 import { RequestReviewError } from "@/app/v1/_lib/proxy/errors";
-import type { ProxySession } from "@/app/v1/_lib/proxy/session";
+import type {
+  CyberCheckAdmissionCorrelation,
+  CyberCheckObservationResult,
+  ProxySession,
+} from "@/app/v1/_lib/proxy/session";
 import { isWebsocketClientRequest } from "@/app/v1/_lib/responses-ws/eligibility";
 import { getEnvConfig } from "@/lib/config/env.schema";
 import { logger } from "@/lib/logger";
@@ -10,7 +14,7 @@ import type { Provider } from "@/types/provider";
 import { cyberCheckEncodingCapacity, type EncodingCapacityLease } from "./capacity";
 import { CyberCheckClientError, getReviewJob, submitReview } from "./client";
 import { type CyberCheckConfig, resolveCyberCheckConfig } from "./config";
-import { projectFinalResponsesRequest } from "./projection";
+import { projectFinalResponsesRequest, type ReviewProjectionIdentity } from "./projection";
 import type { ActiveRestriction, ReviewSubmission } from "./types";
 
 const JOB_POLL_INTERVAL_MS = 1_000;
@@ -22,6 +26,29 @@ export interface FinalResponsesAdmissionInput {
   requestPath: string;
   message: Record<string, unknown>;
   bodyString: string;
+}
+
+export interface PreparedShadowObservation {
+  start(): void;
+}
+
+interface SubmittedReview {
+  submission: ReviewSubmission;
+  correlation: CyberCheckAdmissionCorrelation;
+}
+
+interface FinalResponsesReviewInput {
+  message: Record<string, unknown>;
+  bodyString: string;
+  identity: ReviewProjectionIdentity;
+  context: ReviewAttemptContext;
+}
+
+interface ReviewAttemptContext {
+  requestId: string | null;
+  sessionId: string | null;
+  providerId: number;
+  clientAbortSignal: AbortSignal | null;
 }
 
 /**
@@ -39,20 +66,136 @@ export async function admitFinalResponsesRequest({
   if (env.CYBER_CHECK_MODE === "off") return;
   if (!isSupportedRequest(session, provider, requestPath)) return;
 
+  if (env.CYBER_CHECK_MODE === "shadow") {
+    const prepared = prepareFinalResponsesShadowObservationWithEnv(
+      { session, provider, requestPath, message, bodyString },
+      env
+    );
+    prepared?.start();
+    return;
+  }
+  const reviewInput = captureFinalResponsesReviewInput({
+    session,
+    provider,
+    requestPath,
+    message,
+    bodyString,
+  });
+
   let config: CyberCheckConfig;
   try {
     const resolved = resolveCyberCheckConfig(env);
     if (!resolved) return;
     config = resolved;
   } catch (error) {
-    logAdmissionFailure("configuration", error, session, provider.id);
+    logAdmissionFailure("configuration", error, reviewInput.context);
     if (env.CYBER_CHECK_MODE === "enforce") {
       throw await localizedRequestReviewError("unavailable");
     }
     return;
   }
 
-  let submission: ReviewSubmission;
+  let submitted: SubmittedReview;
+  try {
+    submitted = await submitFinalResponsesReview(reviewInput, config);
+    session.setCyberCheckObservation({
+      completion: Promise.resolve({
+        status: "recorded",
+        correlation: submitted.correlation,
+      }),
+    });
+  } catch (error) {
+    if (reviewInput.context.clientAbortSignal?.aborted) throw error;
+    logAdmissionFailure("submission", error, reviewInput.context);
+    if (isCapacityFailure(error)) throw await localizedRequestReviewError("capacity");
+    throw await localizedRequestReviewError("unavailable");
+  }
+
+  logSubmission(submitted.submission, config, reviewInput.context);
+
+  if (submitted.submission.status === "completed" && submitted.submission.decision === "deny") {
+    throw await localizedRequestReviewError("restricted", submitted.submission.restriction);
+  }
+}
+
+/**
+ * Installs one unsettled request-scoped handle without projecting or uploading the body. The caller
+ * starts upstream transport first, then calls start so Cyber Check cannot become a shadow TTFB gate.
+ */
+export function prepareFinalResponsesShadowObservation(
+  input: FinalResponsesAdmissionInput
+): PreparedShadowObservation | null {
+  return prepareFinalResponsesShadowObservationWithEnv(input, getEnvConfig());
+}
+
+function prepareFinalResponsesShadowObservationWithEnv(
+  input: FinalResponsesAdmissionInput,
+  env: ReturnType<typeof getEnvConfig>
+): PreparedShadowObservation | null {
+  if (env.CYBER_CHECK_MODE !== "shadow") return null;
+  if (!isSupportedRequest(input.session, input.provider, input.requestPath)) return null;
+  const reviewInput = captureFinalResponsesReviewInput(input);
+
+  let settle!: (result: CyberCheckObservationResult) => void;
+  const completion = new Promise<CyberCheckObservationResult>((resolve) => {
+    settle = resolve;
+  });
+  input.session.setCyberCheckObservation({ completion });
+
+  let started = false;
+  return {
+    start: () => {
+      if (started) return;
+      started = true;
+      // Defer projection/hash/serialization until the caller has returned to the upstream await.
+      // This removes Cyber Check's synchronous CPU prefix from the shadow response chain while
+      // still overlapping observation work with upstream network time.
+      setImmediate(() => {
+        void runShadowObservation(reviewInput, env).then(settle, (error: unknown) => {
+          logAdmissionFailure("submission", error, reviewInput.context);
+          settle({ status: "capture_gap" });
+        });
+      });
+    },
+  };
+}
+
+async function runShadowObservation(
+  input: FinalResponsesReviewInput,
+  env: ReturnType<typeof getEnvConfig>
+): Promise<CyberCheckObservationResult> {
+  let config: CyberCheckConfig;
+  try {
+    const resolved = resolveCyberCheckConfig(env);
+    if (!resolved) return { status: "capture_gap" };
+    config = resolved;
+  } catch (error) {
+    logAdmissionFailure("configuration", error, input.context);
+    return { status: "capture_gap" };
+  }
+
+  try {
+    const submitted = await submitFinalResponsesReview(input, config);
+    logSubmission(submitted.submission, config, input.context);
+    return { status: "recorded", correlation: submitted.correlation };
+  } catch (error) {
+    if (input.context.clientAbortSignal?.aborted) {
+      logger.debug("CyberCheck: shadow observation stopped after client disconnect", {
+        requestId: input.context.requestId,
+        sessionId: input.context.sessionId,
+        providerId: input.context.providerId,
+      });
+    } else {
+      logAdmissionFailure("submission", error, input.context);
+    }
+    return { status: "capture_gap" };
+  }
+}
+
+async function submitFinalResponsesReview(
+  { message, bodyString, identity, context }: FinalResponsesReviewInput,
+  config: CyberCheckConfig
+): Promise<SubmittedReview> {
   let encodingLease: EncodingCapacityLease | null = null;
   try {
     encodingLease = cyberCheckEncodingCapacity.tryAcquire(
@@ -66,17 +209,8 @@ export async function admitFinalResponsesRequest({
         "cyber_check_capacity"
       );
     }
-    const context = session.messageContext;
-    const stableIdentity = session.getStableRequestIdentity?.();
-    const requestId = stableIdentity?.requestId ?? context?.id;
-    const principalId = stableIdentity?.principalId ?? context?.user.id;
     const packet = projectFinalResponsesRequest({
-      identity: {
-        requestId: requestId == null ? "" : String(requestId),
-        principalId: principalId == null ? "" : String(principalId),
-        sessionId: session.sessionId ?? "",
-        sequence: session.requestSequence,
-      },
+      identity,
       message,
       bodyString,
     });
@@ -86,37 +220,71 @@ export async function admitFinalResponsesRequest({
     if (unsupportedFields.length > 0) {
       logger.info("CyberCheck: projection gap - unsupported top-level fields", {
         fields: unsupportedFields,
-        requestId: session.messageContext?.id ?? null,
-        sessionId: session.sessionId,
-        providerId: provider.id,
+        requestId: context.requestId,
+        sessionId: context.sessionId,
+        providerId: context.providerId,
       });
     }
-    submission = await submitReview(config, packet, { signal: session.clientAbortSignal });
-    session.setCyberCheckAdmissionCorrelation({
-      identity: packet.identity,
-      upstreamProviderId: String(provider.id),
+    const submission = await submitReview(config, packet, {
+      signal: context.clientAbortSignal,
     });
-  } catch (error) {
-    if (session.clientAbortSignal?.aborted) throw error;
-    logAdmissionFailure("submission", error, session, provider.id);
-    if (config.mode === "shadow") return;
-    if (isCapacityFailure(error)) throw await localizedRequestReviewError("capacity");
-    throw await localizedRequestReviewError("unavailable");
+    return {
+      submission,
+      correlation: {
+        identity: packet.identity,
+        upstreamProviderId: String(context.providerId),
+      },
+    };
   } finally {
     encodingLease?.release();
   }
+}
 
+function captureFinalResponsesReviewInput({
+  session,
+  provider,
+  message,
+  bodyString,
+}: FinalResponsesAdmissionInput): FinalResponsesReviewInput {
+  const context = session.messageContext;
+  const stableIdentity = session.getStableRequestIdentity?.();
+  const requestId = stableIdentity?.requestId ?? context?.id;
+  const principalId = stableIdentity?.principalId ?? context?.user.id;
+  const identity = {
+    requestId: requestId == null ? "" : String(requestId),
+    principalId: principalId == null ? "" : String(principalId),
+    sessionId: session.sessionId ?? "",
+    sequence: session.requestSequence,
+  };
+  return {
+    message,
+    bodyString,
+    identity,
+    context: {
+      requestId: identity.requestId || null,
+      sessionId: session.sessionId,
+      providerId: provider.id,
+      clientAbortSignal: session.clientAbortSignal,
+    },
+  };
+}
+
+function logSubmission(
+  submission: ReviewSubmission,
+  config: CyberCheckConfig,
+  context: ReviewAttemptContext
+): void {
   if (submission.status === "pending") {
     const jobId = submission.job_id;
-    const clientSignal = session.clientAbortSignal;
+    const clientSignal = context.clientAbortSignal;
     const observationContext = {
-      requestId: session.messageContext?.id ?? null,
-      sessionId: session.sessionId,
+      requestId: context.requestId,
+      sessionId: context.sessionId,
     };
     logger.info("CyberCheck: request provisionally admitted with an asynchronous review job", {
       jobId,
       ...observationContext,
-      providerId: provider.id,
+      providerId: context.providerId,
       mode: config.mode,
     });
     // Capture only scalar correlation fields and the request signal. Holding ProxySession here
@@ -136,16 +304,16 @@ export async function admitFinalResponsesRequest({
         });
       })
       .catch((error) => {
-        const context = clientErrorContext(error);
+        const errorContext = clientErrorContext(error);
         if (clientSignal?.aborted) {
           logger.debug("CyberCheck: stopped observing review job after client disconnect", {
             jobId,
-            ...context,
+            ...errorContext,
           });
         } else {
           logger.warn("CyberCheck: review job observation ended without a terminal result", {
             jobId,
-            ...context,
+            ...errorContext,
           });
         }
       });
@@ -156,22 +324,23 @@ export async function admitFinalResponsesRequest({
     submission.decision === "deny" || submission.predicted_decision === "deny"
       ? logger.warn.bind(logger)
       : logger.info.bind(logger);
-  log("CyberCheck: synchronous request review completed", {
-    decision: submission.decision,
-    predictedDecision: submission.predicted_decision,
-    enforcementMode: submission.enforcement_mode,
-    reason: submission.reason,
-    coverage: submission.coverage,
-    policyVersion: submission.policy_version,
-    requestId: session.messageContext?.id ?? null,
-    sessionId: session.sessionId,
-    providerId: provider.id,
-    mode: config.mode,
-  });
-
-  if (config.mode === "enforce" && submission.decision === "deny") {
-    throw await localizedRequestReviewError("restricted", submission.restriction);
-  }
+  log(
+    config.mode === "shadow"
+      ? "CyberCheck: shadow request observation completed"
+      : "CyberCheck: synchronous request review completed",
+    {
+      decision: submission.decision,
+      predictedDecision: submission.predicted_decision,
+      enforcementMode: submission.enforcement_mode,
+      reason: submission.reason,
+      coverage: submission.coverage,
+      policyVersion: submission.policy_version,
+      requestId: context.requestId,
+      sessionId: context.sessionId,
+      providerId: context.providerId,
+      mode: config.mode,
+    }
+  );
 }
 
 function isSupportedRequest(
@@ -212,15 +381,14 @@ async function observeReviewJob(
 function logAdmissionFailure(
   phase: "configuration" | "submission",
   error: unknown,
-  session: ProxySession,
-  providerId: number
+  context: ReviewAttemptContext
 ): void {
   logger.warn("CyberCheck: request review could not be completed", {
     phase,
     ...clientErrorContext(error),
-    requestId: session.messageContext?.id ?? null,
-    sessionId: session.sessionId,
-    providerId,
+    requestId: context.requestId,
+    sessionId: context.sessionId,
+    providerId: context.providerId,
   });
 }
 

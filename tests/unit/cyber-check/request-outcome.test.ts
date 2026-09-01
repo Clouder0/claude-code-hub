@@ -13,7 +13,10 @@ const mocks = vi.hoisted(() => ({
 vi.mock("@/lib/config/env.schema", () => ({ getEnvConfig: mocks.getEnvConfig }));
 vi.mock("@/lib/logger", () => ({ logger: mocks.logger }));
 
-import type { CyberCheckAdmissionCorrelation } from "@/app/v1/_lib/proxy/session";
+import type {
+  CyberCheckAdmissionCorrelation,
+  CyberCheckObservationHandle,
+} from "@/app/v1/_lib/proxy/session";
 import { reportCleanRequestOutcomeBestEffort } from "@/lib/cyber-check/request-outcome";
 
 const correlation: CyberCheckAdmissionCorrelation = {
@@ -37,9 +40,15 @@ function env(mode: "off" | "shadow" | "enforce") {
   };
 }
 
-function session(marker: CyberCheckAdmissionCorrelation | null = correlation) {
+function recordedObservation(): CyberCheckObservationHandle {
   return {
-    getCyberCheckAdmissionCorrelation: () => marker,
+    completion: Promise.resolve({ status: "recorded", correlation }),
+  };
+}
+
+function session(observation: CyberCheckObservationHandle | null = recordedObservation()) {
+  return {
+    getCyberCheckObservation: () => observation,
   };
 }
 
@@ -53,11 +62,23 @@ describe("CCH clean request-outcome reporting", () => {
     vi.unstubAllGlobals();
   });
 
-  it("reports the exact successful admission identity", async () => {
+  it("waits for observation success, then reports its exact identity", async () => {
+    let settleObservation!: (value: {
+      status: "recorded";
+      correlation: CyberCheckAdmissionCorrelation;
+    }) => void;
+    const observation: CyberCheckObservationHandle = {
+      completion: new Promise((resolve) => {
+        settleObservation = resolve;
+      }),
+    };
     const fetchMock = vi.fn(async () => new Response(null, { status: 204 }));
     vi.stubGlobal("fetch", fetchMock);
 
-    await reportCleanRequestOutcomeBestEffort(session());
+    const report = reportCleanRequestOutcomeBestEffort(session(observation));
+    expect(fetchMock).not.toHaveBeenCalled();
+    settleObservation({ status: "recorded", correlation });
+    await report;
 
     const [url, init] = fetchMock.mock.calls[0] ?? [];
     expect(String(url)).toBe("http://127.0.0.1:8090/v1/request-outcomes");
@@ -84,6 +105,21 @@ describe("CCH clean request-outcome reporting", () => {
     await reportCleanRequestOutcomeBestEffort(session());
 
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("skips clean outcome after an observation capture gap", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const observation: CyberCheckObservationHandle = {
+      completion: Promise.resolve({ status: "capture_gap" }),
+    };
+
+    await reportCleanRequestOutcomeBestEffort(session(observation));
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(mocks.logger.debug).toHaveBeenCalledWith(
+      "CyberCheck: clean request outcome skipped after observation capture gap"
+    );
   });
 
   it("contains service failures without exposing response content", async () => {

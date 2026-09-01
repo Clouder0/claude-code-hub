@@ -1,10 +1,10 @@
-import type { ProxySession } from "@/app/v1/_lib/proxy/session";
+import type { CyberCheckAdmissionCorrelation, ProxySession } from "@/app/v1/_lib/proxy/session";
 import { getEnvConfig } from "@/lib/config/env.schema";
 import { logger } from "@/lib/logger";
 import { type CyberCheckClientError, reportRequestOutcome } from "./client";
 import { resolveCyberCheckConfig } from "./config";
 
-type CorrelatedSession = Pick<ProxySession, "getCyberCheckAdmissionCorrelation">;
+type CorrelatedSession = Pick<ProxySession, "getCyberCheckObservation">;
 
 /**
  * Releases candidate evidence after the admitted upstream request has a clean terminal outcome.
@@ -13,10 +13,18 @@ type CorrelatedSession = Pick<ProxySession, "getCyberCheckAdmissionCorrelation">
 export async function reportCleanRequestOutcomeBestEffort(
   session: CorrelatedSession
 ): Promise<void> {
-  const correlation = session.getCyberCheckAdmissionCorrelation();
-  if (!correlation) return;
+  const observation = session.getCyberCheckObservation();
+  if (!observation) return;
 
+  let correlation: CyberCheckAdmissionCorrelation | undefined;
   try {
+    const result = await observation.completion;
+    if (result.status === "capture_gap") {
+      logger.debug("CyberCheck: clean request outcome skipped after observation capture gap");
+      return;
+    }
+    correlation = result.correlation;
+
     const config = resolveCyberCheckConfig(getEnvConfig());
     if (!config) return;
 
@@ -33,8 +41,12 @@ export async function reportCleanRequestOutcomeBestEffort(
   } catch (error) {
     logger.warn("CyberCheck: clean request outcome could not be reported", {
       ...clientErrorContext(error),
-      requestId: correlation.identity.request_id,
-      sessionId: correlation.identity.session_id,
+      ...(correlation
+        ? {
+            requestId: correlation.identity.request_id,
+            sessionId: correlation.identity.session_id,
+          }
+        : {}),
     });
   }
 }
