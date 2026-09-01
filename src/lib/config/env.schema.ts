@@ -176,6 +176,20 @@ export const EnvSchema = z.object({
     .max(64 * 1024 * 1024)
     .default(4 * 1024 * 1024),
 
+  // 预提交心跳:上游静默超过 DELAY 后向下游提交 200 并周期发送 SSE 注释心跳。
+  // 用于对抗零字节静默被反向代理/CF 边缘超时掐断(remote compaction 的首个
+  // 语义帧 p95 ~181s,远超 CF ~130s 断崖;注释帧是唯一可合成的字节来源)。
+  // DELAY=0(默认)完全关闭,行为与不启用此代码逐字节等价;快速失败
+  // (容量类 82% <15s 到达)发生在首拍之前,透明 failover 语义不变。
+  STREAM_GATE_HEARTBEAT_DELAY_MS: z.coerce.number().int().min(0).max(600_000).default(0),
+  STREAM_GATE_HEARTBEAT_INTERVAL_MS: z.coerce
+    .number()
+    .int()
+    .min(1_000)
+    .max(120_000)
+    .default(15_000),
+  STREAM_GATE_HEARTBEAT_MAX_MS: z.coerce.number().int().min(30_000).max(3_600_000).default(300_000),
+
   // 独立请求审查服务。默认关闭；shadow 仅观察，enforce 才执行本地拒绝。
   CYBER_CHECK_MODE: z.enum(["off", "shadow", "enforce"]).default("off"),
   CYBER_CHECK_URL: optionalPreprocessed(

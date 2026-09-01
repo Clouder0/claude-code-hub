@@ -50,6 +50,7 @@ import {
   type ParsedSSEEvent,
   parseSSEData,
   parseSSEDataForFinalization,
+  sseChunkIsCommentOnly,
 } from "@/lib/utils/sse";
 import {
   detectUpstreamErrorFromSseOrJsonText,
@@ -2586,9 +2587,13 @@ export class ProxyResponseHandler {
               const chunkSize = value?.byteLength ?? 0;
               if (value && chunkSize > 0) {
                 if (isFirstChunk) {
-                  isFirstChunk = false;
-                  session.recordTtfb();
                   clearResponseTimeoutOnce(chunkSize);
+                  // 预提交心跳帧(SSE 注释行)不是语义输出,不记 TTFB;
+                  // 保持 isFirstChunk 直到首个非注释块到达。
+                  if (!sseChunkIsCommentOnly(value)) {
+                    isFirstChunk = false;
+                    session.recordTtfb();
+                  }
                 }
 
                 streamTextAccumulator.pushBytes(value);
@@ -3436,8 +3441,6 @@ export class ProxyResponseHandler {
 
             // 流式：读到第一块数据后立即清除响应超时定时器
             if (isFirstChunk) {
-              session.recordTtfb();
-              isFirstChunk = false;
               const sessionWithCleanup = session as typeof session & {
                 clearResponseTimeout?: () => void;
               };
@@ -3448,6 +3451,12 @@ export class ProxyResponseHandler {
                   providerId: provider.id,
                   firstChunkSize: chunkSize,
                 });
+              }
+              // 预提交心跳帧(SSE 注释行)不是语义输出,不记 TTFB;
+              // 保持 isFirstChunk 直到首个非注释块到达。
+              if (!sseChunkIsCommentOnly(value)) {
+                session.recordTtfb();
+                isFirstChunk = false;
               }
             }
           }

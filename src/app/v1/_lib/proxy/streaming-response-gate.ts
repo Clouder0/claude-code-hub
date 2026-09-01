@@ -1,3 +1,4 @@
+import { getEnvConfig } from "@/lib/config/env.schema";
 import { detectUpstreamErrorFromSseOrJsonText } from "@/lib/utils/upstream-error-detection";
 import {
   type ResponsesStreamCommitMarker,
@@ -63,6 +64,8 @@ export type StreamingResponsePrefixInspection =
       diagnostic?: StreamingResponsePrefixDiagnostic;
       commitMarker?: ResponsesStreamCommitMarker;
       semanticDiagnostic?: StreamingResponseSemanticDiagnostic;
+      /** 仅当预提交心跳已启动(response 已对下游提交 200)时存在。 */
+      precommitHeartbeat?: PrecommitHeartbeatDiagnostic;
     }
   | {
       kind: "fake_200";
@@ -84,6 +87,66 @@ export type StreamingResponsePrefixInspection =
       semanticDiagnostic: StreamingResponseSemanticDiagnostic;
     };
 
+export type PrecommitHeartbeatConfig = {
+  /** 首拍延迟;0 = 完全关闭(与历史行为逐字节等价)。 */
+  delayMs: number;
+  intervalMs: number;
+  /** 心跳总时长上限,超限以 response.failed 收尾,防无限挂起。 */
+  maxMs: number;
+};
+
+export type PrecommitHeartbeatOutcome = "pending" | "pass" | "failed" | "expired" | "cancelled";
+
+export type PrecommitHeartbeatDiagnostic = {
+  beats: number;
+  outcome: PrecommitHeartbeatOutcome;
+};
+
+export type PrecommitHeartbeatEvent =
+  | { type: "started"; delayMs: number; intervalMs: number; maxMs: number }
+  | {
+      type: "outcome";
+      outcome: Exclude<PrecommitHeartbeatOutcome, "pending">;
+      beats: number;
+      /** 内部遥测用原始码(如 fake_200 检测码);客户端 payload 恒为 server_error。 */
+      code?: string;
+    };
+
+export const PRECOMMIT_HEARTBEAT_FRAME = ": ping\n\n";
+
+export function resolvePrecommitHeartbeatConfig(): PrecommitHeartbeatConfig {
+  try {
+    const env = getEnvConfig();
+    return {
+      delayMs: env.STREAM_GATE_HEARTBEAT_DELAY_MS,
+      intervalMs: env.STREAM_GATE_HEARTBEAT_INTERVAL_MS,
+      maxMs: env.STREAM_GATE_HEARTBEAT_MAX_MS,
+    };
+  } catch {
+    return { delayMs: 0, intervalMs: 15_000, maxMs: 300_000 };
+  }
+}
+
+/**
+ * 心跳期迟到失败的流内终止事件。
+ *
+ * Codex CLI 的 SSE 匹配臂只认 `response.failed`(不认 `error`/`response.error`
+ * 事件名);错误码必须避开其致命闭集(server_is_overloaded / slow_down /
+ * context window / quota / usage / capacity / policy 关键词),否则客户端会
+ * 终止会话而不重试。文案同理保持中性。内部日志与决策链保留原始分类。
+ */
+function buildPrecommitHeartbeatFailedFrame(reason: string): Uint8Array {
+  const payload = {
+    type: "response.failed",
+    sequence_number: 0,
+    response: {
+      id: "resp_precommit_heartbeat",
+      error: { code: "server_error", message: reason },
+    },
+  };
+  return new TextEncoder().encode(`event: response.failed\ndata: ${JSON.stringify(payload)}\n\n`);
+}
+
 type InspectStreamingResponsePrefixOptions = {
   maxBytes?: number;
   /** Enable the multi-event hold only for the canonical OpenAI Responses SSE protocol. */
@@ -97,6 +160,10 @@ type InspectStreamingResponsePrefixOptions = {
   onStreamingIdleTimeout?: () => void;
   /** Receives bounded shadow-mode divergences after legacy bytes have already been released. */
   onResponsesShadowDiagnostic?: (diagnostic: ResponsesStreamShadowDiagnostic) => void;
+  /** 覆盖 env 解析的心跳配置(测试注入用);缺省读 STREAM_GATE_HEARTBEAT_*。 */
+  precommitHeartbeat?: PrecommitHeartbeatConfig;
+  /** 预提交心跳生命周期遥测(启动/结局),由 forwarder 侧接线记日志。 */
+  onPrecommitHeartbeat?: (event: PrecommitHeartbeatEvent) => void;
 };
 
 type PrefixDecision =
@@ -597,9 +664,163 @@ async function inspectResponsesShadowPrefix(
   };
 }
 
-export async function inspectStreamingResponsePrefix(
+type PrecommitHeartbeatQueueItem =
+  | { kind: "frame"; chunk: Uint8Array }
+  | { kind: "pipe"; reader: ReadableStreamDefaultReader<Uint8Array> }
+  | { kind: "fail"; reason: string };
+
+/**
+ * 心跳已提交后,上游检查仍在等待首帧:此 Response 对下游先发注释心跳,
+ * 内层检查决出后回放其 pass 响应体,或以 response.failed 流内收尾。
+ *
+ * 记账契约(与 sub2api #3887 加固审计对齐):心跳帧不是语义输出——
+ * response-handler 侧凭 sseChunkIsCommentOnly 不将其记为 TTFB 首块;
+ * usage/finalization 的 SSE 解析天然忽略注释行。
+ */
+function buildPrecommitHeartbeatResponse(
+  upstream: Response,
+  inner: Promise<StreamingResponsePrefixInspection>,
+  config: PrecommitHeartbeatConfig,
+  diagnostic: PrecommitHeartbeatDiagnostic,
+  onEvent?: (event: PrecommitHeartbeatEvent) => void
+): Response {
+  let activeReader: ReadableStreamDefaultReader<Uint8Array> | null = null;
+  let cancelled = false;
+  let timerId: ReturnType<typeof setInterval> | null = null;
+  const queue: PrecommitHeartbeatQueueItem[] = [];
+  let wake: (() => void) | null = null;
+  const notify = () => {
+    wake?.();
+    wake = null;
+  };
+  const settle = (outcome: Exclude<PrecommitHeartbeatOutcome, "pending">, code?: string) => {
+    if (diagnostic.outcome !== "pending") return;
+    diagnostic.outcome = outcome;
+    onEvent?.({ type: "outcome", outcome, beats: diagnostic.beats, ...(code ? { code } : {}) });
+  };
+  const stopTimers = () => {
+    if (timerId !== null) {
+      clearInterval(timerId);
+      timerId = null;
+    }
+  };
+
+  const heartbeatChunk = new TextEncoder().encode(PRECOMMIT_HEARTBEAT_FRAME);
+  const deadline = Date.now() + config.maxMs;
+  timerId = setInterval(() => {
+    if (cancelled || diagnostic.outcome !== "pending") return;
+    if (Date.now() >= deadline) {
+      queue.push({ kind: "fail", reason: "gateway stopped waiting for upstream output" });
+      settle("expired");
+      stopTimers();
+      notify();
+      return;
+    }
+    diagnostic.beats += 1;
+    queue.push({ kind: "frame", chunk: heartbeatChunk });
+    notify();
+  }, config.intervalMs);
+
+  inner.then(
+    (result) => {
+      stopTimers();
+      // 客户端已断开,或心跳期已超限收尾:pass 结果只需释放底层资源。
+      if (cancelled || diagnostic.outcome !== "pending") {
+        if (result.kind === "pass") {
+          void result.response.body?.cancel("precommit_heartbeat_settled").catch(() => undefined);
+        }
+        return;
+      }
+      if (result.kind === "pass") {
+        if (result.response.body) {
+          queue.push({ kind: "pipe", reader: result.response.body.getReader() });
+          settle("pass");
+        } else {
+          queue.push({ kind: "fail", reason: "upstream stream ended before first output" });
+          settle("failed");
+        }
+        notify();
+        return;
+      }
+      queue.push({ kind: "fail", reason: "upstream stream ended before first output" });
+      settle("failed", result.code);
+      notify();
+    },
+    () => {
+      stopTimers();
+      if (cancelled || diagnostic.outcome !== "pending") return;
+      queue.push({ kind: "fail", reason: "upstream stream failed before first output" });
+      settle("failed");
+      notify();
+    }
+  );
+
+  const body = new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      while (true) {
+        if (activeReader) {
+          try {
+            const next = await activeReader.read();
+            if (next.done) {
+              activeReader = null;
+              controller.close();
+              return;
+            }
+            controller.enqueue(next.value);
+            return;
+          } catch (error) {
+            activeReader = null;
+            controller.error(error);
+            return;
+          }
+        }
+        if (queue.length === 0) {
+          await new Promise<void>((resolve) => {
+            wake = resolve;
+          });
+          continue;
+        }
+        const item = queue.shift();
+        if (!item) continue;
+        if (item.kind === "frame") {
+          controller.enqueue(item.chunk);
+          return;
+        }
+        if (item.kind === "pipe") {
+          activeReader = item.reader;
+          continue;
+        }
+        stopTimers();
+        controller.enqueue(buildPrecommitHeartbeatFailedFrame(item.reason));
+        controller.close();
+      }
+    },
+    async cancel(reason) {
+      cancelled = true;
+      stopTimers();
+      settle("cancelled");
+      if (activeReader) {
+        const reader = activeReader;
+        activeReader = null;
+        await reader.cancel(reason).catch(() => undefined);
+      }
+      // inner 未决出时,其结果在 inner.then 的清理分支里释放(cancelled 标志)。
+    },
+  });
+
+  const headers = new Headers(upstream.headers);
+  headers.delete("content-length");
+  headers.set("x-accel-buffering", "no");
+  return new Response(body, {
+    status: upstream.status,
+    statusText: upstream.statusText,
+    headers,
+  });
+}
+
+function runInnerInspection(
   response: Response,
-  options: InspectStreamingResponsePrefixOptions = {}
+  options: InspectStreamingResponsePrefixOptions
 ): Promise<StreamingResponsePrefixInspection> {
   if (!options.enableResponsesLifecycleGate) {
     return inspectLegacyStreamingResponsePrefix(response, options);
@@ -613,6 +834,57 @@ export async function inspectStreamingResponsePrefix(
     return inspectResponsesShadowPrefix(response, options);
   }
   return inspectResponsesSemanticPrefix(response, options);
+}
+
+export async function inspectStreamingResponsePrefix(
+  response: Response,
+  options: InspectStreamingResponsePrefixOptions = {}
+): Promise<StreamingResponsePrefixInspection> {
+  const heartbeatConfig = options.precommitHeartbeat ?? resolvePrecommitHeartbeatConfig();
+  if (!response.body || heartbeatConfig.delayMs <= 0) {
+    return runInnerInspection(response, options);
+  }
+
+  // 这不是任何"对冲/双发":只有一条上游请求在飞。Promise.race 在此仅实现
+  // "给内层检查至多 delayMs 毫秒"的超时等待——先完成走原路径,超时才启动
+  // 心跳并继续等同一个内层结果。
+  const inner = runInnerInspection(response, options);
+  let delayTimerId: ReturnType<typeof setTimeout> | undefined;
+  const delayExpired = new Promise<{ kind: "timeout" }>((resolve) => {
+    delayTimerId = setTimeout(() => resolve({ kind: "timeout" }), heartbeatConfig.delayMs);
+  });
+  const innerSettled = inner.then(
+    (result): { kind: "inner"; result: StreamingResponsePrefixInspection } => ({
+      kind: "inner",
+      result,
+    }),
+    (error): { kind: "inner_error"; error: unknown } => ({ kind: "inner_error", error })
+  );
+  const firstSettled = await Promise.race([innerSettled, delayExpired]);
+  clearTimeout(delayTimerId);
+
+  if (firstSettled.kind === "inner") return firstSettled.result;
+  if (firstSettled.kind === "inner_error") throw firstSettled.error;
+
+  const diagnostic: PrecommitHeartbeatDiagnostic = { beats: 0, outcome: "pending" };
+  options.onPrecommitHeartbeat?.({
+    type: "started",
+    delayMs: heartbeatConfig.delayMs,
+    intervalMs: heartbeatConfig.intervalMs,
+    maxMs: heartbeatConfig.maxMs,
+  });
+  const heartbeatResponse = buildPrecommitHeartbeatResponse(
+    response,
+    inner,
+    heartbeatConfig,
+    diagnostic,
+    options.onPrecommitHeartbeat
+  );
+  return {
+    kind: "pass",
+    response: heartbeatResponse,
+    precommitHeartbeat: diagnostic,
+  };
 }
 
 async function inspectLegacyStreamingResponsePrefix(

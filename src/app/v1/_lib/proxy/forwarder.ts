@@ -3832,6 +3832,31 @@ export class ProxyForwarder {
               attemptNumber: attemptNumber ?? null,
             });
           },
+          onPrecommitHeartbeat: (event) => {
+            // 预提交心跳遥测:started/outcome 两类;outcome 的 code 是内部
+            // 原始码(客户端 payload 恒为 server_error)。
+            if (event.type === "started") {
+              logger.info("StreamGatePrecommitHeartbeat: started", {
+                providerId: provider.id,
+                providerName: provider.name,
+                endpointId: endpointAudit?.endpointId ?? null,
+                attemptNumber: attemptNumber ?? null,
+                delayMs: event.delayMs,
+                intervalMs: event.intervalMs,
+                maxMs: event.maxMs,
+              });
+            } else {
+              logger.info("StreamGatePrecommitHeartbeat: outcome", {
+                providerId: provider.id,
+                providerName: provider.name,
+                endpointId: endpointAudit?.endpointId ?? null,
+                attemptNumber: attemptNumber ?? null,
+                outcome: event.outcome,
+                beats: event.beats,
+                ...(event.code ? { code: event.code } : {}),
+              });
+            }
+          },
           ...(isCanonicalResponsesRequest && provider.streamingIdleTimeoutMs > 0
             ? {
                 streamingIdleTimeoutMs: provider.streamingIdleTimeoutMs,

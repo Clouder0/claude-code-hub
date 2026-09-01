@@ -152,6 +152,23 @@ export function parseSSEDataForFinalization(sseText: string): ParsedSSEEvent[] {
 }
 
 /**
+ * 判断一个 SSE 传输块是否仅由注释行(`: ...`)构成。
+ *
+ * 生产来源只有预提交心跳帧(见 streaming-response-gate.ts):注释行不携带
+ * 语义事件,不得被当作 TTFB 的"首块"或语义输出。
+ */
+export function sseChunkIsCommentOnly(chunk: Uint8Array): boolean {
+  if (chunk.byteLength === 0) return false;
+  const text = new TextDecoder().decode(chunk);
+  for (const rawLine of text.split("\n")) {
+    const line = rawLine.trimEnd();
+    if (!line) continue;
+    if (!line.startsWith(":")) return false;
+  }
+  return true;
+}
+
+/**
  * 严格检测文本是否“看起来像” SSE。
  *
  * 只认行首的 `event:` / `data:`（或前置注释行 `:`），避免 JSON 里包含 "data:" 误判。
