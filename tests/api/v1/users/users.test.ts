@@ -22,6 +22,9 @@ const getAllUserKeyGroupsMock = vi.hoisted(() => vi.fn());
 const searchUsersForFilterMock = vi.hoisted(() => vi.fn());
 const searchUsersMock = vi.hoisted(() => vi.fn());
 const batchUpdateUsersMock = vi.hoisted(() => vi.fn());
+const getUserCyberStateMock = vi.hoisted(() => vi.fn());
+const resetUserClientInstanceCyberStateMock = vi.hoisted(() => vi.fn());
+const resetUserPrincipalCyberStateMock = vi.hoisted(() => vi.fn());
 
 vi.mock("@/lib/auth", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/auth")>();
@@ -49,6 +52,9 @@ vi.mock("@/actions/users", () => ({
   searchUsersForFilter: searchUsersForFilterMock,
   searchUsers: searchUsersMock,
   batchUpdateUsers: batchUpdateUsersMock,
+  getUserCyberState: getUserCyberStateMock,
+  resetUserClientInstanceCyberState: resetUserClientInstanceCyberStateMock,
+  resetUserPrincipalCyberState: resetUserPrincipalCyberStateMock,
 }));
 
 const { callV1Route } = await import("../test-utils");
@@ -123,6 +129,24 @@ describe("v1 users endpoints", () => {
     batchUpdateUsersMock.mockResolvedValue({
       ok: true,
       data: { requestedCount: 1, updatedCount: 1, updatedIds: [1] },
+    });
+    getUserCyberStateMock.mockResolvedValue({
+      ok: true,
+      data: {
+        configured: true,
+        state: {
+          principal_id: "1",
+          strike_window_seconds: 2_592_000,
+          disable_threshold: 2,
+          principal: { current_strikes: 1, restricted: false },
+          client_instances: [],
+        },
+      },
+    });
+    resetUserClientInstanceCyberStateMock.mockResolvedValue({ ok: true });
+    resetUserPrincipalCyberStateMock.mockResolvedValue({
+      ok: true,
+      data: { enabled: true },
     });
   });
 
@@ -382,6 +406,52 @@ describe("v1 users endpoints", () => {
     expect(resetStats.response.status).toBe(204);
   });
 
+  test("reads and explicitly resets live Cyber state through admin-only resources", async () => {
+    const state = await callV1Route({
+      method: "GET",
+      pathname: "/api/v1/users/1/cyber-state",
+      headers,
+    });
+    expect(state.response.status).toBe(200);
+    expect(state.json).toMatchObject({
+      configured: true,
+      state: { principal_id: "1", principal: { current_strikes: 1 } },
+    });
+    expect(getUserCyberStateMock).toHaveBeenCalledWith(1);
+
+    const clientReset = await callV1Route({
+      method: "POST",
+      pathname: "/api/v1/users/1/cyber-state/client-instance-reset",
+      headers,
+      body: { clientInstanceId: "installation-7" },
+    });
+    expect(clientReset.response.status).toBe(204);
+    expect(resetUserClientInstanceCyberStateMock).toHaveBeenCalledWith(1, "installation-7");
+
+    const principalReset = await callV1Route({
+      method: "POST",
+      pathname: "/api/v1/users/1/cyber-state/principal-reset",
+      headers,
+      body: { enableUser: true },
+    });
+    expect(principalReset.response.status).toBe(200);
+    expect(principalReset.json).toEqual({ enabled: true });
+    expect(resetUserPrincipalCyberStateMock).toHaveBeenCalledWith(1, true);
+  });
+
+  test("does not expose Cyber administration to an ordinary user credential", async () => {
+    validateAuthTokenMock.mockResolvedValueOnce(userSession);
+
+    const state = await callV1Route({
+      method: "GET",
+      pathname: "/api/v1/users/9/cyber-state",
+      headers: { Authorization: "Bearer user-token" },
+    });
+
+    expect(state.response.status).toBe(403);
+    expect(getUserCyberStateMock).not.toHaveBeenCalled();
+  });
+
   test("maps structured authorization action errors to HTTP status codes", async () => {
     getUserLimitUsageMock.mockResolvedValueOnce({
       ok: false,
@@ -533,6 +603,9 @@ describe("v1 users endpoints", () => {
     expect(doc.paths).toHaveProperty("/api/v1/users/{id}/limit-usage:all");
     expect(doc.paths).toHaveProperty("/api/v1/users/{id}/limits:reset");
     expect(doc.paths).toHaveProperty("/api/v1/users/{id}/statistics:reset");
+    expect(doc.paths).toHaveProperty("/api/v1/users/{id}/cyber-state");
+    expect(doc.paths).toHaveProperty("/api/v1/users/{id}/cyber-state/client-instance-reset");
+    expect(doc.paths).toHaveProperty("/api/v1/users/{id}/cyber-state/principal-reset");
     expect(doc.paths).toHaveProperty("/api/v1/users:batchUpdate");
     expect(doc.paths).toHaveProperty("/api/v1/users:usageBatch");
     expect(doc.paths).toHaveProperty("/api/v1/users:filter-search");

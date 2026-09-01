@@ -74,25 +74,41 @@ POST /v1/provider-events
 ```
 
 回报显式携带 CCH 当时的 `enforcement_mode`。只有 CCH 与服务端都为 enforce 时，新事件才是
-actionable：一次 hit 封锁当前 session 24 小时，并在存在 installation ID 时无限期封锁该 client
-instance；30 天新 epoch 内两个去重 actionable hit 会限制 principal。Shadow 事件仍保存为 audit/risk
+actionable：一次 hit 封锁当前 session 24 小时，并在存在 installation ID 时封锁该 client instance
+24 小时；同一 `(principal, installation)` 在 30 天窗口内第二次去重 hit 才会把 installation 持续封锁到
+管理员重置。相同窗口内两个 principal hit 会限制整个 principal，无论是否来自同一 installation。永久
+限制不会随着 hit 离开计数窗口而自动解除。Shadow 事件仍保存为 audit/risk
 事实并提高审查频率，但永远不会在切换模式后追溯成 strike。Cyber Check 是 cyber strike、restriction
 和 reset 的唯一权威；CCH 既有 `security_event` 仅审计，不再用 Redis/PostgreSQL 复制 cyber 风控状态。
 provider event 只做一次有指标的 best-effort 回报，失败可能漏掉 containment。只有 enforce 中心响应
 确认 principal restriction 后，CCH 才更新既有 `users.is_enabled` 并失效鉴权缓存。
 
-触发请求仍返回真实上游 `cyber_policy`。后续网关拒绝使用 `gateway_cyber_restricted`；session 文案可
-携带 retry time，client/principal 文案提示联系管理员，但不会泄露匹配规则或 Reviewer rationale。
+触发请求仍返回真实上游 `cyber_policy`。后续网关拒绝使用 `gateway_cyber_restricted`；任何带有明确
+`expires_at_ms` 的临时 session/installation 限制都可携带 retry time，永久 installation/principal 文案
+提示联系管理员，但不会泄露匹配规则或 Reviewer rationale。
 
-管理员通过 edit、toggle 或 renew-and-enable 把 CCH user 从 disabled 改回 enabled 之前，CCH 先调用：
+管理员打开单个用户的编辑对话框时，CCH 才通过服务端读取：
+
+```text
+GET /v1/principals/{principal_id}/cyber-state
+```
+
+页面显示 principal 与当前窗口中出现过或仍永久受限的 installation，包括命中数、临时到期时间、最近
+hit/reset 和明确 reset 操作。请求按用户按需发生，不会为用户列表逐行查询；gateway token 不进入浏览器，
+CCH 也不增加 PostgreSQL/Redis 状态镜像。
+
+普通 edit、toggle 或 renew-and-enable 只检查 principal 是否仍受限制，不再隐式清空 strike 历史。存在
+principal restriction 时，它们拒绝启用并要求管理员使用明确的 Cyber reset。服务不可用时也不会在未知
+状态下启用用户。明确的 principal reset 调用：
 
 ```text
 POST /v1/principals/{principal_id}/reinstatement
 ```
 
-只有中心 reset 成功后才启用用户；CCH 不保存本地 reset marker，也不新增数据库 migration。失败时用户保持 disabled。
-解禁只开始新的 strike epoch，不加入白名单，也不会释放 client-instance restriction；client 必须另行
-显式 release，且下次 provider hit 仍会再次封锁。
+只有中心 reset 成功后，管理员确认的同一操作才可启用 CCH 用户；失败时用户保持 disabled。Installation
+通过 `POST /v1/principals/{principal_id}/client-instances/{client_instance_id}/reinstatement` 独立 reset。
+两种 reset 都用中心 watermark 开启对应 scope 的新 epoch，不加入白名单、互不级联，也不释放 session。
+旧事件和证据仍可审计，下一次新 hit 重新从 1 开始。
 
 ## 证据生命周期与 V1 边界
 

@@ -1,6 +1,7 @@
 import type { BatchUpdateUsersParams, GetUsersBatchParams } from "@/actions/users";
 import { DASHBOARD_COMPAT_HEADER } from "@/lib/api/v1/_shared/constants";
 import { isAdminForbidden } from "@/lib/api-client/v1/errors";
+import type { CyberState } from "@/lib/cyber-check/types";
 import type { UserDisplay } from "@/types/user";
 import {
   apiDelete,
@@ -32,6 +33,11 @@ type V1UsersPage = {
   nextCursor?: string | null;
   hasMore?: boolean;
 };
+
+export interface UserCyberStateResponse {
+  configured: boolean;
+  state: CyberState | null;
+}
 
 const dashboardCompatOptions = {
   headers: {
@@ -171,6 +177,22 @@ export function resetUserLimitsOnly(userId: number) {
 
 export function resetUserAllStatistics(userId: number) {
   return toVoidActionResult(apiPost(`/api/v1/users/${userId}/statistics:reset`));
+}
+
+export function getUserCyberState(userId: number): Promise<UserCyberStateResponse> {
+  return apiGet<UserCyberStateResponse>(`/api/v1/users/${userId}/cyber-state`);
+}
+
+export function resetUserCyberClientInstance(userId: number, clientInstanceId: string) {
+  return toVoidActionResult(
+    apiPost(`/api/v1/users/${userId}/cyber-state/client-instance-reset`, { clientInstanceId })
+  );
+}
+
+export function resetUserCyberPrincipal(userId: number, enableUser: boolean) {
+  return toActionResult<{ enabled: boolean }>(
+    apiPost(`/api/v1/users/${userId}/cyber-state/principal-reset`, { enableUser })
+  );
 }
 
 export function batchUpdateUsers(data: BatchUpdateUsersParams) {
