@@ -61,7 +61,7 @@ function buildCodexLikeBody(): { body: Record<string, unknown>; serialized: stri
 }
 
 /**
- * 门控提交后释放请求体的契约（2026-08-20 内存优化）：
+ * 最终流响应关闭内部重试边界后释放请求体的契约：
  * - 释放后 request.message 为冻结空对象、buffer/forwardedRequestBody 清空；
  * - getBillingRequestMessage 返回投影（标量 + thinking），计费字段不变；
  * - 释放幂等；释放后 setForwardedRequestBody 抛错（守卫：不应存在再转发路径）；

@@ -205,7 +205,7 @@ export class ProxySession {
   private forwardedRequestMessageSource: string | null = null;
   private forwardedRequestMessage: Record<string, unknown> | null = null;
 
-  // 门控提交后是否已释放请求体（见 releaseRequestBodyAfterCommit）。
+  // 最终流响应关闭内部重试边界后是否已释放请求体（见 releaseRequestBodyAfterCommit）。
   private requestBodyReleased = false;
 
   /**
@@ -250,11 +250,12 @@ export class ProxySession {
   }
 
   /**
-   * 流式门控提交语义内容后释放请求体（2026-08-20 内存优化）。
+   * 最终流响应关闭内部重试边界后释放请求体（2026-08-20 内存优化，
+   * 2026-09-03 扩展至 gate-off/heartbeat 提交）。
    *
-   * 前提（调用方必须保证）：streamGateCommitMarker.verdict === "content"——
-   * 首个语义内容字节已转发给客户端，所有重试路径（transport 错误、非 2xx、
-   * 门控 fake-200 throw）已在提交前退出，此后重试在结构上不可能。
+   * 前提（调用方必须保证）：Forwarder 已选定最终成功流响应，所有重试路径
+   * （transport 错误、非 2xx、门控 fake-200 throw）已退出，此后重试在结构上
+   * 不可能。这个边界可以由语义内容、legacy pass 或 heartbeat 建立。
    *
    * 释放内容：原始解析树（request.message）、过滤后副本与序列化字符串
    * （forwardedRequestBody 及其缓存解码）。中位 107k-token 上下文下这三者

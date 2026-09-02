@@ -234,6 +234,14 @@ describe("ProxyForwarder cyber-check admission boundary", () => {
       });
 
     await expect(forward(session, provider)).resolves.toBeInstanceOf(Response);
+    const forwardedBody = session.forwardedRequestBody;
+    expect(forwardedBody).not.toBeNull();
+
+    // The final SSE return boundary may release the tracking Session while a shadow
+    // submission is still pending. The observation captured its own immutable inputs.
+    session.releaseRequestBodyAfterCommit();
+    expect(session.isRequestBodyReleased()).toBe(true);
+    expect(session.forwardedRequestBody).toBeNull();
 
     expect(upstreamFetch).toHaveBeenCalledOnce();
     await vi.waitFor(() => expect(reviewFetch).toHaveBeenCalledOnce());
@@ -253,7 +261,7 @@ describe("ProxyForwarder cyber-check admission boundary", () => {
 
     const packet = reviewPacketFrom(reviewFetch.mock.calls[0]);
     expect(packet.source.body_sha256).toBe(
-      createHash("sha256").update(String(session.forwardedRequestBody)).digest("hex")
+      createHash("sha256").update(String(forwardedBody)).digest("hex")
     );
   });
 

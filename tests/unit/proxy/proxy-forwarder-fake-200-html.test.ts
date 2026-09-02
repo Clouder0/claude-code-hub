@@ -202,6 +202,7 @@ function createSession(): ProxySession {
     specialSettings: [],
     cachedPriceData: undefined,
     cachedBillingModelSource: undefined,
+    requestBodyReleased: false,
     endpointPolicy: resolveEndpointPolicy("/v1/messages"),
     isHeaderModified: () => false,
   });
@@ -552,6 +553,7 @@ describe("ProxyForwarder - fake 200 HTML body", () => {
     session.setProvider(provider1);
 
     mocks.pickRandomProviderWithExclusion.mockImplementationOnce(async (selectedSession) => {
+      expect(selectedSession.isRequestBodyReleased()).toBe(false);
       const failedRuntime = selectedSession as ProxySession & {
         clearResponseTimeout?: () => void;
         releaseAgent?: () => void;
@@ -602,6 +604,9 @@ describe("ProxyForwarder - fake 200 HTML body", () => {
     const response = await ProxyForwarder.send(session);
 
     expect(await response.text()).toBe(successfulBody);
+    expect(session.isRequestBodyReleased()).toBe(true);
+    expect(session.forwardedRequestBody).toBeNull();
+    expect(session.request.message).toEqual({});
     expect(fetchWithoutAutoDecode).toHaveBeenCalledTimes(2);
     expect(mocks.pickRandomProviderWithExclusion).toHaveBeenCalledWith(session, [provider1.id]);
     expect(mocks.recordFailure).toHaveBeenCalledWith(
@@ -670,6 +675,61 @@ describe("ProxyForwarder - fake 200 HTML body", () => {
     };
     runtime.clearResponseTimeout?.();
     runtime.releaseAgent?.();
+  });
+
+  test("gate-off style final Responses SSE releases the request without a semantic marker", async () => {
+    const provider = createProvider({
+      id: 1,
+      name: "gate-off-winner",
+      providerType: "codex",
+      maxRetryAttempts: 1,
+      firstByteTimeoutStreamingMs: 0,
+    });
+    const session = createSession();
+    session.requestUrl = new URL("https://example.com/v1/responses");
+    session.endpointPolicy = resolveEndpointPolicy("/v1/responses");
+    session.originalFormat = "openai";
+    session.request.model = "gpt-5.6";
+    session.request.message = {
+      model: "gpt-5.6",
+      input: "x".repeat(1024 * 1024),
+      stream: true,
+    };
+    session.setHighConcurrencyModeEnabled(true);
+    session.setProvider(provider);
+
+    const body = [
+      'data: {"type":"response.created"}\n\n',
+      'data: {"type":"response.output_item.added","item":{"type":"reasoning"}}\n\n',
+    ].join("");
+    const doForward = vi.spyOn(
+      ProxyForwarder as unknown as {
+        doForward: (...args: unknown[]) => Promise<Response>;
+      },
+      "doForward"
+    );
+    doForward.mockImplementationOnce(async (selectedSession) => {
+      const activeSession = selectedSession as ProxySession;
+      const message = activeSession.request.message as Record<string, unknown>;
+      activeSession.setForwardedRequestBody(JSON.stringify(message), message);
+      return new Response(body, {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      });
+    });
+
+    const response = await ProxyForwarder.send(session);
+
+    expect(await response.text()).toBe(body);
+    expect(peekDeferredStreamingFinalization(session)?.streamGateCommitMarker).toBeUndefined();
+    expect(session.isRequestBodyReleased()).toBe(true);
+    expect(session.forwardedRequestBody).toBeNull();
+    expect(session.request.message).toEqual({});
+    expect(session.getBillingRequestMessage()).toMatchObject({
+      model: "gpt-5.6",
+      stream: true,
+    });
+    expect(session.getBillingRequestMessage().input).toBeUndefined();
   });
 
   test("/v1/responses 内容提交后的 response.failed 不透明切换供应商", async () => {
