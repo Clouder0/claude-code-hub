@@ -244,6 +244,8 @@ describe("cyber-check client", () => {
       principal_strikes: 1,
       session_restricted: true,
       client_instance_restricted: true,
+      // Absent on services that predate the field; parses as temporary.
+      client_instance_restricted_indefinite: false,
       principal_restricted: false,
     });
 
@@ -253,6 +255,48 @@ describe("cyber-check client", () => {
     expect(new Headers(init?.headers).get("authorization")).toBe("Bearer gateway-test-token");
     expect(new Headers(init?.headers).get("content-type")).toBe("application/json");
     expect(JSON.parse(String(init?.body))).toEqual(providerEvent);
+  });
+
+  it("parses installation permanence from the containment response", async () => {
+    const fetchMock = vi.fn(async () =>
+      jsonResponse(
+        {
+          principal_strikes: 1,
+          session_restricted: true,
+          client_instance_restricted: true,
+          client_instance_restricted_indefinite: true,
+          principal_restricted: false,
+        },
+        200
+      )
+    );
+
+    const containment = await reportProviderEvent(config, providerEvent, {
+      fetchImpl: fetchMock as unknown as typeof fetch,
+    });
+
+    expect(containment.client_instance_restricted_indefinite).toBe(true);
+  });
+
+  it("rejects a non-boolean installation permanence flag", async () => {
+    const fetchMock = vi.fn(async () =>
+      jsonResponse(
+        {
+          principal_strikes: 1,
+          session_restricted: true,
+          client_instance_restricted: true,
+          client_instance_restricted_indefinite: "yes",
+          principal_restricted: false,
+        },
+        200
+      )
+    );
+
+    await expect(
+      reportProviderEvent(config, providerEvent, {
+        fetchImpl: fetchMock as unknown as typeof fetch,
+      })
+    ).rejects.toThrow("invalid provider containment");
   });
 
   it("reinstates a principal through the explicit administration resource", async () => {

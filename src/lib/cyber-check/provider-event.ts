@@ -86,7 +86,11 @@ async function reportProviderEventAfterObservation(
       await blockCyberInstallation(
         correlation.identity.principal_id,
         correlation.identity.client_instance_id,
-        policy === "bio_policy" || containment.principal_strikes >= 2
+        // Permanence follows the installation's own tier from the central
+        // response; bio policy is permanently blocking by definition. A first
+        // cyber hit stays a short temporary block even if the principal is one
+        // strike away from its own threshold.
+        policy === "bio_policy" || containment.client_instance_restricted_indefinite
       );
     }
     await markBioCentralStatus(session, policy, "confirmed");

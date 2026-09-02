@@ -207,30 +207,21 @@ export class GuardPipelineBuilder {
     };
   }
 
-  static fromSession(
-    session: Pick<ProxySession, "getEndpointPolicy"> & {
-      isRawCrossProviderFallbackEnabled?: (() => boolean) | undefined;
-    }
-  ): GuardPipeline {
-    return GuardPipelineBuilder.fromEndpointPolicy(
-      session.getEndpointPolicy(),
-      typeof session.isRawCrossProviderFallbackEnabled === "function"
-        ? session.isRawCrossProviderFallbackEnabled()
-        : session.getEndpointPolicy().allowRawCrossProviderFallback
-    );
+  static fromSession(session: Pick<ProxySession, "getEndpointPolicy">): GuardPipeline {
+    return GuardPipelineBuilder.fromEndpointPolicy(session.getEndpointPolicy());
   }
 
-  static fromEndpointPolicy(
-    policy: Pick<EndpointPolicy, "guardPreset" | "allowRawCrossProviderFallback">,
-    rawCrossProviderFallbackEnabled = policy.allowRawCrossProviderFallback
-  ): GuardPipeline {
+  static fromEndpointPolicy(policy: Pick<EndpointPolicy, "guardPreset">): GuardPipeline {
     switch (policy.guardPreset) {
       case "alpha_search":
         return GuardPipelineBuilder.build(ALPHA_SEARCH_PIPELINE);
       case "raw_passthrough":
-        return GuardPipelineBuilder.build(
-          rawCrossProviderFallbackEnabled ? RAW_SAFE_SESSION_PIPELINE : RAW_PASSTHROUGH_PIPELINE
-        );
+        // The raw preset keeps its session context and both policy guards
+        // unconditionally: managed raw endpoints (remote compaction,
+        // count_tokens) must never lose blocking coverage to a system
+        // setting. The fallback flag still governs provider reuse and
+        // selection behavior, not guard coverage.
+        return GuardPipelineBuilder.build(RAW_SAFE_SESSION_PIPELINE);
       default:
         return GuardPipelineBuilder.build(CHAT_PIPELINE);
     }
@@ -269,10 +260,6 @@ export const CHAT_PIPELINE: GuardConfig = {
   ],
 };
 
-export const RAW_PASSTHROUGH_PIPELINE: GuardConfig = {
-  steps: ["auth", "client", "model", "version", "probe", "provider"],
-};
-
 export const RAW_SAFE_SESSION_PIPELINE: GuardConfig = {
   steps: [
     "auth",
@@ -299,6 +286,7 @@ export const ALPHA_SEARCH_PIPELINE: GuardConfig = {
     "rateLimit",
     "provider",
     "messageContext",
+    "cyberScopeBlock",
   ],
 };
 

@@ -142,6 +142,55 @@ describe("GuardPipeline policyBlock step", () => {
     expect(mocks.messageEnsureContext).not.toHaveBeenCalled();
   });
 
+  test("rejects an installation-scoped block on the alpha search pipeline", async () => {
+    mocks.findSessionBlockPolicy.mockResolvedValueOnce(null);
+    mocks.findCyberScopeBlock.mockResolvedValueOnce("client_instance");
+    mocks.messageEnsureContext.mockImplementationOnce(async (session: any) => {
+      session.messageContext = { user: { id: 7 } };
+    });
+
+    const { GuardPipelineBuilder } = await import("@/app/v1/_lib/proxy/guard-pipeline");
+    const { resolveEndpointPolicy } = await import("@/app/v1/_lib/proxy/endpoint-policy");
+    const pipeline = GuardPipelineBuilder.fromEndpointPolicy(
+      resolveEndpointPolicy("/v1/alpha/search")
+    );
+
+    const session = {
+      isProbeRequest: () => false,
+      sessionId: "sess_alpha_scope",
+      request: { message: { client_metadata: { "x-codex-installation-id": "install-1" } } },
+      messageContext: null,
+    } as never;
+
+    const response = await pipeline.run(session);
+    expect(response?.status).toBe(400);
+    expect(mocks.findCyberScopeBlock).toHaveBeenCalledWith("7", "install-1");
+    const body = await response?.json();
+    expect(body.error.code).toBe("cyber_policy");
+  });
+
+  test("the raw passthrough preset keeps the session and scope guards unconditionally", async () => {
+    mocks.findSessionBlockPolicy.mockResolvedValueOnce("cyber_policy");
+    mocks.providerEnsure.mockClear();
+
+    const { GuardPipelineBuilder } = await import("@/app/v1/_lib/proxy/guard-pipeline");
+    const { resolveEndpointPolicy } = await import("@/app/v1/_lib/proxy/endpoint-policy");
+    const pipeline = GuardPipelineBuilder.fromEndpointPolicy(
+      resolveEndpointPolicy("/v1/responses/compact")
+    );
+
+    const session = {
+      isProbeRequest: () => false,
+      sessionId: "sess_compact",
+    } as never;
+
+    const response = await pipeline.run(session);
+    expect(response?.status).toBe(400);
+    const body = await response?.json();
+    expect(body.error.code).toBe("cyber_policy");
+    expect(mocks.providerEnsure).not.toHaveBeenCalled();
+  });
+
   test("passes an unblocked session through", async () => {
     mocks.findSessionBlockPolicy.mockResolvedValueOnce(null);
 

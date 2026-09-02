@@ -34,6 +34,7 @@ describe.runIf(runLive)("CCH to cyber-check live contract", () => {
   }) {
     const message = {
       model: "gpt-test",
+      instructions: "Work only in the controlled repository.",
       client_metadata: { "x-codex-installation-id": installationId },
       input: [
         {
@@ -90,6 +91,7 @@ describe.runIf(runLive)("CCH to cyber-check live contract", () => {
       principal_strikes: 0,
       session_restricted: false,
       client_instance_restricted: false,
+      client_instance_restricted_indefinite: false,
       principal_restricted: false,
     });
 
@@ -186,6 +188,7 @@ describe.runIf(runLive)("CCH to cyber-check live contract", () => {
       principal_strikes: 1,
       session_restricted: true,
       client_instance_restricted: true,
+      client_instance_restricted_indefinite: false,
       principal_restricted: false,
     });
 
@@ -230,6 +233,7 @@ describe.runIf(runLive)("CCH to cyber-check live contract", () => {
       principal_strikes: 2,
       session_restricted: true,
       client_instance_restricted: true,
+      client_instance_restricted_indefinite: false,
       principal_restricted: true,
     });
 
@@ -280,6 +284,39 @@ describe.runIf(runLive)("CCH to cyber-check live contract", () => {
       decision: "deny",
       reason: "active_restriction",
       restriction: { scope: "client_instance" },
+    });
+
+    // A second hit on the SAME installation makes its own restriction
+    // indefinite, even after the principal epoch was reset above. The
+    // admission itself is denied by b's surviving first-hit restriction, but
+    // the authoritative event still joins by request id and counts.
+    const secondHitPacket = packetFor({
+      requestId: "7",
+      sessionId: "session-cch-live-7",
+      installationId: "installation-cch-live-b",
+      sequence: 2,
+      text: "Add a serializer regression test again.",
+    });
+    expect(await submitReview(config, secondHitPacket)).toMatchObject({
+      status: "completed",
+      decision: "deny",
+      reason: "active_restriction",
+      restriction: { scope: "client_instance" },
+    });
+    expect(
+      await reportProviderEvent(config, {
+        schema_version: "cyber-check.provider-event.v1",
+        identity: secondHitPacket.identity,
+        enforcement_mode: config.mode,
+        upstream_provider_id: "17",
+        event: { type: "policy_rejection", code: "cyber_policy" },
+      })
+    ).toEqual({
+      principal_strikes: 1,
+      session_restricted: true,
+      client_instance_restricted: true,
+      client_instance_restricted_indefinite: true,
+      principal_restricted: false,
     });
   });
 });

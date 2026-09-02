@@ -61,6 +61,12 @@ export interface ProviderContainment {
   principal_strikes: number;
   session_restricted: boolean;
   client_instance_restricted: boolean;
+  /**
+   * True when this installation has an active restriction with no expiry (its
+   * own strike threshold was reached, bio policy fired, or an administrator
+   * blocked it). Services that predate the field parse as false.
+   */
+  client_instance_restricted_indefinite: boolean;
   principal_restricted: boolean;
 }
 
