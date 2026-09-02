@@ -178,6 +178,48 @@ describe("CCH provider cyber-event reporting", () => {
     expect(mocks.disableUserForCyberCheckContainment).toHaveBeenCalledWith(7);
   });
 
+  it("keeps a first installation hit temporary even when the principal reaches its threshold", async () => {
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            principal_strikes: 2,
+            session_restricted: true,
+            client_instance_restricted: true,
+            client_instance_restricted_indefinite: false,
+            principal_restricted: true,
+          }),
+          { status: 200, headers: { "content-type": "application/json" } }
+        )
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await reportProviderPolicyEventBestEffort(session(), "cyber_policy");
+
+    expect(mocks.blockCyberInstallation).toHaveBeenCalledWith("7", "installation-1", false);
+  });
+
+  it("writes a permanent installation block when the service marks it indefinite", async () => {
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            principal_strikes: 1,
+            session_restricted: true,
+            client_instance_restricted: true,
+            client_instance_restricted_indefinite: true,
+            principal_restricted: false,
+          }),
+          { status: 200, headers: { "content-type": "application/json" } }
+        )
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await reportProviderPolicyEventBestEffort(session(), "cyber_policy");
+
+    expect(mocks.blockCyberInstallation).toHaveBeenCalledWith("7", "installation-1", true);
+  });
+
   it("reports bio as actionable and skips only uncorrelated or disabled integration", async () => {
     const fetchMock = vi.fn(
       async () =>

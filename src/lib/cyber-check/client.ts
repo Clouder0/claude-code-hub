@@ -360,6 +360,8 @@ function parseProviderContainment(payload: unknown): ProviderContainment {
     Number(object.principal_strikes) < 0 ||
     typeof object.session_restricted !== "boolean" ||
     typeof object.client_instance_restricted !== "boolean" ||
+    (object.client_instance_restricted_indefinite !== undefined &&
+      typeof object.client_instance_restricted_indefinite !== "boolean") ||
     typeof object.principal_restricted !== "boolean"
   ) {
     throw new CyberCheckClientError("review service returned invalid provider containment");
@@ -368,6 +370,8 @@ function parseProviderContainment(payload: unknown): ProviderContainment {
     principal_strikes: Number(object.principal_strikes),
     session_restricted: object.session_restricted,
     client_instance_restricted: object.client_instance_restricted,
+    // Older services predate the field; absent parses as a temporary block.
+    client_instance_restricted_indefinite: object.client_instance_restricted_indefinite === true,
     principal_restricted: object.principal_restricted,
   };
 }

@@ -371,7 +371,7 @@ describe("non-chat endpoint session context", () => {
     expect(rawCompactSession.shouldReuseProvider()).toBe(false);
   });
 
-  test("disabled runtime flag falls back to raw passthrough pipeline", async () => {
+  test("raw preset guards do not depend on the runtime fallback flag", async () => {
     const { GuardPipelineBuilder } = await import("@/app/v1/_lib/proxy/guard-pipeline");
 
     const session = createProxySession(V1_ENDPOINT_PATHS.RESPONSES_COMPACT);
@@ -380,9 +380,19 @@ describe("non-chat endpoint session context", () => {
     const pipeline = GuardPipelineBuilder.fromSession(session);
     await pipeline.run(session);
 
-    expect(callOrder).toEqual(["auth", "client", "model", "version", "probe", "provider"]);
-    expect(callOrder).not.toContain("session");
-    expect(callOrder).not.toContain("messageContext");
+    // Blocking coverage (session guard, policy blocks, billing context) stays
+    // attached to managed raw endpoints regardless of the fallback setting;
+    // the flag only governs provider reuse and selection behavior.
+    expect(callOrder).toEqual([
+      "auth",
+      "client",
+      "model",
+      "version",
+      "probe",
+      "session",
+      "provider",
+      "messageContext",
+    ]);
   });
 
   test("raw-safe session context skips codex completion and claude metadata mutation", async () => {
