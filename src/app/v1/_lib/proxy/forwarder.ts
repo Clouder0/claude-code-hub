@@ -1876,12 +1876,8 @@ export class ProxyForwarder {
             // categorizeErrorAsync 判定 POLICY_REJECTION 与 policyRejectionCodeOf 共用
             // 同一条结构化检测路径，此处必然非空；?? 仅为类型收窄，不可能命中。
             const rejectedPolicy = policyRejectionCodeOf(lastError) ?? "cyber_policy";
-            const providerEventReport = reportProviderPolicyEventBestEffort(
-              session,
-              rejectedPolicy
-            );
             await containPolicyRejection(session, rejectedPolicy);
-            await providerEventReport;
+            await reportProviderPolicyEventBestEffort(session, rejectedPolicy);
             logger.warn("ProxyForwarder: Policy rejection, stopping immediately", {
               policy: rejectedPolicy,
               providerId: currentProvider.id,
@@ -4605,12 +4601,8 @@ export class ProxyForwarder {
       if (errorCategory === ErrorCategory.POLICY_REJECTION) {
         // 与主重试循环同理：分类与 codeOf 共用同一条检测路径，?? 仅为类型收窄。
         const rejectedPolicy = policyRejectionCodeOf(error) ?? "cyber_policy";
-        const providerEventReport = reportProviderPolicyEventBestEffort(
-          attempt.session,
-          rejectedPolicy
-        );
         await containPolicyRejection(session, rejectedPolicy);
-        await providerEventReport;
+        await reportProviderPolicyEventBestEffort(attempt.session, rejectedPolicy);
         attempt.settled = true;
         if (attempt.thresholdTimer) {
           clearTimeout(attempt.thresholdTimer);

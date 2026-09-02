@@ -5,56 +5,63 @@ import type {
 } from "@/app/v1/_lib/proxy/session";
 import { getEnvConfig } from "@/lib/config/env.schema";
 import { logger } from "@/lib/logger";
-import { disableUserForCyberCheckContainment } from "@/lib/security/policy-containment";
+import {
+  blockCyberInstallation,
+  blockCyberPrincipal,
+  disableUserForCyberCheckContainment,
+} from "@/lib/security/policy-containment";
 import type { PolicyRejectionCode } from "@/lib/security/security-signals";
 import { type CyberCheckClientError, reportProviderEvent } from "./client";
 import { type CyberCheckConfig, resolveCyberCheckConfig } from "./config";
 import type { ProviderContainment } from "./types";
 
-type CorrelatedSession = Pick<ProxySession, "getCyberCheckObservation">;
+type CorrelatedSession = Pick<ProxySession, "getCyberCheckObservation" | "messageContext">;
 
 /**
  * Reports only an authoritative upstream cyber rejection that can be joined to a successful
- * admission. Cyber Check owns cyber strikes and restrictions; this deliberately remains one
- * measured best-effort attempt, so a failed report can mean missed containment.
+ * admission. Cyber Check owns cyber strikes and restrictions. Reviewer observe/shadow controls
+ * predictive review only; this provider-confirmed event remains actionable.
  */
 export async function reportProviderPolicyEventBestEffort(
   session: CorrelatedSession,
   policy: PolicyRejectionCode
 ): Promise<ProviderContainment | null> {
-  if (policy !== "cyber_policy") return null;
-
   const observation = session.getCyberCheckObservation();
-  if (!observation) return null;
+  if (!observation) {
+    await markBioCentralStatus(session, policy, "unconfirmed", "missing_observation");
+    return null;
+  }
 
   let config: CyberCheckConfig;
   try {
     const resolved = resolveCyberCheckConfig(getEnvConfig());
-    if (!resolved) return null;
+    if (!resolved) {
+      await markBioCentralStatus(session, policy, "unconfirmed", "integration_off");
+      return null;
+    }
     config = resolved;
   } catch (error) {
+    await markBioCentralStatus(session, policy, "unconfirmed", "configuration_error");
     logger.warn("CyberCheck: authoritative provider cyber event could not be reported", {
       ...clientErrorContext(error),
     });
     return null;
   }
 
-  const report = reportProviderEventAfterObservation(observation, config);
-  if (config.mode === "shadow") {
-    void report;
-    return null;
-  }
-  return report;
+  return reportProviderEventAfterObservation(observation, config, session, policy);
 }
 
 async function reportProviderEventAfterObservation(
   observation: CyberCheckObservationHandle,
-  config: CyberCheckConfig
+  config: CyberCheckConfig,
+  session: CorrelatedSession,
+  policy: PolicyRejectionCode
 ): Promise<ProviderContainment | null> {
   let correlation: CyberCheckAdmissionCorrelation | undefined;
   try {
     const result = await observation.completion;
     if (result.status === "capture_gap") {
+      await markBioCentralStatus(session, policy, "unconfirmed", "capture_gap");
       logger.warn(
         "CyberCheck: authoritative provider cyber event skipped after observation capture gap"
       );
@@ -63,17 +70,28 @@ async function reportProviderEventAfterObservation(
     correlation = result.correlation;
 
     const containment = await reportProviderEvent(config, {
-      schema_version: "cyber-check.provider-event.v1",
+      schema_version: "cyber-check.provider-event.v2",
       identity: correlation.identity,
-      enforcement_mode: config.mode,
+      // This is an upstream-confirmed policy outcome, not a reviewer prediction. Keep it
+      // actionable even while the request-review path is running in observe/shadow mode.
+      enforcement_mode: "enforce",
       upstream_provider_id: correlation.upstreamProviderId,
       event: {
         type: "policy_rejection",
-        code: "cyber_policy",
+        code: policy,
       },
     });
 
-    if (config.mode === "enforce" && containment.principal_restricted) {
+    if (containment.client_instance_restricted && correlation.identity.client_instance_id) {
+      await blockCyberInstallation(
+        correlation.identity.principal_id,
+        correlation.identity.client_instance_id,
+        policy === "bio_policy" || containment.principal_strikes >= 2
+      );
+    }
+    await markBioCentralStatus(session, policy, "confirmed");
+    if (containment.principal_restricted) {
+      await blockCyberPrincipal(correlation.identity.principal_id);
       const userId = Number(correlation.identity.principal_id);
       if (Number.isSafeInteger(userId) && userId > 0) {
         await disableUserForCyberCheckContainment(userId);
@@ -95,6 +113,12 @@ async function reportProviderEventAfterObservation(
     });
     return containment;
   } catch (error) {
+    await markBioCentralStatus(
+      session,
+      policy,
+      "unconfirmed",
+      error instanceof Error ? error.name : "unknown_error"
+    );
     logger.warn("CyberCheck: authoritative provider cyber event could not be reported", {
       ...clientErrorContext(error),
       ...(correlation
@@ -106,6 +130,26 @@ async function reportProviderEventAfterObservation(
         : {}),
     });
     return null;
+  }
+}
+
+async function markBioCentralStatus(
+  session: CorrelatedSession,
+  policy: PolicyRejectionCode,
+  status: "confirmed" | "unconfirmed",
+  error?: string
+): Promise<void> {
+  const messageRequestId = session.messageContext?.id;
+  if (policy !== "bio_policy" || messageRequestId == null) return;
+  try {
+    const { updateSecurityEventCentralStatus } = await import("@/repository/security-events");
+    await updateSecurityEventCentralStatus(messageRequestId, policy, status, error);
+  } catch (statusError) {
+    logger.error("CyberCheck: bio central status could not be persisted", {
+      messageRequestId,
+      status,
+      errorType: statusError instanceof Error ? statusError.name : "UnknownError",
+    });
   }
 }
 

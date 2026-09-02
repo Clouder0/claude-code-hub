@@ -24,7 +24,9 @@ const searchUsersMock = vi.hoisted(() => vi.fn());
 const batchUpdateUsersMock = vi.hoisted(() => vi.fn());
 const getUserCyberStateMock = vi.hoisted(() => vi.fn());
 const resetUserClientInstanceCyberStateMock = vi.hoisted(() => vi.fn());
+const setUserManualClientInstanceRestrictionMock = vi.hoisted(() => vi.fn());
 const resetUserPrincipalCyberStateMock = vi.hoisted(() => vi.fn());
+const releaseUserBioRestrictionMock = vi.hoisted(() => vi.fn());
 
 vi.mock("@/lib/auth", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/auth")>();
@@ -54,7 +56,9 @@ vi.mock("@/actions/users", () => ({
   batchUpdateUsers: batchUpdateUsersMock,
   getUserCyberState: getUserCyberStateMock,
   resetUserClientInstanceCyberState: resetUserClientInstanceCyberStateMock,
+  setUserManualClientInstanceRestriction: setUserManualClientInstanceRestrictionMock,
   resetUserPrincipalCyberState: resetUserPrincipalCyberStateMock,
+  releaseUserBioRestriction: releaseUserBioRestrictionMock,
 }));
 
 const { callV1Route } = await import("../test-utils");
@@ -144,10 +148,12 @@ describe("v1 users endpoints", () => {
       },
     });
     resetUserClientInstanceCyberStateMock.mockResolvedValue({ ok: true });
+    setUserManualClientInstanceRestrictionMock.mockResolvedValue({ ok: true });
     resetUserPrincipalCyberStateMock.mockResolvedValue({
       ok: true,
       data: { enabled: true },
     });
+    releaseUserBioRestrictionMock.mockResolvedValue({ ok: true, data: { enabled: false } });
   });
 
   test("lists and reads users with dashboard filters", async () => {
@@ -428,6 +434,20 @@ describe("v1 users endpoints", () => {
     expect(clientReset.response.status).toBe(204);
     expect(resetUserClientInstanceCyberStateMock).toHaveBeenCalledWith(1, "installation-7");
 
+    const manualBlock = await callV1Route({
+      method: "POST",
+      pathname: "/api/v1/users/1/cyber-state/client-instance-manual-restriction",
+      headers,
+      body: { clientInstanceId: "installation-7", reason: "incident", restricted: true },
+    });
+    expect(manualBlock.response.status).toBe(204);
+    expect(setUserManualClientInstanceRestrictionMock).toHaveBeenCalledWith(
+      1,
+      "installation-7",
+      "incident",
+      true
+    );
+
     const principalReset = await callV1Route({
       method: "POST",
       pathname: "/api/v1/users/1/cyber-state/principal-reset",
@@ -437,6 +457,21 @@ describe("v1 users endpoints", () => {
     expect(principalReset.response.status).toBe(200);
     expect(principalReset.json).toEqual({ enabled: true });
     expect(resetUserPrincipalCyberStateMock).toHaveBeenCalledWith(1, true);
+
+    const bioRelease = await callV1Route({
+      method: "POST",
+      pathname: "/api/v1/users/1/policy-state/bio-restriction-release",
+      headers,
+      body: { scope: "session", subjectId: "session-7", reason: "reviewed", enableUser: false },
+    });
+    expect(bioRelease.response.status).toBe(200);
+    expect(releaseUserBioRestrictionMock).toHaveBeenCalledWith(
+      1,
+      "session",
+      "session-7",
+      "reviewed",
+      false
+    );
   });
 
   test("does not expose Cyber administration to an ordinary user credential", async () => {
@@ -606,6 +641,7 @@ describe("v1 users endpoints", () => {
     expect(doc.paths).toHaveProperty("/api/v1/users/{id}/cyber-state");
     expect(doc.paths).toHaveProperty("/api/v1/users/{id}/cyber-state/client-instance-reset");
     expect(doc.paths).toHaveProperty("/api/v1/users/{id}/cyber-state/principal-reset");
+    expect(doc.paths).toHaveProperty("/api/v1/users/{id}/policy-state/bio-restriction-release");
     expect(doc.paths).toHaveProperty("/api/v1/users:batchUpdate");
     expect(doc.paths).toHaveProperty("/api/v1/users:usageBatch");
     expect(doc.paths).toHaveProperty("/api/v1/users:filter-search");

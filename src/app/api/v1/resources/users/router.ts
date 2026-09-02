@@ -6,8 +6,11 @@ import {
   GenericUserResponseSchema,
   StringListResponseSchema,
   UserAllLimitUsageResponseSchema,
+  UserBioRestrictionReleaseSchema,
+  UserBioUnconfirmedLocalReleaseSchema,
   UserCreateSchema,
   UserCyberClientInstanceResetSchema,
+  UserCyberManualClientRestrictionSchema,
   UserCyberPrincipalResetSchema,
   UserCyberStateResponseSchema,
   UserDetailResponseSchema,
@@ -37,12 +40,15 @@ import {
   getUserTags,
   listCurrentUser,
   listUsers,
+  releaseLocalUnconfirmedBioContainment,
+  releaseUserBioRestriction,
   renewUser,
   resetUserCyberClientInstance,
   resetUserCyberPrincipal,
   resetUserLimits,
   resetUserStatistics,
   searchUsers,
+  setUserCyberManualClientRestriction,
   updateUser,
 } from "./handlers";
 
@@ -356,6 +362,32 @@ usersRouter.openapi(
 usersRouter.openapi(
   createRoute({
     method: "post",
+    path: "/users/{id}/cyber-state/client-instance-manual-restriction",
+    middleware: requireAuth("admin"),
+    tags: ["Users"],
+    summary: "Set one manual installation restriction",
+    description:
+      "Blocks or releases only the manual restriction source without changing automatic strikes.",
+    "x-required-access": "admin",
+    security,
+    request: {
+      params: UserIdParamSchema,
+      body: {
+        required: true,
+        content: { "application/json": { schema: UserCyberManualClientRestrictionSchema } },
+      },
+    },
+    responses: {
+      204: { description: "Manual installation restriction updated." },
+      ...problemResponses,
+    },
+  }),
+  setUserCyberManualClientRestriction as never
+);
+
+usersRouter.openapi(
+  createRoute({
+    method: "post",
     path: "/users/{id}/cyber-state/principal-reset",
     middleware: requireAuth("admin"),
     tags: ["Users"],
@@ -379,6 +411,58 @@ usersRouter.openapi(
     },
   }),
   resetUserCyberPrincipal as never
+);
+
+usersRouter.openapi(
+  createRoute({
+    method: "post",
+    path: "/users/{id}/policy-state/bio-restriction-release",
+    middleware: requireAuth("admin"),
+    tags: ["Users"],
+    summary: "Release one bio policy restriction scope",
+    description:
+      "Releases only the selected provider_bio_policy scope; cyber and manual restrictions remain.",
+    "x-required-access": "admin",
+    security,
+    request: {
+      params: UserIdParamSchema,
+      body: {
+        required: true,
+        content: { "application/json": { schema: UserBioRestrictionReleaseSchema } },
+      },
+    },
+    responses: {
+      200: {
+        description: "Bio restriction release result.",
+        content: { "application/json": { schema: GenericUserResponseSchema } },
+      },
+      ...problemResponses,
+    },
+  }),
+  releaseUserBioRestriction as never
+);
+
+usersRouter.openapi(
+  createRoute({
+    method: "post",
+    path: "/users/{id}/policy-state/bio-unconfirmed-local-release",
+    middleware: requireAuth("admin"),
+    tags: ["Users"],
+    summary: "Release unconfirmed local bio containment",
+    description:
+      "Releases only the local containment created for an unconfirmed bio event; the user remains disabled.",
+    "x-required-access": "admin",
+    security,
+    request: {
+      params: UserIdParamSchema,
+      body: {
+        required: true,
+        content: { "application/json": { schema: UserBioUnconfirmedLocalReleaseSchema } },
+      },
+    },
+    responses: { 204: { description: "Local bio containment released." }, ...problemResponses },
+  }),
+  releaseLocalUnconfirmedBioContainment as never
 );
 
 usersRouter.openapi(

@@ -189,9 +189,58 @@ export function resetUserCyberClientInstance(userId: number, clientInstanceId: s
   );
 }
 
+export function setUserCyberManualClientRestriction(
+  userId: number,
+  clientInstanceId: string,
+  reason: string,
+  restricted: boolean
+) {
+  return toVoidActionResult(
+    apiPost(`/api/v1/users/${userId}/cyber-state/client-instance-manual-restriction`, {
+      clientInstanceId,
+      reason,
+      restricted,
+    })
+  );
+}
+
 export function resetUserCyberPrincipal(userId: number, enableUser: boolean) {
   return toActionResult<{ enabled: boolean }>(
     apiPost(`/api/v1/users/${userId}/cyber-state/principal-reset`, { enableUser })
+  );
+}
+
+export function releaseUserBioRestriction(
+  userId: number,
+  scope: "session" | "client_instance" | "principal",
+  subjectId: string,
+  reason: string,
+  enableUser = false
+) {
+  return toActionResult<{ enabled: boolean }>(
+    apiPost(`/api/v1/users/${userId}/policy-state/bio-restriction-release`, {
+      scope,
+      subjectId,
+      reason,
+      enableUser,
+    })
+  );
+}
+
+export function releaseLocalUnconfirmedBioContainment(
+  userId: number,
+  messageRequestId: number,
+  sessionId: string,
+  clientInstanceId: string | null,
+  reason: string
+) {
+  return toVoidActionResult(
+    apiPost(`/api/v1/users/${userId}/policy-state/bio-unconfirmed-local-release`, {
+      messageRequestId,
+      sessionId,
+      clientInstanceId,
+      reason,
+    })
   );
 }
 

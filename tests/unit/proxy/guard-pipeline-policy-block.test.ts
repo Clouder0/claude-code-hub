@@ -1,12 +1,14 @@
 import { describe, expect, test, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
+  findCyberScopeBlock: vi.fn(async () => null),
   findSessionBlockPolicy: vi.fn(async () => null),
   providerEnsure: vi.fn(async () => null),
   messageEnsureContext: vi.fn(async () => {}),
 }));
 
 vi.mock("@/lib/security/policy-containment", () => ({
+  findCyberScopeBlock: mocks.findCyberScopeBlock,
   findSessionBlockPolicy: mocks.findSessionBlockPolicy,
 }));
 
@@ -155,6 +157,30 @@ describe("GuardPipeline policyBlock step", () => {
 
     const response = await pipeline.run(session);
     expect(response).toBeNull();
+  });
+
+  test("rejects a principal or installation block after authentication context exists", async () => {
+    mocks.findSessionBlockPolicy.mockResolvedValueOnce(null);
+    mocks.findCyberScopeBlock.mockResolvedValueOnce("client_instance");
+    mocks.messageEnsureContext.mockImplementationOnce(async (session: any) => {
+      session.messageContext = { user: { id: 7 } };
+    });
+
+    const { GuardPipelineBuilder, RequestType } = await import(
+      "@/app/v1/_lib/proxy/guard-pipeline"
+    );
+    const pipeline = GuardPipelineBuilder.fromRequestType(RequestType.CHAT);
+    const session = {
+      isProbeRequest: () => false,
+      sessionId: "sess_scope",
+      request: { message: { client_metadata: { "x-codex-installation-id": "install-1" } } },
+      messageContext: null,
+    } as never;
+    const response = await pipeline.run(session);
+    expect(response?.status).toBe(400);
+    expect(mocks.findCyberScopeBlock).toHaveBeenCalledWith("7", "install-1");
+    const body = await response?.json();
+    expect(body.error.code).toBe("cyber_policy");
   });
 
   test("skips the check when the session has no id", async () => {

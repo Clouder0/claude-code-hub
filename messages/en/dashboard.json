@@ -1740,7 +1740,27 @@
         "principalReset": "Account Cyber state reset",
         "principalResetAndEnabled": "Account Cyber state reset and user enabled",
         "installationReset": "Installation Cyber state reset",
-        "resetFailed": "Failed to reset Cyber state"
+        "resetFailed": "Failed to reset Cyber state",
+        "manualTitle": "Manual installation restriction",
+        "manualDescription": "Block one installation for this user without adding an automatic strike.",
+        "installationPlaceholder": "Installation ID",
+        "reasonPlaceholder": "Operator reason",
+        "manualBlock": "Block installation",
+        "manualRelease": "Release manual block",
+        "confirmManualReleaseTitle": "Release this manual restriction?",
+        "confirmManualReleaseDescription": "The automatic restriction and strike epoch, if any, remain unchanged. Provide an audit reason.",
+        "manualBlocked": "Installation manually blocked",
+        "manualReleased": "Manual installation block released",
+        "automatic": "Automatic",
+        "manual": "Manual",
+        "manualDetail": "Manual: {actor} — {reason}",
+        "unknown": "Unknown"
+        ,"bioRestrictions": "Permanent bio policy restrictions",
+        "noBioRestrictions": "No active bio policy restriction.",
+        "releaseBio": "Release bio restriction",
+        "bioReleased": "Bio policy restriction released",
+        "confirmBioReleaseTitle": "Release this bio policy scope?",
+        "confirmBioReleaseDescription": "Only this bio source and scope is released. Cyber and manual restrictions remain."
       },
       "resetSection": {
         "title": "Reset Options"
@@ -2358,6 +2378,9 @@
     },
     "actions": {
       "view": "View requests",
+      "containment": "Containment",
+      "containmentTitle": "Containment for {user}",
+      "containmentDescription": "Inspect central strikes and restrictions, apply a scoped manual installation block, or reset the appropriate scope.",
       "disable": "Disable user",
       "confirmTitle": "Disable this user?",
       "confirmDescription": "Future requests from {user} will be rejected by CCH.",

@@ -4,6 +4,7 @@ import type { CyberCheckConfig } from "./config";
 import type {
   ClientInstanceCyberState,
   CyberState,
+  ManualClientRestrictionOperation,
   ProviderContainment,
   ProviderEventEnvelope,
   RequestOutcomeEnvelope,
@@ -181,6 +182,58 @@ export async function reinstateClientInstance(
   if (response.status !== 204) throw await responseError(response);
 }
 
+export async function setManualClientInstanceRestriction(
+  config: CyberCheckConfig,
+  principalId: string,
+  clientInstanceId: string,
+  operation: ManualClientRestrictionOperation,
+  restricted: boolean,
+  options: RequestOptions = {}
+): Promise<void> {
+  const response = await (options.fetchImpl ?? globalThis.fetch)(
+    new URL(
+      `/v1/principals/${encodeURIComponent(principalId)}/client-instances/${encodeURIComponent(clientInstanceId)}/manual-restriction`,
+      config.baseUrl
+    ),
+    {
+      method: restricted ? "POST" : "DELETE",
+      headers: {
+        authorization: `Bearer ${config.gatewayToken}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(operation),
+      signal: boundedSignal(options.signal, EVENT_REPORT_TIMEOUT_MS),
+    }
+  );
+  if (response.status !== 204) throw await responseError(response);
+}
+
+export async function releaseBioRestriction(
+  config: CyberCheckConfig,
+  principalId: string,
+  scope: "session" | "client_instance" | "principal",
+  subjectId: string,
+  operation: ManualClientRestrictionOperation,
+  options: RequestOptions = {}
+): Promise<void> {
+  const response = await (options.fetchImpl ?? globalThis.fetch)(
+    new URL(
+      `/v1/principals/${encodeURIComponent(principalId)}/bio-restrictions/${scope}/${encodeURIComponent(subjectId)}/release`,
+      config.baseUrl
+    ),
+    {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${config.gatewayToken}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(operation),
+      signal: boundedSignal(options.signal, EVENT_REPORT_TIMEOUT_MS),
+    }
+  );
+  if (response.status !== 204) throw await responseError(response);
+}
+
 export async function reportRequestOutcome(
   config: CyberCheckConfig,
   outcome: RequestOutcomeEnvelope,
@@ -326,7 +379,8 @@ function parseCyberState(payload: unknown): CyberState {
     object.principal_id.length === 0 ||
     !isPositiveSafeInteger(object.strike_window_seconds) ||
     !isPositiveSafeInteger(object.disable_threshold) ||
-    !Array.isArray(object.client_instances)
+    !Array.isArray(object.client_instances) ||
+    (object.bio_restrictions !== undefined && !Array.isArray(object.bio_restrictions))
   ) {
     throw new CyberCheckClientError("review service returned invalid principal cyber state");
   }
@@ -336,6 +390,9 @@ function parseCyberState(payload: unknown): CyberState {
     disable_threshold: Number(object.disable_threshold),
     principal: parseCyberScopeState(object.principal, "principal cyber state"),
     client_instances: object.client_instances.map(parseClientInstanceCyberState),
+    bio_restrictions: Array.isArray(object.bio_restrictions)
+      ? object.bio_restrictions.map(parseRestriction)
+      : [],
   };
 }
 
@@ -366,10 +423,29 @@ function parseClientInstanceCyberState(value: unknown): ClientInstanceCyberState
     throw new CyberCheckClientError("review service returned invalid client instance cyber state");
   }
   const state = parseCyberScopeState(object, "client instance cyber state");
+  if (
+    typeof object.automatic_restricted !== "boolean" ||
+    typeof object.manual_restricted !== "boolean" ||
+    (object.manual_reason !== undefined && typeof object.manual_reason !== "string") ||
+    (object.manual_actor !== undefined && typeof object.manual_actor !== "string")
+  ) {
+    throw new CyberCheckClientError("review service returned invalid client restriction sources");
+  }
   const expiresAtMs = optionalTimestamp(object.expires_at_ms, "client instance cyber state");
+  const manualRestrictedAtMs = optionalTimestamp(
+    object.manual_restricted_at_ms,
+    "manual client restriction"
+  );
   return {
     client_instance_id: object.client_instance_id,
     ...state,
+    automatic_restricted: object.automatic_restricted,
+    manual_restricted: object.manual_restricted,
+    ...(object.manual_reason === undefined ? {} : { manual_reason: object.manual_reason }),
+    ...(object.manual_actor === undefined ? {} : { manual_actor: object.manual_actor }),
+    ...(manualRestrictedAtMs === undefined
+      ? {}
+      : { manual_restricted_at_ms: manualRestrictedAtMs }),
     ...(expiresAtMs === undefined ? {} : { expires_at_ms: expiresAtMs }),
   };
 }

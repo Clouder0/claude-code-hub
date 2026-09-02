@@ -13,6 +13,8 @@ import {
   getCyberCheckStateIfConfigured,
   reinstateCyberCheckClientInstanceIfConfigured,
   reinstateCyberCheckPrincipalIfConfigured,
+  releaseCyberCheckBioRestrictionIfConfigured,
+  setCyberCheckManualClientRestrictionIfConfigured,
 } from "@/lib/cyber-check/admin";
 import type { CyberState } from "@/lib/cyber-check/types";
 import { logger } from "@/lib/logger";
@@ -20,6 +22,11 @@ import { getUnauthorizedFields } from "@/lib/permissions/user-field-permissions"
 import { clipStartByResetAt, resolveUser5hCostResetAt } from "@/lib/rate-limit/cost-reset-utils";
 import { getRedisClient } from "@/lib/redis";
 import { invalidateCachedUser } from "@/lib/security/api-key-auth-cache";
+import {
+  releaseSessionPolicyBlock,
+  setCyberInstallationExecutionIndexStrict,
+  setCyberPrincipalExecutionIndexStrict,
+} from "@/lib/security/policy-containment";
 import { parseDateInputAsTimezone } from "@/lib/utils/date-input";
 import { ERROR_CODES } from "@/lib/utils/error-messages";
 import { normalizeProviderGroup, parseProviderGroups } from "@/lib/utils/provider-group";
@@ -34,6 +41,7 @@ import {
   findKeysStatisticsBatchFromKeys,
   findKeyUsageTodayBatch,
 } from "@/repository/key";
+import { updateSecurityEventCentralStatus } from "@/repository/security-events";
 import {
   createUser,
   deleteUser,
@@ -83,6 +91,26 @@ type UserActionSession = Pick<AuthSession, "user" | "key">;
 
 function canAdministerUsers(session: AuthSession): boolean {
   return hasAdminAuthority(session);
+}
+
+async function syncInstallationExecutionIndex(
+  principalId: string,
+  clientInstanceId: string
+): Promise<void> {
+  const state = await getCyberCheckStateIfConfigured(principalId);
+  const client = state?.client_instances.find(
+    (candidate) => candidate.client_instance_id === clientInstanceId
+  );
+  if (!client?.restricted) {
+    await setCyberInstallationExecutionIndexStrict(principalId, clientInstanceId, false);
+    return;
+  }
+  await setCyberInstallationExecutionIndexStrict(
+    principalId,
+    clientInstanceId,
+    true,
+    client.manual_restricted ? undefined : client.expires_at_ms
+  );
 }
 
 async function requireCyberPrincipalClearForEnable(principalId: string): Promise<ActionResult> {
@@ -173,6 +201,7 @@ export async function resetUserClientInstanceCyberState(
         errorCode: ERROR_CODES.CYBER_CHECK_NOT_CONFIGURED,
       };
     }
+    await syncInstallationExecutionIndex(String(userId), clientInstanceId);
     revalidatePath("/dashboard/users");
     emitActionAudit({
       category: "user",
@@ -226,6 +255,18 @@ export async function resetUserPrincipalCyberState(
         errorCode: ERROR_CODES.CYBER_CHECK_NOT_CONFIGURED,
       };
     }
+    const stateAfterReset = await getCyberCheckStateIfConfigured(String(userId));
+    await setCyberPrincipalExecutionIndexStrict(
+      String(userId),
+      stateAfterReset?.principal.restricted === true
+    );
+    if (enableUser && stateAfterReset?.principal.restricted) {
+      return {
+        ok: false,
+        error: ERROR_CODES.CYBER_PRINCIPAL_RESET_REQUIRED,
+        errorCode: ERROR_CODES.CYBER_PRINCIPAL_RESET_REQUIRED,
+      };
+    }
     if (enableUser && !user.isEnabled) {
       const updated = await updateUser(userId, { isEnabled: true });
       if (!updated) {
@@ -253,6 +294,254 @@ export async function resetUserPrincipalCyberState(
   } catch (error) {
     logger.error("Failed to reset Cyber Check principal state", {
       userId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return {
+      ok: false,
+      error: ERROR_CODES.CYBER_CHECK_UNAVAILABLE,
+      errorCode: ERROR_CODES.CYBER_CHECK_UNAVAILABLE,
+    };
+  }
+}
+
+export async function releaseUserBioRestriction(
+  userId: number,
+  scope: "session" | "client_instance" | "principal",
+  subjectId: string,
+  reason: string,
+  enableUser: boolean
+): Promise<ActionResult<{ enabled: boolean }>> {
+  try {
+    const session = await getSession();
+    if (!session || !canAdministerUsers(session)) {
+      return {
+        ok: false,
+        error: ERROR_CODES.PERMISSION_DENIED,
+        errorCode: ERROR_CODES.PERMISSION_DENIED,
+      };
+    }
+    const user = await findUserById(userId);
+    if (!user) return { ok: false, error: ERROR_CODES.NOT_FOUND, errorCode: ERROR_CODES.NOT_FOUND };
+    const normalizedReason = reason.trim();
+    if (!normalizedReason || !subjectId) {
+      return {
+        ok: false,
+        error: ERROR_CODES.REQUIRED_FIELD,
+        errorCode: ERROR_CODES.REQUIRED_FIELD,
+      };
+    }
+    const configured = await releaseCyberCheckBioRestrictionIfConfigured(
+      String(userId),
+      scope,
+      subjectId,
+      {
+        operation_id: randomBytes(16).toString("hex"),
+        actor: `admin:${session.user.id}`,
+        reason: normalizedReason,
+      }
+    );
+    if (!configured) {
+      return {
+        ok: false,
+        error: ERROR_CODES.CYBER_CHECK_NOT_CONFIGURED,
+        errorCode: ERROR_CODES.CYBER_CHECK_NOT_CONFIGURED,
+      };
+    }
+    const state = await getCyberCheckStateIfConfigured(String(userId));
+    if (scope === "session") await releaseSessionPolicyBlock(subjectId, "bio_policy");
+    if (scope === "client_instance")
+      await syncInstallationExecutionIndex(String(userId), subjectId);
+    if (scope === "principal") {
+      await setCyberPrincipalExecutionIndexStrict(
+        String(userId),
+        state?.principal.restricted === true
+      );
+    }
+    const canEnable = enableUser && state?.principal.restricted === false;
+    if (canEnable && !user.isEnabled) {
+      const updated = await updateUser(userId, { isEnabled: true });
+      if (!updated) {
+        return {
+          ok: false,
+          error: ERROR_CODES.NOT_FOUND,
+          errorCode: ERROR_CODES.NOT_FOUND,
+        };
+      }
+      await invalidateCachedUser(userId).catch(() => null);
+    }
+    emitActionAudit({
+      category: "user",
+      action: "user.bio_restriction_release",
+      targetType: "user",
+      targetId: String(userId),
+      targetName: user.name,
+      after: { scope, subjectId, reason: normalizedReason, enabled: canEnable },
+      success: true,
+    });
+    revalidatePath("/dashboard/security-events");
+    return { ok: true, data: { enabled: canEnable ? true : user.isEnabled } };
+  } catch (error) {
+    logger.error("Failed to release bio restriction", {
+      userId,
+      scope,
+      subjectId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return {
+      ok: false,
+      error: ERROR_CODES.CYBER_CHECK_UNAVAILABLE,
+      errorCode: ERROR_CODES.CYBER_CHECK_UNAVAILABLE,
+    };
+  }
+}
+
+export async function releaseLocalUnconfirmedBioContainment(
+  userId: number,
+  messageRequestId: number,
+  sessionId: string,
+  clientInstanceId: string | null,
+  reason: string
+): Promise<ActionResult> {
+  try {
+    const session = await getSession();
+    if (!session || !canAdministerUsers(session)) {
+      return {
+        ok: false,
+        error: ERROR_CODES.PERMISSION_DENIED,
+        errorCode: ERROR_CODES.PERMISSION_DENIED,
+      };
+    }
+    const user = await findUserById(userId);
+    if (!user || !reason.trim()) {
+      return {
+        ok: false,
+        error: ERROR_CODES.REQUIRED_FIELD,
+        errorCode: ERROR_CODES.REQUIRED_FIELD,
+      };
+    }
+    const central = await getCyberCheckStateIfConfigured(String(userId));
+    if (!central) {
+      return {
+        ok: false,
+        error: ERROR_CODES.CYBER_CHECK_NOT_CONFIGURED,
+        errorCode: ERROR_CODES.CYBER_CHECK_NOT_CONFIGURED,
+      };
+    }
+    if (central.bio_restrictions.length > 0) {
+      return {
+        ok: false,
+        error: ERROR_CODES.CYBER_PRINCIPAL_RESET_REQUIRED,
+        errorCode: ERROR_CODES.CYBER_PRINCIPAL_RESET_REQUIRED,
+      };
+    }
+    await releaseSessionPolicyBlock(sessionId, "bio_policy");
+    if (clientInstanceId) await syncInstallationExecutionIndex(String(userId), clientInstanceId);
+    await setCyberPrincipalExecutionIndexStrict(String(userId), central.principal.restricted);
+    await updateSecurityEventCentralStatus(
+      messageRequestId,
+      "bio_policy",
+      "unconfirmed",
+      "local_containment_released"
+    );
+    emitActionAudit({
+      category: "user",
+      action: "user.bio_unconfirmed_local_release",
+      targetType: "user",
+      targetId: String(userId),
+      targetName: user.name,
+      after: { messageRequestId, sessionId, clientInstanceId, reason: reason.trim() },
+      success: true,
+    });
+    revalidatePath("/dashboard/security-events");
+    return { ok: true };
+  } catch (error) {
+    logger.error("Failed to release local unconfirmed bio containment", {
+      userId,
+      messageRequestId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return {
+      ok: false,
+      error: ERROR_CODES.CYBER_CHECK_UNAVAILABLE,
+      errorCode: ERROR_CODES.CYBER_CHECK_UNAVAILABLE,
+    };
+  }
+}
+
+export async function setUserManualClientInstanceRestriction(
+  userId: number,
+  clientInstanceId: string,
+  reason: string,
+  restricted: boolean
+): Promise<ActionResult> {
+  try {
+    const session = await getSession();
+    if (!session || !canAdministerUsers(session)) {
+      return {
+        ok: false,
+        error: ERROR_CODES.PERMISSION_DENIED,
+        errorCode: ERROR_CODES.PERMISSION_DENIED,
+      };
+    }
+    const user = await findUserById(userId);
+    if (!user) {
+      return { ok: false, error: ERROR_CODES.NOT_FOUND, errorCode: ERROR_CODES.NOT_FOUND };
+    }
+    const normalizedReason = reason.trim();
+    if (
+      !clientInstanceId ||
+      Buffer.byteLength(clientInstanceId) > 256 ||
+      clientInstanceId.includes("\r") ||
+      clientInstanceId.includes("\n") ||
+      !normalizedReason ||
+      Buffer.byteLength(normalizedReason) > 1024 ||
+      normalizedReason.includes("\r") ||
+      normalizedReason.includes("\n")
+    ) {
+      return {
+        ok: false,
+        error: ERROR_CODES.REQUIRED_FIELD,
+        errorCode: ERROR_CODES.REQUIRED_FIELD,
+      };
+    }
+    const operationId = randomBytes(16).toString("hex");
+    const configured = await setCyberCheckManualClientRestrictionIfConfigured(
+      String(userId),
+      clientInstanceId,
+      {
+        operation_id: operationId,
+        actor: `admin:${session.user.id}`,
+        reason: normalizedReason,
+      },
+      restricted
+    );
+    if (!configured) {
+      return {
+        ok: false,
+        error: ERROR_CODES.CYBER_CHECK_NOT_CONFIGURED,
+        errorCode: ERROR_CODES.CYBER_CHECK_NOT_CONFIGURED,
+      };
+    }
+    await syncInstallationExecutionIndex(String(userId), clientInstanceId);
+    revalidatePath("/dashboard/security-events");
+    revalidatePath("/dashboard/users");
+    emitActionAudit({
+      category: "user",
+      action: restricted
+        ? "user.cyber_client_instance_manual_block"
+        : "user.cyber_client_instance_manual_release",
+      targetType: "user",
+      targetId: String(userId),
+      targetName: user.name,
+      after: { clientInstanceId, reason: normalizedReason, operationId },
+      success: true,
+    });
+    return { ok: true };
+  } catch (error) {
+    logger.error("Failed to change manual Cyber Check installation restriction", {
+      userId,
+      clientInstanceId,
+      restricted,
       error: error instanceof Error ? error.message : String(error),
     });
     return {

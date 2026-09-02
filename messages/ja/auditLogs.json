@@ -40,6 +40,8 @@
       "update": "ユーザー更新",
       "delete": "ユーザー削除",
       "cyber_client_instance_reset": "ユーザーの Cyber インストールをリセット",
+      "bio_restriction_release": "ユーザーの bio policy restriction を解除",
+      "bio_unconfirmed_local_release": "未確認のローカル bio containment を解除",
       "cyber_principal_reset": "ユーザーの Cyber アカウントをリセット",
       "reset_5h_limit": "ユーザー 5H 制限のリセット",
       "reset_5h_limit_only": "ユーザー専用 5H 制限のリセット"

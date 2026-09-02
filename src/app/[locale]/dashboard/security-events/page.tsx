@@ -19,7 +19,9 @@ import {
   findRecentSecurityEvents,
   findSecurityEventUserSummaries,
 } from "@/repository/security-events";
+import { CyberOperationsDialog } from "./_components/cyber-operations-dialog";
 import { DisableUserButton } from "./_components/disable-user-button";
+import { ReleaseUnconfirmedBioButton } from "./_components/release-unconfirmed-bio-button";
 
 export const dynamic = "force-dynamic";
 
@@ -99,6 +101,11 @@ export default async function SecurityEventsPage({
                     </TableCell>
                     <TableCell>
                       <div className="flex justify-end gap-2">
+                        <CyberOperationsDialog
+                          userId={user.userId}
+                          userName={user.userName}
+                          userEnabled={user.userEnabled}
+                        />
                         <Button asChild size="sm" variant="outline">
                           <Link href={`/dashboard/logs?userId=${user.userId}`}>
                             {t("actions.view")}
@@ -137,6 +144,8 @@ export default async function SecurityEventsPage({
                   <TableHead>{t("columns.user")}</TableHead>
                   <TableHead>{t("columns.key")}</TableHead>
                   <TableHead>{t("columns.session")}</TableHead>
+                  <TableHead>Installation</TableHead>
+                  <TableHead>Central</TableHead>
                   <TableHead>{t("columns.provider")}</TableHead>
                   <TableHead>{t("columns.request")}</TableHead>
                 </TableRow>
@@ -169,16 +178,41 @@ export default async function SecurityEventsPage({
                       <TableCell className="max-w-44 truncate font-mono text-xs">
                         {event.sessionId ?? t("unknown")}
                       </TableCell>
+                      <TableCell className="max-w-44 truncate font-mono text-xs">
+                        {event.clientInstanceId ?? t("unknown")}
+                      </TableCell>
+                      <TableCell>
+                        <Badge
+                          variant={
+                            event.centralStatus === "unconfirmed" ? "destructive" : "outline"
+                          }
+                        >
+                          {event.centralStatus}
+                        </Badge>
+                      </TableCell>
                       <TableCell>{event.providerName ?? `#${event.providerId}`}</TableCell>
                       <TableCell>
-                        <Button asChild size="sm" variant="ghost">
-                          <Link href={requestHref}>
-                            {event.messageRequestId != null
-                              ? `#${event.messageRequestId}`
-                              : t("unknown")}
-                            <ExternalLink />
-                          </Link>
-                        </Button>
+                        <div className="flex flex-wrap gap-2">
+                          <Button asChild size="sm" variant="ghost">
+                            <Link href={requestHref}>
+                              {event.messageRequestId != null
+                                ? `#${event.messageRequestId}`
+                                : t("unknown")}
+                              <ExternalLink />
+                            </Link>
+                          </Button>
+                          {event.type === "bio_policy" &&
+                            event.centralStatus === "unconfirmed" &&
+                            event.messageRequestId != null &&
+                            event.sessionId && (
+                              <ReleaseUnconfirmedBioButton
+                                userId={event.userId}
+                                messageRequestId={event.messageRequestId}
+                                sessionId={event.sessionId}
+                                clientInstanceId={event.clientInstanceId}
+                              />
+                            )}
+                        </div>
                       </TableCell>
                     </TableRow>
                   );

@@ -1041,9 +1041,8 @@ async function finalizeDeferredStreamingFinalizationIfNeeded(
   // （封锁键与事件类型按策略独立）；下游判定取第一个命中（cyber 优先）。
   for (const policy of POLICY_REJECTION_CODES) {
     if (securitySignals.includes(policy)) {
-      const providerEventReport = reportProviderPolicyEventBestEffort(session, policy);
       await containPolicyRejection(session, policy);
-      await providerEventReport;
+      await reportProviderPolicyEventBestEffort(session, policy);
     }
   }
   const rejectedPolicy = firstPolicyRejectionCode(securitySignals);

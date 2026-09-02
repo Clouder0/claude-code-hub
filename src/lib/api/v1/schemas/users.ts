@@ -138,6 +138,19 @@ export const UserCyberStateResponseSchema = z.object({
       client_instances: z.array(
         CyberScopeStateSchema.extend({
           client_instance_id: z.string(),
+          automatic_restricted: z.boolean(),
+          manual_restricted: z.boolean(),
+          manual_reason: z.string().optional(),
+          manual_actor: z.string().optional(),
+          manual_restricted_at_ms: CyberTimestampSchema.optional(),
+          expires_at_ms: CyberTimestampSchema.optional(),
+        })
+      ),
+      bio_restrictions: z.array(
+        z.object({
+          scope: z.enum(["session", "client_instance", "principal"]),
+          subject_id: z.string(),
+          reason: z.string(),
           expires_at_ms: CyberTimestampSchema.optional(),
         })
       ),
@@ -155,9 +168,44 @@ export const UserCyberClientInstanceResetSchema = z
   })
   .strict();
 
+export const UserCyberManualClientRestrictionSchema = z
+  .object({
+    clientInstanceId: z
+      .string()
+      .min(1)
+      .max(256)
+      .refine((value) => !value.includes("\n") && !value.includes("\r")),
+    reason: z
+      .string()
+      .trim()
+      .min(1)
+      .max(1024)
+      .refine((value) => !value.includes("\n") && !value.includes("\r")),
+    restricted: z.boolean(),
+  })
+  .strict();
+
 export const UserCyberPrincipalResetSchema = z
   .object({
     enableUser: z.boolean().describe("Enable the CCH user only after central reset succeeds."),
+  })
+  .strict();
+
+export const UserBioRestrictionReleaseSchema = z
+  .object({
+    scope: z.enum(["session", "client_instance", "principal"]),
+    subjectId: z.string().min(1).max(256),
+    reason: z.string().trim().min(1).max(1024),
+    enableUser: z.boolean().default(false),
+  })
+  .strict();
+
+export const UserBioUnconfirmedLocalReleaseSchema = z
+  .object({
+    messageRequestId: z.number().int().positive(),
+    sessionId: z.string().min(1).max(256),
+    clientInstanceId: z.string().max(256).nullable(),
+    reason: z.string().trim().min(1).max(1024),
   })
   .strict();
 

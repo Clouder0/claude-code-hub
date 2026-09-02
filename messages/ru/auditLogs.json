@@ -40,6 +40,8 @@
       "update": "Обновление пользователя",
       "delete": "Удаление пользователя",
       "cyber_client_instance_reset": "Сброс Cyber-установки пользователя",
+      "bio_restriction_release": "Снять bio policy restriction пользователя",
+      "bio_unconfirmed_local_release": "Снять неподтвержденный локальный bio containment",
       "cyber_principal_reset": "Сброс Cyber-учетной записи пользователя",
       "reset_5h_limit": "Сброс лимита пользователя 5H",
       "reset_5h_limit_only": "Сброс только пользовательского лимита 5H"

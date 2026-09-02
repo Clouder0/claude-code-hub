@@ -10,6 +10,8 @@ export type RecentSecurityEvent = {
   type: SecurityEventType;
   createdAt: Date;
   messageRequestId: number | null;
+  clientInstanceId: string | null;
+  centralStatus: "pending" | "confirmed" | "unconfirmed";
   userId: number;
   userName: string;
   userEnabled: boolean;
@@ -33,14 +35,49 @@ export type SecurityEventUserSummary = {
 export async function insertSecurityEvent(
   userId: number,
   messageRequestId: number | null,
-  type: SecurityEventType
+  type: SecurityEventType,
+  options?: {
+    clientInstanceId?: string;
+    centralStatus?: "pending" | "confirmed" | "unconfirmed";
+    centralError?: string;
+  }
 ): Promise<void> {
   await db
     .insert(securityEvents)
-    .values({ userId, messageRequestId, type })
+    .values(
+      options
+        ? {
+            userId,
+            messageRequestId,
+            type,
+            clientInstanceId: options.clientInstanceId,
+            centralStatus: options.centralStatus ?? "confirmed",
+            centralError: options.centralError,
+            confirmedAt: options.centralStatus === "confirmed" ? new Date() : undefined,
+          }
+        : { userId, messageRequestId, type }
+    )
     .onConflictDoNothing({
       target: [securityEvents.messageRequestId, securityEvents.type],
     });
+}
+
+export async function updateSecurityEventCentralStatus(
+  messageRequestId: number,
+  type: SecurityEventType,
+  status: "confirmed" | "unconfirmed",
+  centralError?: string
+): Promise<void> {
+  await db
+    .update(securityEvents)
+    .set({
+      centralStatus: status,
+      centralError: centralError?.slice(0, 128) ?? null,
+      confirmedAt: status === "confirmed" ? new Date() : null,
+    })
+    .where(
+      and(eq(securityEvents.messageRequestId, messageRequestId), eq(securityEvents.type, type))
+    );
 }
 
 export async function findRecentSecurityEvents(options?: {
@@ -55,6 +92,8 @@ export async function findRecentSecurityEvents(options?: {
       type: securityEvents.type,
       createdAt: securityEvents.createdAt,
       messageRequestId: securityEvents.messageRequestId,
+      clientInstanceId: securityEvents.clientInstanceId,
+      centralStatus: securityEvents.centralStatus,
       userId: users.id,
       userName: users.name,
       userEnabled: users.isEnabled,

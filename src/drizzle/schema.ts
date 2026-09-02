@@ -650,6 +650,13 @@ export const securityEvents = pgTable('security_event', {
   }),
   // varchar 而非 pg enum：新增策略码（如 bio_policy）只需扩展 TS 闭合类型，无需迁移。
   type: varchar('type', { length: 32 }).notNull().$type<SecurityEventType>(),
+  clientInstanceId: varchar('client_instance_id', { length: 256 }),
+  centralStatus: varchar('central_status', { length: 16 })
+    .notNull()
+    .default('confirmed')
+    .$type<'pending' | 'confirmed' | 'unconfirmed'>(),
+  centralError: varchar('central_error', { length: 128 }),
+  confirmedAt: timestamp('confirmed_at', { withTimezone: true }),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 }, (table) => ({
   securityEventsRequestTypeUniqueIdx: uniqueIndex('idx_security_event_request_type_unique').on(

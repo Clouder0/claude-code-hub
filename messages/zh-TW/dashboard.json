@@ -1726,7 +1726,27 @@
         "principalReset": "帳戶 Cyber 狀態已重設",
         "principalResetAndEnabled": "帳戶 Cyber 狀態已重設，使用者已啟用",
         "installationReset": "Installation Cyber 狀態已重設",
-        "resetFailed": "Cyber 狀態重設失敗"
+        "resetFailed": "Cyber 狀態重設失敗",
+        "manualTitle": "手動封鎖 installation",
+        "manualDescription": "只封鎖該使用者下指定的 installation，不增加自動 strike。",
+        "installationPlaceholder": "Installation ID",
+        "reasonPlaceholder": "處置原因",
+        "manualBlock": "封鎖 installation",
+        "manualRelease": "解除手動封鎖",
+        "confirmManualReleaseTitle": "解除這條手動 restriction？",
+        "confirmManualReleaseDescription": "既有的自動 restriction 和 strike epoch 不會改變。請填寫稽核原因。",
+        "manualBlocked": "已手動封鎖 installation",
+        "manualReleased": "已解除手動 installation 封鎖",
+        "automatic": "自動",
+        "manual": "手動",
+        "manualDetail": "手動處置：{actor} — {reason}",
+        "unknown": "未知"
+        ,"bioRestrictions": "永久 bio policy restriction",
+        "noBioRestrictions": "目前沒有 bio policy restriction。",
+        "releaseBio": "解除 bio restriction",
+        "bioReleased": "已解除 bio policy restriction",
+        "confirmBioReleaseTitle": "解除這個 bio policy 範圍？",
+        "confirmBioReleaseDescription": "只解除該 bio 來源和範圍；cyber 與手動 restriction 保持不變。"
       },
       "resetSection": {
         "title": "重置選項"
@@ -2295,6 +2315,9 @@
     },
     "actions": {
       "view": "查看請求",
+      "containment": "安全處置",
+      "containmentTitle": "處置 {user}",
+      "containmentDescription": "查看中央 strike 和 restriction，手動封鎖指定 installation，或重設對應範圍。",
       "disable": "停用使用者",
       "confirmTitle": "停用此使用者？",
       "confirmDescription": "CCH 將拒絕來自 {user} 的後續請求。",

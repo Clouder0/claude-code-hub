@@ -71,17 +71,18 @@ enforce 下只有取得 durable `202` admission 后才发起上游。负面异�
 
 ## 上游事件、错误与人工解禁
 
-只有同一个已 admission 的实际 provider attempt 返回结构化 `error.code == "cyber_policy"` 时，
-CCH 才回报权威事件。普通文本、`invalid_prompt`、本地 Reviewer 预测和 `bio_policy` 都不会升级。
+只有同一个已 admission 的实际 provider attempt 返回结构化 `error.code == "cyber_policy"` 或
+`bio_policy` 时，CCH 才回报权威事件。普通文本、`invalid_prompt` 和本地 Reviewer 预测不会升级。
 
 ```text
 POST /v1/provider-events
   200 -> principal strike 数及 session/client/principal containment 状态
 ```
 
-回报显式携带 CCH 当时的 `enforcement_mode`。只有 CCH 与服务端都为 enforce 时，新事件才是
-actionable：一次 hit 封锁当前 session 24 小时，并在存在 installation ID 时封锁该 client instance
-24 小时；同一 `(principal, installation)` 在 30 天窗口内第二次去重 hit 才会把 installation 持续封锁到
+回报显式携带 CCH 当时的 `enforcement_mode`。实际 provider 已确认的 `cyber_policy` 事件以
+`enforce` 上报，因此即使 CCH 的预测性 Reviewer 处于 shadow/observe，也会形成 actionable
+containment：一次 hit 封锁当前 session 24 小时，并在存在 installation ID 时封锁该 client instance
+5 分钟；同一 `(principal, installation)` 在 30 天窗口内第二次去重 hit 才会把 installation 持续封锁到
 管理员重置。相同窗口内两个 principal hit 会限制整个 principal，无论是否来自同一 installation。永久
 限制不会随着 hit 离开计数窗口而自动解除。Shadow 事件仍保存为 audit/risk
 事实并提高审查频率，但永远不会在切换模式后追溯成 strike。Cyber Check 是 cyber strike、restriction
@@ -90,6 +91,12 @@ provider event 只做一次有指标的 best-effort 回报，失败可能漏掉 
 observation 成功后在后台回报，但不会延迟真实上游错误；如果 observation 是 capture gap，当前协议
 无法关联 admission，因此跳过 dependent event。只有 enforce 中心响应确认 principal restriction 后，
 CCH 才更新既有 `users.is_enabled` 并失效鉴权缓存。
+
+`bio_policy` 更严格：一次命中立即在 CCH 本地永久封锁 session、可用的 installation 和 principal，
+并 disable 用户；随后以 Provider Event V2 请求中央确认。中央在单事务中写入三个永久 source-specific
+restriction，且不增加 cyber strike。CCH 事件以 `pending` 开始，成功变为 `confirmed`，失败变为
+`unconfirmed`；中央失败不解除本地严格封锁，也没有 outbox 或自动重试。管理员按 bio 的单个 scope
+显式解除，cyber strike、其他 bio scope 和 manual restriction 均保持不变。
 
 触发请求仍返回真实上游 `cyber_policy`。后续网关拒绝使用 `gateway_cyber_restricted`；任何带有明确
 `expires_at_ms` 的临时 session/installation 限制都可携带 retry time，永久 installation/principal 文案
@@ -117,6 +124,12 @@ POST /v1/principals/{principal_id}/reinstatement
 通过 `POST /v1/principals/{principal_id}/client-instances/{client_instance_id}/reinstatement` 独立 reset。
 两种 reset 都用中心 watermark 开启对应 scope 的新 epoch，不加入白名单、互不级联，也不释放 session。
 旧事件和证据仍可审计，下一次新 hit 重新从 1 开始。
+
+「安全事件」是管理员的主要调查与处置入口。管理员可按
+`(principal_id, installation_id)` 增加或解除独立的手动 restriction，并必须填写原因。手动 source 不增加
+自动 strike；自动 reset 不解除手动 restriction，手动解除也不清自动 restriction。中央事务成功后，CCH
+重新读取中央状态并严格同步 Redis 执行索引；同步失败会返回失败，不把尚未在请求热路径生效的状态显示成
+成功。用户编辑页继续作为同一中央状态的辅助入口。
 
 ## 证据生命周期与 V1 边界
 

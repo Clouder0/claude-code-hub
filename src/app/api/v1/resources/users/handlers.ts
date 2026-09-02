@@ -14,8 +14,11 @@ import {
   noContentResponse,
 } from "@/lib/api/v1/_shared/response-helpers";
 import {
+  UserBioRestrictionReleaseSchema,
+  UserBioUnconfirmedLocalReleaseSchema,
   UserCreateSchema,
   UserCyberClientInstanceResetSchema,
+  UserCyberManualClientRestrictionSchema,
   UserCyberPrincipalResetSchema,
   UserEnableSchema,
   UserFilterSearchQuerySchema,
@@ -140,6 +143,22 @@ export async function resetUserCyberClientInstance(c: Context): Promise<Response
   return noContentResponse();
 }
 
+export async function setUserCyberManualClientRestriction(c: Context): Promise<Response> {
+  const params = parseUserParams(c);
+  if (params instanceof Response) return params;
+  const body = await parseHonoJsonBody(c, UserCyberManualClientRestrictionSchema);
+  if (!body.ok) return body.response;
+  const actions = await import("@/actions/users");
+  const result = await callAction(
+    c,
+    actions.setUserManualClientInstanceRestriction,
+    [params.id, body.data.clientInstanceId, body.data.reason, body.data.restricted] as never[],
+    c.get("auth")
+  );
+  if (!result.ok) return actionError(c, result);
+  return noContentResponse();
+}
+
 export async function resetUserCyberPrincipal(c: Context): Promise<Response> {
   const params = parseUserParams(c);
   if (params instanceof Response) return params;
@@ -155,6 +174,51 @@ export async function resetUserCyberPrincipal(c: Context): Promise<Response> {
       c.get("auth")
     )
   );
+}
+
+export async function releaseUserBioRestriction(c: Context): Promise<Response> {
+  const params = parseUserParams(c);
+  if (params instanceof Response) return params;
+  const body = await parseHonoJsonBody(c, UserBioRestrictionReleaseSchema);
+  if (!body.ok) return body.response;
+  const actions = await import("@/actions/users");
+  return actionJson(
+    c,
+    await callAction(
+      c,
+      actions.releaseUserBioRestriction,
+      [
+        params.id,
+        body.data.scope,
+        body.data.subjectId,
+        body.data.reason,
+        body.data.enableUser,
+      ] as never[],
+      c.get("auth")
+    )
+  );
+}
+
+export async function releaseLocalUnconfirmedBioContainment(c: Context): Promise<Response> {
+  const params = parseUserParams(c);
+  if (params instanceof Response) return params;
+  const body = await parseHonoJsonBody(c, UserBioUnconfirmedLocalReleaseSchema);
+  if (!body.ok) return body.response;
+  const actions = await import("@/actions/users");
+  const result = await callAction(
+    c,
+    actions.releaseLocalUnconfirmedBioContainment,
+    [
+      params.id,
+      body.data.messageRequestId,
+      body.data.sessionId,
+      body.data.clientInstanceId,
+      body.data.reason,
+    ] as never[],
+    c.get("auth")
+  );
+  if (!result.ok) return actionError(c, result);
+  return noContentResponse();
 }
 
 export async function createUser(c: Context): Promise<Response> {

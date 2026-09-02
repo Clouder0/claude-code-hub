@@ -8,6 +8,7 @@ import {
   reinstatePrincipal,
   reportProviderEvent,
   reportRequestOutcome,
+  setManualClientInstanceRestriction,
   submitReview,
 } from "@/lib/cyber-check/client";
 import { resolveCyberCheckConfig } from "@/lib/cyber-check/config";
@@ -284,6 +285,8 @@ describe("cyber-check client", () => {
               client_instance_id: "installation/1",
               current_strikes: 1,
               restricted: true,
+              automatic_restricted: true,
+              manual_restricted: false,
               expires_at_ms: 1_800_086_400_000,
               last_hit_at_ms: 1_800_000_000_000,
               last_reset_at_ms: 1_700_000_000_000,
@@ -365,6 +368,35 @@ describe("cyber-check client", () => {
     );
     expect(init?.method).toBe("POST");
     expect(new Headers(init?.headers).get("authorization")).toBe("Bearer gateway-test-token");
+  });
+
+  it("sets and releases a manual installation restriction with an auditable operation", async () => {
+    const fetchMock = vi.fn(async () => new Response(null, { status: 204 }));
+    const operation = { operation_id: "op-1", actor: "admin:1", reason: "incident" };
+
+    await setManualClientInstanceRestriction(
+      config,
+      "principal/7",
+      "installation/1",
+      operation,
+      true,
+      {
+        fetchImpl: fetchMock as unknown as typeof fetch,
+      }
+    );
+    await setManualClientInstanceRestriction(
+      config,
+      "principal/7",
+      "installation/1",
+      operation,
+      false,
+      {
+        fetchImpl: fetchMock as unknown as typeof fetch,
+      }
+    );
+
+    expect(fetchMock.mock.calls.map((call) => call[1]?.method)).toEqual(["POST", "DELETE"]);
+    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toEqual(operation);
   });
 
   it("reports a clean terminal outcome to its dedicated resource", async () => {

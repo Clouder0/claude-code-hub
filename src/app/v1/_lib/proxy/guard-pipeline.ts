@@ -1,4 +1,4 @@
-import { findSessionBlockPolicy } from "@/lib/security/policy-containment";
+import { findCyberScopeBlock, findSessionBlockPolicy } from "@/lib/security/policy-containment";
 import { ProxyAuthenticator } from "./auth-guard";
 import { ProxyClientGuard } from "./client-guard";
 import type { EndpointPolicy } from "./endpoint-policy";
@@ -36,6 +36,7 @@ export type GuardStepKey =
   | "probe"
   | "session"
   | "policyBlock"
+  | "cyberScopeBlock"
   | "warmup"
   | "requestFilter"
   | "sensitive"
@@ -113,6 +114,33 @@ const Steps: Record<GuardStepKey, GuardStep> = {
         );
       }
       return null;
+    },
+  },
+  cyberScopeBlock: {
+    name: "cyberScopeBlock",
+    async execute(session) {
+      const context = session.messageContext;
+      if (!context) return null;
+      const metadata = session.request.message.client_metadata;
+      const clientInstanceId =
+        metadata && typeof metadata === "object" && !Array.isArray(metadata)
+          ? (metadata as Record<string, unknown>)["x-codex-installation-id"]
+          : undefined;
+      const blocked = await findCyberScopeBlock(
+        String(context.user.id),
+        typeof clientInstanceId === "string" ? clientInstanceId : undefined
+      );
+      if (!blocked) return null;
+      return ProxyResponses.buildError(
+        400,
+        blocked === "principal"
+          ? "该账户因触发上游安全策略已被拦截。"
+          : "该 installation 因触发上游安全策略已被拦截。",
+        "invalid_request_error",
+        undefined,
+        undefined,
+        { code: "cyber_policy" }
+      );
     },
   },
   warmup: {
@@ -237,6 +265,7 @@ export const CHAT_PIPELINE: GuardConfig = {
     "provider",
     "providerRequestFilter",
     "messageContext",
+    "cyberScopeBlock",
   ],
 };
 
@@ -255,6 +284,7 @@ export const RAW_SAFE_SESSION_PIPELINE: GuardConfig = {
     "policyBlock",
     "provider",
     "messageContext",
+    "cyberScopeBlock",
   ],
 };
 

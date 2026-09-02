@@ -47,13 +47,13 @@ export type ReviewJob =
   | { status: "failed"; job_id: string; error_code: string };
 
 export interface ProviderEventEnvelope {
-  schema_version: "cyber-check.provider-event.v1";
+  schema_version: "cyber-check.provider-event.v1" | "cyber-check.provider-event.v2";
   identity: ReviewRequestEnvelope["identity"];
   enforcement_mode: Exclude<CyberCheckMode, "off">;
   upstream_provider_id: string;
   event: {
     type: "policy_rejection";
-    code: "cyber_policy";
+    code: "cyber_policy" | "bio_policy";
   };
 }
 
@@ -75,9 +75,20 @@ export interface ClientInstanceCyberState {
   client_instance_id: string;
   current_strikes: number;
   restricted: boolean;
+  automatic_restricted: boolean;
+  manual_restricted: boolean;
+  manual_reason?: string;
+  manual_actor?: string;
+  manual_restricted_at_ms?: number;
   expires_at_ms?: number;
   last_hit_at_ms?: number;
   last_reset_at_ms?: number;
+}
+
+export interface ManualClientRestrictionOperation {
+  operation_id: string;
+  actor: string;
+  reason: string;
 }
 
 export interface CyberState {
@@ -86,6 +97,7 @@ export interface CyberState {
   disable_threshold: number;
   principal: PrincipalCyberState;
   client_instances: ClientInstanceCyberState[];
+  bio_restrictions: ActiveRestriction[];
 }
 
 export interface RequestOutcomeEnvelope {

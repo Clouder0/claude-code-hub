@@ -1741,7 +1741,27 @@
         "principalReset": "账户 Cyber 状态已重置",
         "principalResetAndEnabled": "账户 Cyber 状态已重置，用户已启用",
         "installationReset": "Installation Cyber 状态已重置",
-        "resetFailed": "Cyber 状态重置失败"
+        "resetFailed": "Cyber 状态重置失败",
+        "manualTitle": "手动封禁 installation",
+        "manualDescription": "只封禁该用户下指定的 installation，不增加自动 strike。",
+        "installationPlaceholder": "Installation ID",
+        "reasonPlaceholder": "处置原因",
+        "manualBlock": "封禁 installation",
+        "manualRelease": "解除手动封禁",
+        "confirmManualReleaseTitle": "解除这条手动 restriction？",
+        "confirmManualReleaseDescription": "已有的自动 restriction 和 strike epoch 不会改变。请填写审计原因。",
+        "manualBlocked": "已手动封禁 installation",
+        "manualReleased": "已解除手动 installation 封禁",
+        "automatic": "自动",
+        "manual": "手动",
+        "manualDetail": "手动处置：{actor} — {reason}",
+        "unknown": "未知"
+        ,"bioRestrictions": "永久 bio policy restriction",
+        "noBioRestrictions": "当前没有 bio policy restriction。",
+        "releaseBio": "解除 bio restriction",
+        "bioReleased": "已解除 bio policy restriction",
+        "confirmBioReleaseTitle": "解除这个 bio policy 作用域？",
+        "confirmBioReleaseDescription": "只解除该 bio 来源和作用域；cyber 与手动 restriction 保持不变。"
       },
       "resetSection": {
         "title": "重置选项"
@@ -2310,6 +2330,9 @@
     },
     "actions": {
       "view": "查看请求",
+      "containment": "安全处置",
+      "containmentTitle": "处置 {user}",
+      "containmentDescription": "查看中央 strike 和 restriction，手动封禁指定 installation，或重置对应作用域。",
       "disable": "停用用户",
       "confirmTitle": "停用此用户？",
       "confirmDescription": "CCH 将拒绝来自 {user} 的后续请求。",

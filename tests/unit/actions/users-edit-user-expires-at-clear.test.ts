@@ -21,10 +21,28 @@ vi.mock("next-intl/server", () => ({
 const getCyberCheckStateMock = vi.fn(async () => null);
 const reinstateCyberCheckPrincipalMock = vi.fn(async () => true);
 const reinstateCyberCheckClientInstanceMock = vi.fn(async () => true);
+const setCyberCheckManualClientRestrictionMock = vi.fn(async () => true);
+const releaseCyberCheckBioRestrictionMock = vi.fn(async () => true);
 vi.mock("@/lib/cyber-check/admin", () => ({
   getCyberCheckStateIfConfigured: getCyberCheckStateMock,
   reinstateCyberCheckPrincipalIfConfigured: reinstateCyberCheckPrincipalMock,
   reinstateCyberCheckClientInstanceIfConfigured: reinstateCyberCheckClientInstanceMock,
+  setCyberCheckManualClientRestrictionIfConfigured: setCyberCheckManualClientRestrictionMock,
+  releaseCyberCheckBioRestrictionIfConfigured: releaseCyberCheckBioRestrictionMock,
+}));
+
+const setCyberInstallationExecutionIndexStrictMock = vi.fn(async () => {});
+const setCyberPrincipalExecutionIndexStrictMock = vi.fn(async () => {});
+const releaseSessionPolicyBlockMock = vi.fn(async () => {});
+vi.mock("@/lib/security/policy-containment", () => ({
+  setCyberInstallationExecutionIndexStrict: setCyberInstallationExecutionIndexStrictMock,
+  setCyberPrincipalExecutionIndexStrict: setCyberPrincipalExecutionIndexStrictMock,
+  releaseSessionPolicyBlock: releaseSessionPolicyBlockMock,
+}));
+
+const updateSecurityEventCentralStatusMock = vi.fn(async () => {});
+vi.mock("@/repository/security-events", () => ({
+  updateSecurityEventCentralStatus: updateSecurityEventCentralStatusMock,
 }));
 
 const invalidateCachedUserMock = vi.fn(async () => {});
@@ -70,7 +88,7 @@ vi.mock("@/lib/redis/cost-cache-cleanup", async (importOriginal) => {
 describe("editUser: expiresAt 清除应写入数据库更新", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    getSessionMock.mockResolvedValue({ user: { id: 1, role: "admin" } });
+    getSessionMock.mockResolvedValue({ user: { id: 1, name: "Admin", role: "admin" } });
     updateUserMock.mockResolvedValue({ id: 123 });
     findUserByIdMock.mockResolvedValue({
       id: 123,
@@ -92,6 +110,8 @@ describe("editUser: expiresAt 清除应写入数据库更新", () => {
     getCyberCheckStateMock.mockResolvedValue(null);
     reinstateCyberCheckPrincipalMock.mockResolvedValue(true);
     reinstateCyberCheckClientInstanceMock.mockResolvedValue(true);
+    setCyberCheckManualClientRestrictionMock.mockResolvedValue(true);
+    releaseCyberCheckBioRestrictionMock.mockResolvedValue(true);
   });
 
   test("传入 expiresAt=null 应调用 updateUser(..., { expiresAt: null })", async () => {
@@ -205,6 +225,107 @@ describe("editUser: expiresAt 清除应写入数据库更新", () => {
     expect(reinstateCyberCheckClientInstanceMock).toHaveBeenCalledWith("123", "installation-7");
     expect(reinstateCyberCheckPrincipalMock).not.toHaveBeenCalled();
     expect(updateUserMock).not.toHaveBeenCalled();
+  });
+
+  test("manual installation block reaches central authority before the local execution index", async () => {
+    getCyberCheckStateMock.mockResolvedValue({
+      client_instances: [
+        {
+          client_instance_id: "installation-7",
+          restricted: true,
+          manual_restricted: true,
+        },
+      ],
+    });
+    const { setUserManualClientInstanceRestriction } = await import("@/actions/users");
+
+    const res = await setUserManualClientInstanceRestriction(
+      123,
+      "installation-7",
+      "incident",
+      true
+    );
+
+    expect(res.ok).toBe(true);
+    expect(setCyberCheckManualClientRestrictionMock).toHaveBeenCalledWith(
+      "123",
+      "installation-7",
+      expect.objectContaining({ actor: "admin:1", reason: "incident" }),
+      true
+    );
+    expect(setCyberInstallationExecutionIndexStrictMock).toHaveBeenCalledWith(
+      "123",
+      "installation-7",
+      true,
+      undefined
+    );
+    expect(setCyberCheckManualClientRestrictionMock.mock.invocationCallOrder[0]).toBeLessThan(
+      setCyberInstallationExecutionIndexStrictMock.mock.invocationCallOrder[0] ??
+        Number.MAX_SAFE_INTEGER
+    );
+  });
+
+  test("unconfirmed bio recovery releases local execution only when central has no bio restriction", async () => {
+    getCyberCheckStateMock.mockResolvedValue({
+      principal: { restricted: false },
+      client_instances: [],
+      bio_restrictions: [],
+    });
+    const { releaseLocalUnconfirmedBioContainment } = await import("@/actions/users");
+    const res = await releaseLocalUnconfirmedBioContainment(
+      123,
+      42,
+      "session-7",
+      null,
+      "false positive"
+    );
+    expect(res.ok).toBe(true);
+    expect(releaseSessionPolicyBlockMock).toHaveBeenCalledWith("session-7", "bio_policy");
+    expect(setCyberPrincipalExecutionIndexStrictMock).toHaveBeenCalledWith("123", false);
+    expect(updateSecurityEventCentralStatusMock).toHaveBeenCalledWith(
+      42,
+      "bio_policy",
+      "unconfirmed",
+      "local_containment_released"
+    );
+    expect(updateUserMock).not.toHaveBeenCalled();
+  });
+
+  test("bio principal release enables the user only after central and local state are clear", async () => {
+    getCyberCheckStateMock.mockResolvedValue({
+      principal: { restricted: false },
+      client_instances: [],
+      bio_restrictions: [],
+    });
+    const { releaseUserBioRestriction } = await import("@/actions/users");
+
+    const res = await releaseUserBioRestriction(123, "principal", "123", "reviewed", true);
+
+    expect(res).toEqual({ ok: true, data: { enabled: true } });
+    expect(releaseCyberCheckBioRestrictionMock).toHaveBeenCalledWith(
+      "123",
+      "principal",
+      "123",
+      expect.objectContaining({ actor: "admin:1", reason: "reviewed" })
+    );
+    expect(setCyberPrincipalExecutionIndexStrictMock).toHaveBeenCalledWith("123", false);
+    expect(updateUserMock).toHaveBeenCalledWith(123, { isEnabled: true });
+    expect(invalidateCachedUserMock).toHaveBeenCalledWith(123);
+  });
+
+  test("bio principal release does not report enabled when the user row disappeared", async () => {
+    getCyberCheckStateMock.mockResolvedValue({
+      principal: { restricted: false },
+      client_instances: [],
+      bio_restrictions: [],
+    });
+    updateUserMock.mockResolvedValueOnce(null);
+    const { releaseUserBioRestriction } = await import("@/actions/users");
+
+    const res = await releaseUserBioRestriction(123, "principal", "123", "reviewed", true);
+
+    expect(res).toMatchObject({ ok: false, errorCode: "NOT_FOUND" });
+    expect(invalidateCachedUserMock).not.toHaveBeenCalled();
   });
 
   test("Cyber state and reset actions require effective admin authority", async () => {

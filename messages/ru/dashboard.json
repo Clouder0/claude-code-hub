@@ -1723,7 +1723,27 @@
         "principalReset": "Cyber-состояние учетной записи сброшено",
         "principalResetAndEnabled": "Cyber-состояние сброшено, пользователь включён",
         "installationReset": "Cyber-состояние установки сброшено",
-        "resetFailed": "Не удалось сбросить Cyber-состояние"
+        "resetFailed": "Не удалось сбросить Cyber-состояние",
+        "manualTitle": "Ручное ограничение installation",
+        "manualDescription": "Ограничивает одну installation пользователя без добавления автоматического strike.",
+        "installationPlaceholder": "Installation ID",
+        "reasonPlaceholder": "Причина оператора",
+        "manualBlock": "Заблокировать installation",
+        "manualRelease": "Снять ручную блокировку",
+        "confirmManualReleaseTitle": "Снять эту ручную restriction?",
+        "confirmManualReleaseDescription": "Автоматическая restriction и strike epoch не изменятся. Укажите причину для аудита.",
+        "manualBlocked": "Installation заблокирована вручную",
+        "manualReleased": "Ручная блокировка installation снята",
+        "automatic": "Автоматически",
+        "manual": "Вручную",
+        "manualDetail": "Вручную: {actor} — {reason}",
+        "unknown": "Неизвестно"
+        ,"bioRestrictions": "Постоянные bio policy restriction",
+        "noBioRestrictions": "Активных bio policy restriction нет.",
+        "releaseBio": "Снять bio restriction",
+        "bioReleased": "Bio policy restriction снята",
+        "confirmBioReleaseTitle": "Снять эту bio policy scope?",
+        "confirmBioReleaseDescription": "Снимается только этот bio source и scope. Cyber и ручные restriction сохраняются."
       },
       "resetSection": {
         "title": "Параметры сброса"
@@ -2342,6 +2362,9 @@
     },
     "actions": {
       "view": "Показать запросы",
+      "containment": "Ограничения",
+      "containmentTitle": "Ограничения для {user}",
+      "containmentDescription": "Просмотр центральных strike и restriction, ручная блокировка installation или сброс нужной области.",
       "disable": "Отключить пользователя",
       "confirmTitle": "Отключить пользователя?",
       "confirmDescription": "CCH отклонит последующие запросы от {user}.",

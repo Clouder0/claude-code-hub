@@ -18,12 +18,15 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import {
   getUserCyberState,
+  releaseUserBioRestriction,
   resetUserCyberClientInstance,
   resetUserCyberPrincipal,
+  setUserCyberManualClientRestriction,
 } from "@/lib/api-client/v1/actions/users";
-import type { ClientInstanceCyberState } from "@/lib/cyber-check/types";
+import type { ActiveRestriction, ClientInstanceCyberState } from "@/lib/cyber-check/types";
 import { getErrorMessage } from "@/lib/utils/error-messages";
 
 interface CyberStateSectionProps {
@@ -42,6 +45,8 @@ export function CyberStateSection({
   const tErrors = useTranslations("errors");
   const locale = useLocale();
   const [resetting, setResetting] = useState<string | null>(null);
+  const [manualInstallation, setManualInstallation] = useState("");
+  const [manualReason, setManualReason] = useState("");
   const stateQuery = useQuery({
     queryKey: ["userCyberState", userId],
     queryFn: () => getUserCyberState(userId),
@@ -101,6 +106,58 @@ export function CyberStateSection({
     }
   };
 
+  const handleManualRestriction = async (
+    clientInstanceId: string,
+    restricted: boolean,
+    reason: string
+  ) => {
+    setResetting(`manual:${clientInstanceId}`);
+    try {
+      const result = await setUserCyberManualClientRestriction(
+        userId,
+        clientInstanceId,
+        reason,
+        restricted
+      );
+      if (!result.ok) {
+        toast.error(resetError(result));
+        return;
+      }
+      toast.success(restricted ? t("manualBlocked") : t("manualReleased"));
+      if (restricted) {
+        setManualInstallation("");
+        setManualReason("");
+      }
+      await stateQuery.refetch();
+    } catch {
+      toast.error(t("resetFailed"));
+    } finally {
+      setResetting(null);
+    }
+  };
+
+  const handleBioRelease = async (restriction: ActiveRestriction, reason: string) => {
+    setResetting(`bio:${restriction.scope}:${restriction.subject_id}`);
+    try {
+      const result = await releaseUserBioRestriction(
+        userId,
+        restriction.scope,
+        restriction.subject_id,
+        reason,
+        restriction.scope === "principal" && !userEnabled
+      );
+      if (!result.ok) {
+        toast.error(resetError(result));
+        return;
+      }
+      toast.success(t("bioReleased"));
+      if (result.data?.enabled) onPrincipalEnabled?.();
+      await stateQuery.refetch();
+    } finally {
+      setResetting(null);
+    }
+  };
+
   const state = stateQuery.data?.state;
   return (
     <section className="rounded-lg border border-muted p-4 space-y-3" data-testid="cyber-state">
@@ -133,6 +190,40 @@ export function CyberStateSection({
       )}
       {state && (
         <>
+          <div className="rounded-md border p-3 space-y-3">
+            <div>
+              <h4 className="text-sm font-medium">{t("manualTitle")}</h4>
+              <p className="text-xs text-muted-foreground">{t("manualDescription")}</p>
+            </div>
+            <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto]">
+              <Input
+                value={manualInstallation}
+                onChange={(event) => setManualInstallation(event.target.value)}
+                placeholder={t("installationPlaceholder")}
+                maxLength={256}
+              />
+              <Input
+                value={manualReason}
+                onChange={(event) => setManualReason(event.target.value)}
+                placeholder={t("reasonPlaceholder")}
+                maxLength={1024}
+              />
+              <Button
+                type="button"
+                variant="destructive"
+                disabled={
+                  !manualInstallation.trim() ||
+                  !manualReason.trim() ||
+                  resetting?.startsWith("manual:")
+                }
+                onClick={() =>
+                  void handleManualRestriction(manualInstallation.trim(), true, manualReason.trim())
+                }
+              >
+                {t("manualBlock")}
+              </Button>
+            </div>
+          </div>
           <div className="rounded-md border p-3 space-y-2">
             <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
               <div className="space-y-1">
@@ -213,6 +304,24 @@ export function CyberStateSection({
                   resetting={resetting === client.client_instance_id}
                   formatTime={formatTime}
                   onReset={handleClientReset}
+                  onManualRestriction={handleManualRestriction}
+                  t={t}
+                  tCommon={tCommon}
+                />
+              ))
+            )}
+          </div>
+          <div className="space-y-2">
+            <h4 className="text-sm font-medium">{t("bioRestrictions")}</h4>
+            {(state.bio_restrictions ?? []).length === 0 ? (
+              <p className="text-xs text-muted-foreground">{t("noBioRestrictions")}</p>
+            ) : (
+              (state.bio_restrictions ?? []).map((restriction) => (
+                <BioRestrictionRow
+                  key={`${restriction.scope}:${restriction.subject_id}`}
+                  restriction={restriction}
+                  resetting={resetting === `bio:${restriction.scope}:${restriction.subject_id}`}
+                  onRelease={handleBioRelease}
                   t={t}
                   tCommon={tCommon}
                 />
@@ -225,6 +334,60 @@ export function CyberStateSection({
   );
 }
 
+function BioRestrictionRow({
+  restriction,
+  resetting,
+  onRelease,
+  t,
+  tCommon,
+}: {
+  restriction: ActiveRestriction;
+  resetting: boolean;
+  onRelease: (restriction: ActiveRestriction, reason: string) => Promise<void>;
+  t: ReturnType<typeof useTranslations>;
+  tCommon: ReturnType<typeof useTranslations>;
+}) {
+  const [reason, setReason] = useState("");
+  return (
+    <div className="flex flex-col gap-2 rounded-md border border-destructive/30 p-3 sm:flex-row sm:items-center sm:justify-between">
+      <div className="min-w-0">
+        <Badge variant="destructive">bio_policy · {restriction.scope}</Badge>
+        <code className="ml-2 text-xs">{restriction.subject_id}</code>
+      </div>
+      <AlertDialog>
+        <AlertDialogTrigger asChild>
+          <Button type="button" size="sm" variant="outline">
+            {t("releaseBio")}
+          </Button>
+        </AlertDialogTrigger>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{t("confirmBioReleaseTitle")}</AlertDialogTitle>
+            <AlertDialogDescription>{t("confirmBioReleaseDescription")}</AlertDialogDescription>
+          </AlertDialogHeader>
+          <Input
+            value={reason}
+            onChange={(event) => setReason(event.target.value)}
+            placeholder={t("reasonPlaceholder")}
+          />
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={resetting}>{tCommon("cancel")}</AlertDialogCancel>
+            <AlertDialogAction
+              disabled={resetting || !reason.trim()}
+              onClick={(event) => {
+                event.preventDefault();
+                void onRelease(restriction, reason.trim());
+              }}
+            >
+              {t("releaseBio")}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </div>
+  );
+}
+
 interface ClientInstanceRowProps {
   client: ClientInstanceCyberState;
   threshold: number;
@@ -232,6 +395,11 @@ interface ClientInstanceRowProps {
   resetting: boolean;
   formatTime: (timestamp?: number) => string;
   onReset: (clientInstanceId: string) => Promise<void>;
+  onManualRestriction: (
+    clientInstanceId: string,
+    restricted: boolean,
+    reason: string
+  ) => Promise<void>;
   t: ReturnType<typeof useTranslations>;
   tCommon: ReturnType<typeof useTranslations>;
 }
@@ -243,9 +411,11 @@ function ClientInstanceRow({
   resetting,
   formatTime,
   onReset,
+  onManualRestriction,
   t,
   tCommon,
 }: ClientInstanceRowProps) {
+  const [releaseReason, setReleaseReason] = useState("");
   const status = client.restricted
     ? client.expires_at_ms === undefined
       ? t("permanent")
@@ -260,8 +430,18 @@ function ClientInstanceRow({
           </code>
           <div className="flex flex-wrap items-center gap-2">
             <CyberStatusBadge restricted={client.restricted} t={t} />
+            {client.automatic_restricted && <Badge variant="outline">{t("automatic")}</Badge>}
+            {client.manual_restricted && <Badge variant="destructive">{t("manual")}</Badge>}
             <span className="text-xs text-muted-foreground">{status}</span>
           </div>
+          {client.manual_restricted && (
+            <p className="text-xs text-muted-foreground">
+              {t("manualDetail", {
+                actor: client.manual_actor ?? t("unknown"),
+                reason: client.manual_reason ?? t("unknown"),
+              })}
+            </p>
+          )}
           <p className="text-xs text-muted-foreground">
             {t("strikes", {
               count: client.current_strikes,
@@ -280,34 +460,78 @@ function ClientInstanceRow({
             </p>
           )}
         </div>
-        <AlertDialog>
-          <AlertDialogTrigger asChild>
-            <Button type="button" size="sm" variant="outline">
-              <RotateCcw className="h-3.5 w-3.5" />
-              {t("resetInstallation")}
-            </Button>
-          </AlertDialogTrigger>
-          <AlertDialogContent>
-            <AlertDialogHeader>
-              <AlertDialogTitle>{t("confirmInstallationTitle")}</AlertDialogTitle>
-              <AlertDialogDescription>{t("confirmInstallationDescription")}</AlertDialogDescription>
-            </AlertDialogHeader>
-            <AlertDialogFooter>
-              <AlertDialogCancel disabled={resetting}>{tCommon("cancel")}</AlertDialogCancel>
-              <AlertDialogAction
-                type="button"
-                disabled={resetting}
-                onClick={(event) => {
-                  event.preventDefault();
-                  void onReset(client.client_instance_id);
-                }}
-              >
-                {resetting && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
-                {t("confirmReset")}
-              </AlertDialogAction>
-            </AlertDialogFooter>
-          </AlertDialogContent>
-        </AlertDialog>
+        <div className="flex flex-wrap gap-2">
+          {client.manual_restricted && (
+            <AlertDialog>
+              <AlertDialogTrigger asChild>
+                <Button type="button" size="sm" variant="outline" disabled={resetting}>
+                  {t("manualRelease")}
+                </Button>
+              </AlertDialogTrigger>
+              <AlertDialogContent>
+                <AlertDialogHeader>
+                  <AlertDialogTitle>{t("confirmManualReleaseTitle")}</AlertDialogTitle>
+                  <AlertDialogDescription>
+                    {t("confirmManualReleaseDescription")}
+                  </AlertDialogDescription>
+                </AlertDialogHeader>
+                <Input
+                  value={releaseReason}
+                  onChange={(event) => setReleaseReason(event.target.value)}
+                  placeholder={t("reasonPlaceholder")}
+                  maxLength={1024}
+                />
+                <AlertDialogFooter>
+                  <AlertDialogCancel disabled={resetting}>{tCommon("cancel")}</AlertDialogCancel>
+                  <AlertDialogAction
+                    type="button"
+                    disabled={resetting || !releaseReason.trim()}
+                    onClick={(event) => {
+                      event.preventDefault();
+                      void onManualRestriction(
+                        client.client_instance_id,
+                        false,
+                        releaseReason.trim()
+                      );
+                    }}
+                  >
+                    {t("manualRelease")}
+                  </AlertDialogAction>
+                </AlertDialogFooter>
+              </AlertDialogContent>
+            </AlertDialog>
+          )}
+          <AlertDialog>
+            <AlertDialogTrigger asChild>
+              <Button type="button" size="sm" variant="outline">
+                <RotateCcw className="h-3.5 w-3.5" />
+                {t("resetInstallation")}
+              </Button>
+            </AlertDialogTrigger>
+            <AlertDialogContent>
+              <AlertDialogHeader>
+                <AlertDialogTitle>{t("confirmInstallationTitle")}</AlertDialogTitle>
+                <AlertDialogDescription>
+                  {t("confirmInstallationDescription")}
+                </AlertDialogDescription>
+              </AlertDialogHeader>
+              <AlertDialogFooter>
+                <AlertDialogCancel disabled={resetting}>{tCommon("cancel")}</AlertDialogCancel>
+                <AlertDialogAction
+                  type="button"
+                  disabled={resetting}
+                  onClick={(event) => {
+                    event.preventDefault();
+                    void onReset(client.client_instance_id);
+                  }}
+                >
+                  {resetting && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                  {t("confirmReset")}
+                </AlertDialogAction>
+              </AlertDialogFooter>
+            </AlertDialogContent>
+          </AlertDialog>
+        </div>
       </div>
     </div>
   );

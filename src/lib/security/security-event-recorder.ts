@@ -5,7 +5,8 @@ import type { SecurityEventType } from "./security-signals";
 export async function recordSecurityEventBestEffort(
   userId: number | null | undefined,
   messageRequestId: number | null | undefined,
-  type: SecurityEventType
+  type: SecurityEventType,
+  options?: Parameters<typeof insertSecurityEvent>[3]
 ): Promise<void> {
   if (userId == null) {
     logger.warn("[SecurityEvent] Cannot attribute event without user", { type });
@@ -13,7 +14,8 @@ export async function recordSecurityEventBestEffort(
   }
 
   try {
-    await insertSecurityEvent(userId, messageRequestId ?? null, type);
+    if (options === undefined) await insertSecurityEvent(userId, messageRequestId ?? null, type);
+    else await insertSecurityEvent(userId, messageRequestId ?? null, type, options);
   } catch (error) {
     logger.error("[SecurityEvent] Failed to persist event", {
       userId,

@@ -1718,7 +1718,27 @@
         "principalReset": "アカウントの Cyber 状態をリセットしました",
         "principalResetAndEnabled": "Cyber 状態をリセットし、ユーザーを有効化しました",
         "installationReset": "インストールの Cyber 状態をリセットしました",
-        "resetFailed": "Cyber 状態をリセットできませんでした"
+        "resetFailed": "Cyber 状態をリセットできませんでした",
+        "manualTitle": "installation の手動制限",
+        "manualDescription": "自動 strike を追加せず、このユーザーの installation だけを制限します。",
+        "installationPlaceholder": "Installation ID",
+        "reasonPlaceholder": "管理者の理由",
+        "manualBlock": "installation を制限",
+        "manualRelease": "手動制限を解除",
+        "confirmManualReleaseTitle": "この手動 restriction を解除しますか？",
+        "confirmManualReleaseDescription": "自動 restriction と strike epoch は変更されません。監査理由を入力してください。",
+        "manualBlocked": "installation を手動で制限しました",
+        "manualReleased": "手動 installation 制限を解除しました",
+        "automatic": "自動",
+        "manual": "手動",
+        "manualDetail": "手動：{actor} — {reason}",
+        "unknown": "不明"
+        ,"bioRestrictions": "永続 bio policy restriction",
+        "noBioRestrictions": "有効な bio policy restriction はありません。",
+        "releaseBio": "bio restriction を解除",
+        "bioReleased": "bio policy restriction を解除しました",
+        "confirmBioReleaseTitle": "この bio policy scope を解除しますか？",
+        "confirmBioReleaseDescription": "この bio source と scope だけを解除します。cyber と手動 restriction は維持されます。"
       },
       "resetSection": {
         "title": "リセットオプション"
@@ -2287,6 +2307,9 @@
     },
     "actions": {
       "view": "リクエストを表示",
+      "containment": "封じ込め",
+      "containmentTitle": "{user} の封じ込め",
+      "containmentDescription": "中央の strike と restriction を確認し、installation の手動制限または対象範囲のリセットを実行します。",
       "disable": "ユーザーを無効化",
       "confirmTitle": "このユーザーを無効化しますか？",
       "confirmDescription": "CCH は {user} からの以後のリクエストを拒否します。",

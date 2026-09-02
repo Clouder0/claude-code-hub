@@ -40,6 +40,8 @@
       "update": "更新用户",
       "delete": "删除用户",
       "cyber_client_instance_reset": "重置用户 Cyber installation",
+      "bio_restriction_release": "解除用户 bio policy restriction",
+      "bio_unconfirmed_local_release": "解除未确认的本地 bio containment",
       "cyber_principal_reset": "重置用户 Cyber 账户",
       "reset_5h_limit": "重置用户 5H 限额",
       "reset_5h_limit_only": "重置用户专属 5H 限额"
