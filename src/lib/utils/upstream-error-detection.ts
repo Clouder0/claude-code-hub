@@ -572,3 +572,41 @@ export function detectUpstreamErrorFromSseOrJsonText(
 
   return { isError: false };
 }
+
+export type Fake200StatusResolution = {
+  statusCode: number;
+  inferred: boolean;
+  matcherId?: string;
+  isOverload: boolean;
+};
+
+/**
+ * fake-200 的内部结算状态码判定：overload 优先（503），其次文本推断，兜底 502。
+ *
+ * 与 forwarder 的前置路径（非流式 2xx 检查 / 流式前缀检查）保持同一优先级，
+ * 避免同一上游错误在 pre-commit 与 post-release 两条路径上得到不同的状态
+ * 语义。2026-09-02 修复：response-handler 的终局结算路径此前缺 overload
+ * 分类，导致 overload 文案被推断为 409/502——409 还会落入不可重试客户端
+ * 错误语义，污染统计与换梯判定。
+ */
+export function resolveFake200EffectiveStatus(text: string): Fake200StatusResolution {
+  const overload = detectUpstreamOverloadFromSseOrJsonText(text);
+  if (overload.isOverload) {
+    return {
+      statusCode: 503,
+      inferred: true,
+      matcherId: overload.matcherId,
+      isOverload: true,
+    };
+  }
+  const inferred = inferUpstreamErrorStatusCodeFromText(text);
+  if (inferred) {
+    return {
+      statusCode: inferred.statusCode,
+      inferred: true,
+      matcherId: inferred.matcherId,
+      isOverload: false,
+    };
+  }
+  return { statusCode: 502, inferred: false, isOverload: false };
+}

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   detectUpstreamErrorFromSseOrJsonText,
   detectUpstreamOverloadFromSseOrJsonText,
+  resolveFake200EffectiveStatus,
 } from "@/lib/utils/upstream-error-detection";
 
 describe("detectUpstreamOverloadFromSseOrJsonText", () => {
@@ -94,5 +95,48 @@ describe("detectUpstreamOverloadFromSseOrJsonText", () => {
         })
       )
     ).toEqual({ isOverload: false });
+  });
+});
+
+describe("resolveFake200EffectiveStatus", () => {
+  it("classifies the real-world overload fake-200 body as 503 with overload flag", () => {
+    // 2026-09-02 生产实况:datawave-jp2 / backup_clouder_pro2 的 fake-200
+    // 曾被推断为 409/502(409 还会落入不可重试语义)。
+    const body = JSON.stringify({
+      error: { message: "Our servers are currently overloaded. Please try again later." },
+    });
+    const result = resolveFake200EffectiveStatus(body);
+    expect(result.statusCode).toBe(503);
+    expect(result.isOverload).toBe(true);
+    expect(result.inferred).toBe(true);
+    expect(result.matcherId).toBe("message_servers_currently_overloaded");
+  });
+
+  it("keeps the conflict inference for non-overload bodies", () => {
+    const body = JSON.stringify({
+      error: { code: "conflict", message: "request conflicts with an existing item" },
+    });
+    const result = resolveFake200EffectiveStatus(body);
+    expect(result.statusCode).toBe(409);
+    expect(result.isOverload).toBe(false);
+    expect(result.inferred).toBe(true);
+  });
+
+  it("falls back to 502 when no overload or inference matches", () => {
+    const body = JSON.stringify({ error: { message: "something odd happened" } });
+    const result = resolveFake200EffectiveStatus(body);
+    expect(result.statusCode).toBe(502);
+    expect(result.isOverload).toBe(false);
+    expect(result.inferred).toBe(false);
+  });
+
+  it("handles SSE-wrapped overload events", () => {
+    const text = `event: error\ndata: ${JSON.stringify({
+      type: "error",
+      error: { message: "Our servers are currently overloaded. Please try again later." },
+    })}\n\n`;
+    const result = resolveFake200EffectiveStatus(text);
+    expect(result.statusCode).toBe(503);
+    expect(result.isOverload).toBe(true);
   });
 });

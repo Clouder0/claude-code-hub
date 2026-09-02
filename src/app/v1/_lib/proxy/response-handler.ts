@@ -54,7 +54,7 @@ import {
 } from "@/lib/utils/sse";
 import {
   detectUpstreamErrorFromSseOrJsonText,
-  inferUpstreamErrorStatusCodeFromText,
+  resolveFake200EffectiveStatus,
 } from "@/lib/utils/upstream-error-detection";
 import {
   addMessageRequestHedgeLoserCost,
@@ -1117,17 +1117,17 @@ async function finalizeDeferredStreamingFinalizationIfNeeded(
   let statusCodeInferred = false;
   let statusCodeInferenceMatcherId: string | undefined;
   if (detected.isError) {
-    const inferred = rejectedPolicy ? null : inferUpstreamErrorStatusCodeFromText(allContent);
     if (rejectedPolicy) {
       effectiveStatusCode = 400;
       statusCodeInferred = true;
       statusCodeInferenceMatcherId = rejectedPolicy;
-    } else if (inferred) {
-      effectiveStatusCode = inferred.statusCode;
-      statusCodeInferred = true;
-      statusCodeInferenceMatcherId = inferred.matcherId;
     } else {
-      effectiveStatusCode = 502;
+      // overload 优先（503），其次文本推断，兜底 502——与 forwarder 的
+      // 前置路径保持同一优先级（resolveFake200EffectiveStatus）。
+      const resolved = resolveFake200EffectiveStatus(allContent);
+      effectiveStatusCode = resolved.statusCode;
+      statusCodeInferred = resolved.inferred;
+      statusCodeInferenceMatcherId = resolved.matcherId;
     }
     errorMessage = rejectedPolicy
       ? rejectedPolicy
