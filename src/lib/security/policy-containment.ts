@@ -134,7 +134,10 @@ export async function findCyberScopeBlock(
   try {
     const values = await redis.mget(...keys);
     if (values[0] !== null) return "principal";
-    if (values[1] !== null) return "client_instance";
+    // When the request carries no valid client instance id, keys (and therefore
+    // values) hold only the principal entry; values[1] is undefined there, which
+    // must not be treated as an installation block.
+    if (values.length > 1 && values[1] !== null) return "client_instance";
   } catch (error) {
     logger.error("[PolicyContainment] Failed to read Cyber scope block", {
       principalId,

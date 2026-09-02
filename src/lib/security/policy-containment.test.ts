@@ -169,6 +169,26 @@ describe("policy containment", () => {
       );
     });
 
+    it("does not treat a missing installation id as an installation block", async () => {
+      // Redis answers MGET with exactly as many entries as keys were requested:
+      // without a valid client instance id only the principal key is queried and
+      // the reply array has a single element.
+      mocks.redisMget.mockResolvedValueOnce([null]);
+      await expect(findCyberScopeBlock("7")).resolves.toBeNull();
+      expect(mocks.redisMget).toHaveBeenCalledWith("cyber:principal:7:7");
+    });
+
+    it("still honors a principal block when the installation id is missing", async () => {
+      mocks.redisMget.mockResolvedValueOnce(["1"]);
+      await expect(findCyberScopeBlock("7")).resolves.toBe("principal");
+    });
+
+    it("does not block an invalid installation id shape", async () => {
+      mocks.redisMget.mockResolvedValueOnce([null]);
+      await expect(findCyberScopeBlock("7", "bad\r\nid")).resolves.toBeNull();
+      expect(mocks.redisMget).toHaveBeenCalledWith("cyber:principal:7:7");
+    });
+
     it("strictly synchronizes manual execution state and fails when Redis is unavailable", async () => {
       await setCyberInstallationExecutionIndexStrict("7", "installation/1", true);
       expect(mocks.redisSet).toHaveBeenCalledWith("cyber:client_instance:7:installation%2F1", "1");
