@@ -3,6 +3,7 @@ import { getCachedSystemSettings } from "@/lib/config";
 import { logger } from "@/lib/logger";
 import { ProxyStatusTracker } from "@/lib/proxy-status-tracker";
 import { SessionTracker } from "@/lib/session-tracker";
+import { tryAcquireRequestWorkingSetOrRespond } from "./proxy/admission-guard";
 import { isAlphaSearchEndpointPath } from "./proxy/endpoint-paths";
 import { isRawPassthroughEndpointPolicy } from "./proxy/endpoint-policy";
 import { ProxyErrorHandler } from "./proxy/error-handler";
@@ -110,6 +111,13 @@ export async function handleProxyRequest(c: Context): Promise<Response> {
     }
 
     session.recordForwardStart();
+
+    // 在途保留字节准入:任何上游 I/O(含 fake-streaming)之前拒绝,
+    // 不占 attempt、不触发熔断。
+    const admissionResponse = tryAcquireRequestWorkingSetOrRespond(session);
+    if (admissionResponse) {
+      return await attachSessionIdToErrorResponse(session.sessionId, admissionResponse);
+    }
 
     // Fake streaming: if the client-requested model is whitelisted for the
     // current provider group, hand off to the fake-streaming runner which
