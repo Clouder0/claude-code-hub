@@ -160,71 +160,110 @@ function prepareFinalResponsesShadowObservationWithEnv(
   };
 }
 
-async function runShadowObservation(
+function runShadowObservation(
   input: FinalResponsesReviewInput,
   env: ReturnType<typeof getEnvConfig>
 ): Promise<CyberCheckObservationResult> {
   let config: CyberCheckConfig;
   try {
     const resolved = resolveCyberCheckConfig(env);
-    if (!resolved) return { status: "capture_gap" };
+    if (!resolved) return Promise.resolve({ status: "capture_gap" });
     config = resolved;
   } catch (error) {
     logAdmissionFailure("configuration", error, input.context);
-    return { status: "capture_gap" };
+    return Promise.resolve({ status: "capture_gap" });
   }
 
+  // 作用域纪律:下面的延续只捕获 context/config;input(解析树 + 序列化串)的
+  // 最后一次使用是传入 submitFinalResponsesReview——其同步序章完成投影后,
+  // input 即不可达。此前 async 帧会把 input 保留到上传结束(≤25s 超时 + 轮询),
+  // 抵消 forwarder 在首字节处的请求体释放。
+  const context = input.context;
+  let pending: Promise<SubmittedReview>;
   try {
-    const submitted = await submitFinalResponsesReview(input, config);
-    logSubmission(submitted.submission, config, input.context);
-    return { status: "recorded", correlation: submitted.correlation };
+    pending = submitFinalResponsesReview(input, config);
   } catch (error) {
-    if (input.context.clientAbortSignal?.aborted) {
-      logger.debug("CyberCheck: shadow observation stopped after client disconnect", {
-        requestId: input.context.requestId,
-        sessionId: input.context.sessionId,
-        providerId: input.context.providerId,
-      });
-    } else {
-      logAdmissionFailure("submission", error, input.context);
-    }
-    return { status: "capture_gap" };
+    // 同步序章抛错(容量耗尽 / 投影失败)必须折算为 capture_gap:
+    // 本函数绝不能同步抛出——setImmediate 回调里的 .then(settle, ...) 只能
+    // 挂在返回的 promise 上,同步 throw 会让 completion 永不 settle。
+    logAdmissionFailure("submission", error, context);
+    return Promise.resolve({ status: "capture_gap" });
   }
+  return pending
+    .then((submitted) => {
+      logSubmission(submitted.submission, config, context);
+      return { status: "recorded" as const, correlation: submitted.correlation };
+    })
+    .catch((error: unknown) => {
+      if (context.clientAbortSignal?.aborted) {
+        logger.debug("CyberCheck: shadow observation stopped after client disconnect", {
+          requestId: context.requestId,
+          sessionId: context.sessionId,
+          providerId: context.providerId,
+        });
+      } else {
+        logAdmissionFailure("submission", error, context);
+      }
+      return { status: "capture_gap" as const };
+    });
 }
 
-async function submitFinalResponsesReview(
-  { message, bodyString, identity, context }: FinalResponsesReviewInput,
+/**
+ * 同步序章(在 setImmediate 任务内执行,与上游网络等待重叠,刻意不在 TTFB
+ * 路径):容量计费(O(1) 字节长度)→ 投影。序章帧返回即死亡,此后上传等待
+ * 期间进程只保留投影后的 packet(受 encoding capacity 256MB 全局上限约束),
+ * 而不再钉住原始解析树与序列化串。
+ */
+function submitFinalResponsesReview(
+  input: FinalResponsesReviewInput,
   config: CyberCheckConfig
 ): Promise<SubmittedReview> {
-  let encodingLease: EncodingCapacityLease | null = null;
-  try {
-    encodingLease = cyberCheckEncodingCapacity.tryAcquire(
-      Buffer.byteLength(bodyString),
-      config.maxEncodingBytes
+  const encodingLease = cyberCheckEncodingCapacity.tryAcquire(
+    Buffer.byteLength(input.bodyString),
+    config.maxEncodingBytes
+  );
+  if (!encodingLease) {
+    throw new CyberCheckClientError(
+      "Cyber Check encoding working-set capacity is exhausted",
+      503,
+      "cyber_check_capacity"
     );
-    if (!encodingLease) {
-      throw new CyberCheckClientError(
-        "Cyber Check encoding working-set capacity is exhausted",
-        503,
-        "cyber_check_capacity"
-      );
-    }
-    const packet = projectFinalResponsesRequest({
-      identity,
-      message,
-      bodyString,
+  }
+
+  let packet: ReturnType<typeof projectFinalResponsesRequest>;
+  try {
+    packet = projectFinalResponsesRequest({
+      identity: input.identity,
+      message: input.message,
+      bodyString: input.bodyString,
     });
-    const unsupportedFields = packet.coverage.notices
-      .filter((notice) => notice.code === "unsupported_top_level_field" && notice.field)
-      .map((notice) => notice.field);
-    if (unsupportedFields.length > 0) {
-      logger.info("CyberCheck: projection gap - unsupported top-level fields", {
-        fields: unsupportedFields,
-        requestId: context.requestId,
-        sessionId: context.sessionId,
-        providerId: context.providerId,
-      });
-    }
+  } catch (error) {
+    encodingLease.release();
+    throw error;
+  }
+
+  const unsupportedFields = packet.coverage.notices
+    .filter((notice) => notice.code === "unsupported_top_level_field" && notice.field)
+    .map((notice) => notice.field);
+  if (unsupportedFields.length > 0) {
+    logger.info("CyberCheck: projection gap - unsupported top-level fields", {
+      fields: unsupportedFields,
+      requestId: input.context.requestId,
+      sessionId: input.context.sessionId,
+      providerId: input.context.providerId,
+    });
+  }
+
+  return uploadFinalResponsesReview(config, packet, input.context, encodingLease);
+}
+
+async function uploadFinalResponsesReview(
+  config: CyberCheckConfig,
+  packet: ReturnType<typeof projectFinalResponsesRequest>,
+  context: ReviewAttemptContext,
+  encodingLease: EncodingCapacityLease
+): Promise<SubmittedReview> {
+  try {
     const submission = await submitReview(config, packet, {
       signal: context.clientAbortSignal,
     });
@@ -236,7 +275,7 @@ async function submitFinalResponsesReview(
       },
     };
   } finally {
-    encodingLease?.release();
+    encodingLease.release();
   }
 }
 

@@ -31,7 +31,11 @@ import {
   parseOpenAIImageMultipartMetadata,
 } from "./openai-image-compat";
 import { isRemoteCompactionV2Request } from "./remote-compaction";
-import { decodeRequestBody, parseContentEncoding } from "./request-body-codec";
+import {
+  decodeRequestBody,
+  parseContentEncoding,
+  resolveIntakeBodyLimitBytes,
+} from "./request-body-codec";
 import {
   buildHighConcurrencyCodexRequestSummary,
   type ProxySessionCreationOptions,
@@ -162,6 +166,8 @@ interface RequestBodyResult {
   contentLength?: number | null;
   actualBodyBytes?: number;
   imageRequestMetadata?: OpenAIImageRequestMetadata | null;
+  /** 高并发 codex SSE 保留人群标记（intake 丢 buffer / 摘要 log / 释放候选）。 */
+  highConcurrencyCodexSseRetention?: boolean;
   /**
    * 入站请求体实际解压所用的 content-encoding（链）。
    * 非空表示代理已解压请求体，调用方需剥离出站 `content-encoding` 头，
@@ -207,6 +213,20 @@ export class ProxySession {
 
   // 最终流响应关闭内部重试边界后是否已释放请求体（见 releaseRequestBodyAfterCommit）。
   private requestBodyReleased = false;
+
+  // 释放资格两段式标记：
+  // - candidate 由 parse 阶段判定（高并发 + /v1/responses + stream:true,
+  //   即 buffer 已在 intake 丢弃、request.log 已摘要化的同一人群）——
+  //   仅用作在途准入计量的计费人群标记(其释放路径必然触发);
+  // - eligible 在 doForward 按原始提交点门控（/v1/responses × codex × 高并发）
+  //   标记——该人群的"释放后计费走投影"语义已在生产验证(成功流每天都在
+  //   释放后结算)。abort/最终失败路径沿此标记释放,不越过既有门控人群。
+  private requestBodyReleaseCandidate = false;
+  private requestBodyReleaseEligible = false;
+
+  // 在途保留字节准入租约（见 src/lib/capacity/request-admission.ts）。
+  // 在 releaseRequestBodyAfterCommit 中恰好退费一次。
+  private workingSetLease: { release(): void } | null = null;
 
   /**
    * Record the forwarded body together with the object it was serialized from.
@@ -277,12 +297,71 @@ export class ProxySession {
         : null);
     const projection = source ? buildRequestBodyProjection(source) : {};
     this.requestBodyReleased = true;
+    this.workingSetLease?.release();
+    this.workingSetLease = null;
     this.forwardedRequestBody = null;
     this.forwardedRequestMessageSource = null;
     this.forwardedRequestMessage = projection;
     // request 本身是 readonly，但其字段可变：就地清空大对象引用。
     this.request.message = RELEASED_REQUEST_BODY_MESSAGE;
     this.request.buffer = undefined;
+  }
+
+  /** parse 阶段标记：请求属于高并发 codex SSE 保留人群（见上方两段式注释）。 */
+  noteRequestBodyReleaseCandidate(): void {
+    this.requestBodyReleaseCandidate = true;
+  }
+
+  /** doForward 阶段标记：复刻原提交点门控（/v1/responses × codex × 高并发）。 */
+  noteRequestBodyReleaseEligible(): void {
+    this.requestBodyReleaseEligible = true;
+  }
+
+  isRequestBodyReleaseCandidate(): boolean {
+    return this.requestBodyReleaseCandidate;
+  }
+
+  isRequestBodyReleaseEligible(): boolean {
+    return this.requestBodyReleaseEligible;
+  }
+
+  /**
+   * 释放钩子的补全入口：成功首字节（原有）、客户端断开、阶梯最终失败、
+   * 以及 send() 成功返回的兜底，都经由这里收敛到同一个幂等释放。
+   */
+  releaseRequestBodyIfEligible(): void {
+    if (this.requestBodyReleaseEligible) {
+      this.releaseRequestBodyAfterCommit();
+    }
+  }
+
+  /** 附着在途准入租约；由 releaseRequestBodyAfterCommit 恰好退费一次。 */
+  attachWorkingSetLease(lease: { release(): void }): void {
+    this.workingSetLease = lease;
+  }
+
+  // 接收到的原始（线上）请求字节数；准入计量按此计费。
+  private receivedBodyBytesValue: number | null = null;
+
+  noteReceivedBodyBytes(bytes: number | null): void {
+    this.receivedBodyBytesValue = bytes;
+  }
+
+  get receivedBodyBytes(): number | null {
+    return this.receivedBodyBytesValue;
+  }
+
+  /**
+   * 兜底退费：请求已终结但释放迁移未触发（理论不可达；防御计量泄漏——
+   * 漏退会导致准入永久误拒）。调用方应记录告警。
+   */
+  consumeWorkingSetLeaseIfHeld(): boolean {
+    if (this.workingSetLease) {
+      this.workingSetLease.release();
+      this.workingSetLease = null;
+      return true;
+    }
+    return false;
   }
 
   // Session ID（用于会话粘性和并发限流）
@@ -490,6 +569,10 @@ export class ProxySession {
       clientAbortSignal,
     });
     session.setHighConcurrencyModeEnabled(options.highConcurrencyModeEnabled ?? false);
+    session.noteReceivedBodyBytes(bodyResult.actualBodyBytes ?? null);
+    if (bodyResult.highConcurrencyCodexSseRetention) {
+      session.noteRequestBodyReleaseCandidate();
+    }
     return session;
   }
 
@@ -1476,6 +1559,17 @@ async function parseRequestBody(
     throw new ProxyError("Encoded multipart request bodies are not supported.", 415);
   }
 
+  // 未压缩/压缩请求体的 intake 体积天花板：与 codec 既有常量同源。
+  // 压缩路径在 decodeRequestBody 内还有逐层检查；这里补齐"读入前按
+  // content-length 预检、读入后按实际字节复核"的未压缩路径缺口。
+  const intakeBodyLimitBytes = resolveIntakeBodyLimitBytes(contentEncoding);
+  if (contentLength !== null && contentLength > intakeBodyLimitBytes) {
+    throw new ProxyError(
+      `Request body of ${contentLength} bytes exceeds the intake limit of ${intakeBodyLimitBytes} bytes.`,
+      413
+    );
+  }
+
   // 原始（可能被压缩的）入站字节：用于截断检测与 multipart 透传。
   // Reading a cloned Request tees its body. If the original branch is never consumed, the stream
   // may retain the complete request in that branch's queue for the lifetime of the Hono Context.
@@ -1486,6 +1580,13 @@ async function parseRequestBody(
     : c.req.raw.clone();
   const rawBodyBuffer = await rawRequest.arrayBuffer();
   const receivedBodyBytes = rawBodyBuffer.byteLength;
+  if (receivedBodyBytes > intakeBodyLimitBytes) {
+    // 复核：content-length 缺失/失真时以实际读入字节为准。
+    throw new ProxyError(
+      `Request body of ${receivedBodyBytes} bytes exceeds the intake limit of ${intakeBodyLimitBytes} bytes.`,
+      413
+    );
+  }
 
   // Truncation detection: warn only when both conditions are met
   // 1. Absolute difference > 1MB (avoid false positives from minor discrepancies)
@@ -1511,6 +1612,7 @@ async function parseRequestBody(
   let requestBodyLog: string;
   let requestBodyLogNote: string | undefined;
   let imageRequestMetadata: OpenAIImageRequestMetadata | null = null;
+  let highConcurrencyCodexSseRetention = false;
 
   if (getOpenAIImageEndpoint(pathname) && isMultipartFormData) {
     // 图片 multipart 请求保留 sidecar metadata，并为过滤/敏感词提供文本字段视图。
@@ -1546,7 +1648,12 @@ async function parseRequestBody(
   try {
     const parsedMessage = JSON.parse(requestBodyText) as Record<string, unknown>;
     requestMessage = parsedMessage; // 保留原始数据用于业务逻辑
-    if (shouldUseHighConcurrencyCodexSseRetention(pathname, parsedMessage, options)) {
+    highConcurrencyCodexSseRetention = shouldUseHighConcurrencyCodexSseRetention(
+      pathname,
+      parsedMessage,
+      options
+    );
+    if (highConcurrencyCodexSseRetention) {
       requestBodyLog = buildHighConcurrencyCodexRequestSummary(
         parsedMessage,
         receivedBodyBytes,
@@ -1567,14 +1674,13 @@ async function parseRequestBody(
     requestMessage,
     requestBodyLog,
     requestBodyLogNote,
-    requestBodyBuffer: shouldUseHighConcurrencyCodexSseRetention(pathname, requestMessage, options)
-      ? undefined
-      : requestBodyBuffer,
+    requestBodyBuffer: highConcurrencyCodexSseRetention ? undefined : requestBodyBuffer,
     contentLength,
     // 维持原语义：actualBodyBytes 表示「接收到的原始（线上）字节」，供
     // isLargeRequestBody 的截断提示判断使用，不受解压后体积影响。
     actualBodyBytes: receivedBodyBytes,
     imageRequestMetadata,
     decodedContentEncoding: decodedBody.encoding ?? undefined,
+    highConcurrencyCodexSseRetention,
   };
 }

@@ -3057,6 +3057,14 @@ export class ProxyResponseHandler {
         providerId: provider.id,
         messageId: messageContext.id,
       });
+      // 释放请求体：客户端断开后 failover 在结构上不可能（响应已提交），请求体
+      // 唯一的未来使用（下一次 attempt 重发）随之消失。usage 采集走响应流
+      // 累加器，与请求体无关，60s drain 不受影响。幂等;可选调用兼容最小面桩。
+      session.releaseRequestBodyIfEligible?.();
+      // tee 的客户端分支自此再无读者：按 WHATWG 语义，内部分支每拉一块，
+      // 无人读的客户端分支队列也会同步入队（堆外 Uint8Array）。显式 cancel，
+      // 避免 drain 窗为已离开的客户端缓存它永远收不到的整个响应。
+      void clientStream.cancel().catch(() => undefined);
       // Do not cancel internal accounting on pure client disconnect. If the
       // upstream stream has already completed, the tee'd internal branch can
       // still drain buffered final usage and record the request as successful.

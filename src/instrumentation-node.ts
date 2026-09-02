@@ -300,6 +300,11 @@ export async function register() {
       });
     }
 
+    // 运行时内存/准入指标循环:RSS、heap/external 拆分与在途保留字节读数。
+    // 纯观测、无外部依赖,CI 下也无害(unref + 单例)。
+    const { startRuntimeMetrics } = await import("@/lib/runtime-metrics");
+    startRuntimeMetrics();
+
     if (!instrumentationState.__CCH_SHUTDOWN_HOOKS_REGISTERED__) {
       instrumentationState.__CCH_SHUTDOWN_HOOKS_REGISTERED__ = true;
       // SIGTERM/SIGINT 注册移到 server.js，因为它持有 HTTP server 句柄、可以先
@@ -533,9 +538,10 @@ export async function register() {
                 hint: pgErr?.hint,
                 causeMessage: cause instanceof Error ? cause.message : String(cause),
                 causeCode: (cause as { code?: unknown } | null)?.code,
-                causeDetail: typeof (cause as { detail?: unknown } | null)?.detail === "string"
-                  ? ((cause as { detail: string }).detail satisfies string).slice(0, 500)
-                  : undefined,
+                causeDetail:
+                  typeof (cause as { detail?: unknown } | null)?.detail === "string"
+                    ? ((cause as { detail: string }).detail satisfies string).slice(0, 500)
+                    : undefined,
               });
             });
         }

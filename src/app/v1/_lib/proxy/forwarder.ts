@@ -267,6 +267,19 @@ function applyProviderCustomHeaders(
 const RETRY_LIMITS = PROVIDER_LIMITS.MAX_RETRY_ATTEMPTS;
 const MAX_PROVIDER_SWITCHES = 20; // 保险栓：最多切换 20 次供应商（防止无限循环）
 
+/**
+ * 单次请求的阶梯总预算（毫秒）。0 = 禁用。
+ * 默认 90s：足够覆盖正常 1-2 次 failover（各含连接 + 首字节等待），
+ * 又能把 provider 大面积故障下的请求体保留窗封顶。
+ */
+export const DEFAULT_FORWARD_TOTAL_DEADLINE_MS = 90_000;
+
+export function resolveForwardTotalDeadlineMs(): number {
+  const raw = Number.parseInt(process.env.CCH_FORWARD_TOTAL_DEADLINE_MS ?? "", 10);
+  if (Number.isSafeInteger(raw) && raw >= 0) return raw;
+  return DEFAULT_FORWARD_TOTAL_DEADLINE_MS;
+}
+
 type CacheTtlOption = CacheTtlPreference | null | undefined;
 
 type ProxySessionWithAttemptRuntime = ProxySession & {
@@ -1336,7 +1349,38 @@ function applyClaudeMetadataUserIdInjectionWithAudit(
 }
 
 export class ProxyForwarder {
+  /**
+   * 转发入口。所有最终结局（成功返回或抛出）都在此收敛：
+   * - 成功：SSE 已在首字节处提前释放，这里兜底覆盖非 SSE 成功等未走早释放的路径；
+   * - 失败：sendWithLadder 抛出即阶梯终结，请求体除"下一次 attempt 重发"外
+   *   不再有任何未来使用——断开/最终失败路径的释放缺口由此关闭。
+   * releaseRequestBodyIfEligible 幂等,重复调用无副作用。
+   */
   static async send(session: ProxySession): Promise<Response> {
+    const startedAt = Date.now();
+    try {
+      const response = await ProxyForwarder.sendWithLadder(session, startedAt);
+      // 可选调用:最小面 session 桩(既有测试 harness)无这些方法时跳过。
+      session.releaseRequestBodyIfEligible?.();
+      if (session.consumeWorkingSetLeaseIfHeld?.()) {
+        // 理论不可达（eligible 人群成功返回必然已释放）;防御准入计量泄漏。
+        logger.warn("ProxyForwarder: working-set lease still held after successful send", {
+          sessionId: session.sessionId ?? null,
+        });
+      }
+      return response;
+    } catch (error) {
+      session.releaseRequestBodyIfEligible?.();
+      if (session.consumeWorkingSetLeaseIfHeld?.()) {
+        logger.warn("ProxyForwarder: working-set lease still held after failed send", {
+          sessionId: session.sessionId ?? null,
+        });
+      }
+      throw error;
+    }
+  }
+
+  private static async sendWithLadder(session: ProxySession, startedAt: number): Promise<Response> {
     if (!session.provider || !session.authState?.success) {
       throw new Error("代理上下文缺少供应商或鉴权信息");
     }
@@ -1360,7 +1404,21 @@ export class ProxyForwarder {
     let totalProvidersAttempted = 0; // 已尝试的供应商数量（用于日志）
 
     // ========== 外层循环：供应商切换（最多 MAX_PROVIDER_SWITCHES 次）==========
+    // 阶梯总预算：无论还剩多少家 provider,超时即最终失败——失败路径的请求体
+    // 保留时间由此获得硬上界（provider 大面积故障时阶梯可拖数分钟）。
+    const ladderDeadlineMs = resolveForwardTotalDeadlineMs();
     while (totalProvidersAttempted < MAX_PROVIDER_SWITCHES) {
+      if (ladderDeadlineMs > 0 && Date.now() - startedAt > ladderDeadlineMs) {
+        throw new ProxyError(
+          `Upstream forward ladder exceeded the total deadline of ${ladderDeadlineMs}ms`,
+          504,
+          lastError instanceof ProxyError
+            ? { body: lastError.message, providerId: lastError.upstreamError?.providerId }
+            : lastError
+              ? { body: lastError.message }
+              : undefined
+        );
+      }
       totalProvidersAttempted++;
       let attemptCount = 0; // 当前供应商的尝试次数
 
@@ -1611,11 +1669,14 @@ export class ProxyForwarder {
             // 之后当前 provider/endpoint 的所有透明重试路径都不可达。释放条件
             // 因而属于 Forwarder 的最终提交边界，而不是某种 stream-gate verdict：
             // gate=off 的 legacy pass 与 precommit heartbeat 同样会关闭重试边界。
+            // 此处保持原始内联门控（自足,不依赖 doForward 是否被替身接管）,
+            // 同时标记资格,使提交后的断开/最终失败路径也能收敛释放。
             if (
               session.requestUrl.pathname === "/v1/responses" &&
               currentProvider.providerType === "codex" &&
               session.isHighConcurrencyModeEnabled()
             ) {
+              session.noteRequestBodyReleaseEligible();
               session.releaseRequestBodyAfterCommit();
             }
 
@@ -2564,6 +2625,17 @@ export class ProxyForwarder {
   ): Promise<Response> {
     if (!provider) {
       throw new Error("Provider is required");
+    }
+
+    // 释放资格标记:复刻原提交点门控(/v1/responses × codex × 高并发)。
+    // 标记后,成功首字节 / 客户端断开 / 阶梯最终失败三个迁移点都会经
+    // releaseRequestBodyIfEligible 收敛释放。可选调用兼容最小面 session 桩。
+    if (
+      provider.providerType === "codex" &&
+      session.isHighConcurrencyModeEnabled?.() === true &&
+      session.requestUrl.pathname === "/v1/responses"
+    ) {
+      session.noteRequestBodyReleaseEligible?.();
     }
 
     // Observation state belongs to one concrete upstream attempt. Clear it before provider-specific

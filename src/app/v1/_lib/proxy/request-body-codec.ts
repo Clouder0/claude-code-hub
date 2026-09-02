@@ -69,6 +69,18 @@ export const MAX_COMPRESSED_REQUEST_BYTES = parseByteLimitEnv(
  */
 export const MAX_CONTENT_ENCODING_LAYERS = 1;
 
+/**
+ * intake 阶段（读 body 之前/之后）应用的线上字节上限：压缩请求体按压缩上限，
+ * 未压缩请求体按解压上限。既有 codec 上限只在 content-encoded 路径生效，
+ * 未压缩路径（Codex CLI 常态）此前完全没有体积天花板——此助手把它接到
+ * 同一组规范常量上，不引入新数值。
+ */
+export function resolveIntakeBodyLimitBytes(contentEncoding: string | null | undefined): number {
+  return parseContentEncoding(contentEncoding).length > 0
+    ? MAX_COMPRESSED_REQUEST_BYTES
+    : MAX_DECOMPRESSED_REQUEST_BYTES;
+}
+
 const SUPPORTED_ENCODINGS = new Set(["zstd", "gzip", "x-gzip", "deflate", "br"]);
 
 export interface DecodeRequestBodyOptions {
