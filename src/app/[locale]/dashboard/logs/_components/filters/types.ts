@@ -13,6 +13,8 @@ export interface UsageLogFilters {
   startTime?: number;
   /** End timestamp (ms, system timezone next day 00:00:00, for < comparison) */
   endTime?: number;
+  /** 显式请求全部时间（清除日期范围 = 全部，而不是回到默认 7 天） */
+  allTime?: boolean;
   statusCode?: number;
   excludeStatusCode200?: boolean;
   model?: string;

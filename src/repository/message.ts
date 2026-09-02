@@ -377,6 +377,124 @@ function buildBillingSettlementUpdate(
   };
 }
 
+/**
+ * Terminal request facts folded into the durable settlement write so a successful
+ * request lands in ONE UPDATE instead of settlement + buffered details patch.
+ * This halves per-request row-version churn (heap + trigger cascade + index
+ * maintenance on both message_request and usage_ledger).
+ *
+ * Overlay values intentionally WIN over the settlement's billable-split values
+ * for overlapping columns: that matches the previous terminal state, where the
+ * buffered details patch overwrote the settlement's token columns last.
+ */
+export interface MessageRequestFinalizeOverlay {
+  statusCode: number;
+  durationMs: number;
+  ttfbMs?: number | null;
+  actualResponseModel?: string | null;
+  errorMessage?: string;
+  inputTokens?: number;
+  observedInputTokens?: number | null;
+  outputTokens?: number;
+  cacheWriteTokensReported?: number | null;
+  cacheWriteAccounting?: CreateMessageRequestData["cache_write_accounting"];
+  cacheCreationInputTokens?: number;
+  cacheReadInputTokens?: number;
+  cacheCreation5mInputTokens?: number;
+  cacheCreation1hInputTokens?: number;
+  cacheTtlApplied?: string | null;
+  providerChain?: CreateMessageRequestData["provider_chain"];
+  model?: string;
+  providerId?: number;
+  context1mApplied?: boolean;
+  swapCacheTtlApplied?: boolean;
+  specialSettings?: CreateMessageRequestData["special_settings"];
+}
+
+function buildFinalizeOverlayUpdate(
+  overlay: MessageRequestFinalizeOverlay
+): Record<string, unknown> {
+  const sanitized = sanitizeMessageRequestJsonbPatch({
+    providerChain: overlay.providerChain,
+    specialSettings: overlay.specialSettings,
+  });
+  const update: Record<string, unknown> = {
+    statusCode: overlay.statusCode,
+    durationMs: overlay.durationMs,
+  };
+  if (overlay.ttfbMs !== undefined) {
+    update.ttfbMs = overlay.ttfbMs;
+  }
+  if (overlay.actualResponseModel !== undefined) {
+    update.actualResponseModel = overlay.actualResponseModel;
+  }
+  if (overlay.errorMessage !== undefined) {
+    update.errorMessage = overlay.errorMessage;
+  }
+  if (overlay.inputTokens !== undefined) {
+    update.inputTokens = overlay.inputTokens;
+  }
+  if (overlay.observedInputTokens !== undefined) {
+    update.observedInputTokens = overlay.observedInputTokens;
+  }
+  if (overlay.outputTokens !== undefined) {
+    update.outputTokens = overlay.outputTokens;
+  }
+  if (overlay.cacheWriteTokensReported !== undefined) {
+    update.cacheWriteTokensReported = overlay.cacheWriteTokensReported;
+  }
+  if (overlay.cacheWriteAccounting !== undefined) {
+    update.cacheWriteAccounting = overlay.cacheWriteAccounting;
+  }
+  if (overlay.cacheCreationInputTokens !== undefined) {
+    update.cacheCreationInputTokens = overlay.cacheCreationInputTokens;
+  }
+  if (overlay.cacheReadInputTokens !== undefined) {
+    update.cacheReadInputTokens = overlay.cacheReadInputTokens;
+  }
+  if (overlay.cacheCreation5mInputTokens !== undefined) {
+    update.cacheCreation5mInputTokens = overlay.cacheCreation5mInputTokens;
+  }
+  if (overlay.cacheCreation1hInputTokens !== undefined) {
+    update.cacheCreation1hInputTokens = overlay.cacheCreation1hInputTokens;
+  }
+  if (overlay.cacheTtlApplied !== undefined) {
+    update.cacheTtlApplied = overlay.cacheTtlApplied;
+  }
+  if (sanitized.providerChain !== undefined) {
+    update.providerChain = sanitized.providerChain;
+  }
+  if (overlay.model !== undefined) {
+    update.model = overlay.model;
+  }
+  if (overlay.providerId !== undefined) {
+    update.providerId = overlay.providerId;
+  }
+  if (overlay.context1mApplied !== undefined) {
+    update.context1mApplied = overlay.context1mApplied;
+  }
+  if (overlay.swapCacheTtlApplied !== undefined) {
+    update.swapCacheTtlApplied = overlay.swapCacheTtlApplied;
+  }
+  if (sanitized.specialSettings !== undefined) {
+    update.specialSettings = sanitized.specialSettings;
+  }
+  return update;
+}
+
+/**
+ * Mirror the terminal side effects the buffered path performs via
+ * updateMessageRequestDuration + updateMessageRequestDetails: seed the public
+ * status rollup with durationMs, then queue the rollup when the overlay carries
+ * the full terminal shape. Must run only AFTER the durable write succeeded.
+ */
+function runFinalizeOverlaySideEffects(id: number, overlay: MessageRequestFinalizeOverlay): void {
+  updatePublicStatusRequestSeed(id, { durationMs: overlay.durationMs });
+  if (isPublicStatusFinalDetails(overlay)) {
+    queuePublicStatusRollupForFinalDetails(id, overlay);
+  }
+}
+
 class MessageRequestSettlementTargetMissingError extends Error {}
 
 async function retryDurableSettlement<T>(
@@ -418,7 +536,8 @@ export async function updateMessageRequestCostWithBreakdown(
   id: number,
   costUsd: CreateMessageRequestData["cost_usd"],
   costBreakdown: StoredCostBreakdown | undefined,
-  settlement: MessageRequestBillingSettlement
+  settlement: MessageRequestBillingSettlement,
+  finalizeOverlay?: MessageRequestFinalizeOverlay
 ): Promise<string | null> {
   const formattedCost = formatCostForStorage(costUsd);
   if (!formattedCost) {
@@ -428,6 +547,7 @@ export async function updateMessageRequestCostWithBreakdown(
     ? sanitizeMessageRequestJsonbValue(costBreakdown)
     : undefined;
   const settlementUpdate = buildBillingSettlementUpdate(settlement);
+  const overlayUpdate = finalizeOverlay ? buildFinalizeOverlayUpdate(finalizeOverlay) : undefined;
 
   const updated = await retryDurableSettlement(id, "cost", async () => {
     const [row] = await db
@@ -436,6 +556,7 @@ export async function updateMessageRequestCostWithBreakdown(
         costUsd: formattedCost,
         ...(sanitizedCostBreakdown ? { costBreakdown: sanitizedCostBreakdown } : {}),
         ...settlementUpdate,
+        ...(overlayUpdate ?? {}),
         updatedAt: new Date(),
       })
       .where(and(eq(messageRequest.id, id), isNull(messageRequest.deletedAt)))
@@ -443,6 +564,9 @@ export async function updateMessageRequestCostWithBreakdown(
     return row;
   });
 
+  if (finalizeOverlay) {
+    runFinalizeOverlaySideEffects(id, finalizeOverlay);
+  }
   return updated.costUsd;
 }
 
@@ -455,21 +579,28 @@ export async function updateMessageRequestCostWithBreakdown(
  */
 export async function updateMessageRequestUnsupportedBillingSettlement(
   id: number,
-  settlement: MessageRequestBillingSettlement
+  settlement: MessageRequestBillingSettlement,
+  finalizeOverlay?: MessageRequestFinalizeOverlay
 ): Promise<void> {
   const settlementUpdate = buildBillingSettlementUpdate(settlement);
+  const overlayUpdate = finalizeOverlay ? buildFinalizeOverlayUpdate(finalizeOverlay) : undefined;
 
   await retryDurableSettlement(id, "unsupported billing", async () => {
     const [row] = await db
       .update(messageRequest)
       .set({
         ...settlementUpdate,
+        ...(overlayUpdate ?? {}),
         updatedAt: new Date(),
       })
       .where(and(eq(messageRequest.id, id), isNull(messageRequest.deletedAt)))
       .returning({ id: messageRequest.id });
     return row;
   });
+
+  if (finalizeOverlay) {
+    runFinalizeOverlaySideEffects(id, finalizeOverlay);
+  }
 }
 
 /**
@@ -491,7 +622,8 @@ export async function updateMessageRequestWinnerCost(
   id: number,
   winnerCost: CreateMessageRequestData["cost_usd"],
   costBreakdown: StoredCostBreakdown | undefined,
-  settlement: MessageRequestBillingSettlement
+  settlement: MessageRequestBillingSettlement,
+  finalizeOverlay?: MessageRequestFinalizeOverlay
 ): Promise<string | null> {
   const formattedCost = formatCostForStorage(winnerCost);
   if (!formattedCost) {
@@ -501,6 +633,7 @@ export async function updateMessageRequestWinnerCost(
     ? sanitizeMessageRequestJsonbValue(costBreakdown)
     : undefined;
   const settlementUpdate = buildBillingSettlementUpdate(settlement);
+  const overlayUpdate = finalizeOverlay ? buildFinalizeOverlayUpdate(finalizeOverlay) : undefined;
 
   const updated = await retryDurableSettlement(id, "winner", async () => {
     const [row] = await db
@@ -509,6 +642,7 @@ export async function updateMessageRequestWinnerCost(
         costUsd: sql`${formattedCost}::numeric + COALESCE((SELECT SUM((entry->>'costUsd')::numeric) FROM jsonb_array_elements(COALESCE(${messageRequest.hedgeLosers}, '[]'::jsonb)) AS entry), 0)`,
         ...(sanitizedCostBreakdown ? { costBreakdown: sanitizedCostBreakdown } : {}),
         ...settlementUpdate,
+        ...(overlayUpdate ?? {}),
         updatedAt: new Date(),
       })
       .where(and(eq(messageRequest.id, id), isNull(messageRequest.deletedAt)))
@@ -516,6 +650,9 @@ export async function updateMessageRequestWinnerCost(
     return row;
   });
 
+  if (finalizeOverlay) {
+    runFinalizeOverlaySideEffects(id, finalizeOverlay);
+  }
   return updated.costUsd;
 }
 

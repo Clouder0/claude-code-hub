@@ -3,7 +3,9 @@ import { getRedisClient } from "@/lib/redis/client";
 import { getLeaderboardWithCache } from "@/lib/redis/leaderboard-cache";
 import { resolveSystemTimezone } from "@/lib/utils/timezone";
 import {
+  findAllTimeUserCacheHitRateLeaderboard,
   findDailyUserCacheHitRateLeaderboard,
+  findMonthlyUserCacheHitRateLeaderboard,
   type UserCacheHitRateLeaderboardEntry,
 } from "@/repository/leaderboard";
 
@@ -32,6 +34,8 @@ vi.mock("@/repository/leaderboard", async () => {
   return {
     ...actual,
     findDailyUserCacheHitRateLeaderboard: vi.fn(),
+    findAllTimeUserCacheHitRateLeaderboard: vi.fn(),
+    findMonthlyUserCacheHitRateLeaderboard: vi.fn(),
   };
 });
 
@@ -132,6 +136,36 @@ describe("getLeaderboardWithCache", () => {
       600,
       JSON.stringify(rows)
     );
+  });
+
+  it("layers cache TTL by period: monthly/allTime live longer than daily", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-04-13T00:00:00Z"));
+
+    for (const [period, ttl, mockFn] of [
+      ["monthly", 1800, findMonthlyUserCacheHitRateLeaderboard],
+      ["allTime", 3600, findAllTimeUserCacheHitRateLeaderboard],
+    ] as const) {
+      const redis = createRedisMock();
+      const rows = createUserCacheHitRateRows();
+      redis.get.mockResolvedValueOnce(null);
+      redis.set.mockResolvedValueOnce("OK");
+      redis.setex.mockResolvedValueOnce("OK");
+      redis.del.mockResolvedValueOnce(1);
+
+      vi.mocked(getRedisClient).mockReturnValue(
+        redis as unknown as NonNullable<ReturnType<typeof getRedisClient>>
+      );
+      vi.mocked(mockFn).mockResolvedValueOnce(rows);
+
+      await getLeaderboardWithCache(period, "USD", "userCacheHitRate");
+
+      expect(redis.setex).toHaveBeenCalledWith(
+        expect.stringContaining(`leaderboard:userCacheHitRate:${period}`),
+        ttl,
+        JSON.stringify(rows)
+      );
+    }
   });
 
   it("falls back to direct query when Redis is unavailable and still preserves userCacheHitRate filters", async () => {

@@ -1,5 +1,6 @@
 import { describe, expect, test } from "vitest";
 import {
+  applyDefaultLogsTimeWindow,
   buildLogsUrlQuery,
   parseLogsUrlFilters,
 } from "@/app/[locale]/dashboard/logs/_utils/logs-query";
@@ -86,5 +87,42 @@ describe("dashboard logs url query utils", () => {
   test("buildLogsUrlQuery includes minRetryCount even when 0", () => {
     const query = buildLogsUrlQuery({ minRetryCount: 0 });
     expect(query.get("minRetry")).toBe("0");
+  });
+});
+
+describe("logs allTime url round-trip", () => {
+  test("parses allTime=true and omits it when absent/false", () => {
+    expect(parseLogsUrlFilters({ allTime: "true" }).allTime).toBe(true);
+    expect(parseLogsUrlFilters({}).allTime).toBeUndefined();
+    expect(parseLogsUrlFilters({ allTime: "yes" }).allTime).toBeUndefined();
+
+    const query = buildLogsUrlQuery({ allTime: true });
+    expect(query.get("allTime")).toBe("true");
+    const queryWithout = buildLogsUrlQuery({ allTime: false });
+    expect(queryWithout.has("allTime")).toBe(false);
+  });
+});
+
+describe("applyDefaultLogsTimeWindow", () => {
+  test("applies a last7days window when no startTime and no allTime", () => {
+    const result = applyDefaultLogsTimeWindow({}, undefined);
+    expect(result.startTime).toBeDefined();
+    expect(result.endTime).toBeDefined();
+    const spanMs = (result.endTime as number) - (result.startTime as number);
+    // 7 天（00:00:00 起至 23:59:59+1s 止）
+    expect(spanMs).toBeGreaterThanOrEqual(7 * 24 * 60 * 60 * 1000);
+    expect(spanMs).toBeLessThan(8 * 24 * 60 * 60 * 1000);
+  });
+
+  test("keeps an explicit startTime untouched", () => {
+    const result = applyDefaultLogsTimeWindow({ startTime: 123, endTime: 456 }, undefined);
+    expect(result).toEqual({ startTime: 123, endTime: 456 });
+  });
+
+  test("allTime bypasses the default window entirely", () => {
+    const result = applyDefaultLogsTimeWindow({ allTime: true }, undefined);
+    expect(result.startTime).toBeUndefined();
+    expect(result.endTime).toBeUndefined();
+    expect(result.allTime).toBe(true);
   });
 });

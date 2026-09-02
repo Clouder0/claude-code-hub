@@ -71,6 +71,10 @@ export function parseSSEData(sseText: string): ParsedSSEEvent[] {
  * prompt_cache_key）读取的每个字段都位于以下字面 JSON key 之下，因此 data 文本
  * 不含任何标记子串的事件不可能贡献结果，可安全跳过 JSON.parse（保留原始字符串
  * data；消费者对 string data 本就有 `typeof !== "object"` 跳过逻辑）。
+ *
+ * 已知边界（预存在，非本函数引入）：判定基于原始文本的 ASCII 子串，若上游用
+ * \u 转义书写标记文本（如 "cyber_\u0070olicy"），门控不会命中、事件保持未解析。
+ * 修复需要先解码再判定，等于恢复被本优化省掉的成本，故记录而不修。
  */
 const SSE_FINALIZATION_MARKERS = [
   "usage",
@@ -82,9 +86,12 @@ const SSE_FINALIZATION_MARKERS = [
 ] as const;
 
 /**
- * parseSSEData 的 finalization 变体：只对 data 文本命中标记子串的事件做 JSON.parse，
- * 其余事件保留字符串 data。用于把流结束时对 allContent 的多次独立全量解析合并为
- * 一次共享解析，并跳过占字节大头的文本增量事件。
+ * parseSSEData 的 finalization 变体：只保留 data 文本命中标记子串的事件
+ * （并对其做 JSON.parse），其余事件（占字节大头的文本增量）不进入结果——
+ * 四个 finalization 消费者（cyber 信号 / usage / service_tier / prompt_cache_key）
+ * 对 string data 本就有 `typeof !== "object"` 跳过逻辑，跳过与丢弃等价，
+ * 但丢弃后事件数组不再随响应体大小线性驻留内存。
+ * 用于把流结束时对 allContent 的多次独立全量解析合并为一次共享解析。
  *
  * 注意：detectUpstreamErrorFromSseOrJsonText（假 200 检测）需要全部事件的对象 data，
  * 不得消费本函数的结果。
@@ -104,15 +111,14 @@ export function parseSSEDataForFinalization(sseText: string): ParsedSSEEvent[] {
 
     const dataStr = dataLines.join("\n");
 
-    let data: ParsedSSEEvent["data"] = dataStr;
     if (SSE_FINALIZATION_MARKERS.some((marker) => dataStr.includes(marker))) {
       try {
-        data = JSON.parse(dataStr) as Record<string, unknown>;
+        events.push({ event: eventName || "message", data: JSON.parse(dataStr) });
       } catch {
         // 与 parseSSEData 保持一致：解析失败保留原始字符串。
+        events.push({ event: eventName || "message", data: dataStr });
       }
     }
-    events.push({ event: eventName || "message", data });
 
     eventName = "";
     dataLines = [];

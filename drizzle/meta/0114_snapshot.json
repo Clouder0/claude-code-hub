@@ -1,6 +1,6 @@
 {
   "id": "d8bb535f-6cd9-4361-a578-e5f390c015b8",
-  "prevId": "d7691073-1769-4637-b39a-18c1f935c35b",
+  "prevId": "50c56034-b7aa-4949-8631-4a5aae575ec8",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -755,12 +755,6 @@
         "status_code": {
           "name": "status_code",
           "type": "integer",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "success_rate_outcome": {
-          "name": "success_rate_outcome",
-          "type": "varchar(16)",
           "primaryKey": false,
           "notNull": false
         },
@@ -3336,17 +3330,11 @@
           "primaryKey": true,
           "notNull": true
         },
-        "user_id": {
-          "name": "user_id",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true
-        },
         "message_request_id": {
           "name": "message_request_id",
           "type": "integer",
           "primaryKey": false,
-          "notNull": false
+          "notNull": true
         },
         "type": {
           "name": "type",
@@ -3398,49 +3386,9 @@
           "concurrently": false,
           "method": "btree",
           "with": {}
-        },
-        "idx_security_event_user_type_created_at": {
-          "name": "idx_security_event_user_type_created_at",
-          "columns": [
-            {
-              "expression": "user_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "type",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "created_at",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
         }
       },
       "foreignKeys": {
-        "security_event_user_id_users_id_fk": {
-          "name": "security_event_user_id_users_id_fk",
-          "tableFrom": "security_event",
-          "tableTo": "users",
-          "columnsFrom": [
-            "user_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "no action",
-          "onUpdate": "no action"
-        },
         "security_event_message_request_id_message_request_id_fk": {
           "name": "security_event_message_request_id_message_request_id_fk",
           "tableFrom": "security_event",
@@ -3451,7 +3399,7 @@
           "columnsTo": [
             "id"
           ],
-          "onDelete": "set null",
+          "onDelete": "cascade",
           "onUpdate": "no action"
         }
       },

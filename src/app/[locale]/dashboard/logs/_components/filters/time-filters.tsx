@@ -84,6 +84,7 @@ export function TimeFilters({ filters, onFiltersChange, serverTimeZone }: TimeFi
             ...filters,
             startTime: undefined,
             endTime: undefined,
+            allTime: true,
           });
           return;
         }
@@ -92,12 +93,15 @@ export function TimeFilters({ filters, onFiltersChange, serverTimeZone }: TimeFi
           ...filters,
           startTime: startTimestamp,
           endTime: endTimestamp,
+          allTime: false,
         });
       } else {
+        // 清除日期范围 = 显式请求全部时间，而不是回落到默认 7 天窗口。
         onFiltersChange({
           ...filters,
           startTime: undefined,
           endTime: undefined,
+          allTime: true,
         });
       }
     },
@@ -142,7 +146,12 @@ export function TimeFilters({ filters, onFiltersChange, serverTimeZone }: TimeFi
   return (
     <div className="space-y-3">
       <div className="space-y-2">
-        <Label>{t("dateRange")}</Label>
+        <Label>
+          {t("dateRange")}
+          {filters.allTime ? (
+            <span className="ml-1 text-xs font-normal text-muted-foreground">({t("allTime")})</span>
+          ) : null}
+        </Label>
         <LogsDateRangePicker
           startDate={displayStartDate}
           endDate={displayEndDate}

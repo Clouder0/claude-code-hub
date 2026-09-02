@@ -74,6 +74,7 @@
       "status": "状态",
       "timeRange": "时间范围",
       "dateRange": "日期范围",
+      "allTime": "全部时间",
       "startTime": "开始时间",
       "endTime": "结束时间",
       "allUsers": "全部用户",

@@ -69,7 +69,9 @@ export async function backfillUsageLedger(
   throw lastError;
 }
 
-async function runBackfillTransaction(mode: LedgerBackfillMode): Promise<BackfillUsageLedgerSummary> {
+async function runBackfillTransaction(
+  mode: LedgerBackfillMode
+): Promise<BackfillUsageLedgerSummary> {
   const startTime = Date.now();
   const LOCK_KEY = 20260101;
 
@@ -109,23 +111,6 @@ async function runBackfillTransaction(mode: LedgerBackfillMode): Promise<Backfil
       }
 
       while (true) {
-        // 行选择条件按模式在 TS 侧组装（而不是参数化布尔）：
-        // - sync 只做缺失行 anti-join，查询文本里不出现语义比较条件，
-        //   计划器与执行器都不需要为它求值；
-        // - repair 保留完整语义重导条件。
-        const selectionCondition =
-          mode === "repair"
-            ? sql`
-              ul.request_id IS NULL
-              OR ul.success_rate_outcome IS NULL
-              OR ul.final_provider_id IS DISTINCT FROM resolved.final_provider_id
-              OR ul.is_success IS DISTINCT FROM (
-                (mr.error_message IS NULL OR mr.error_message = '')
-                AND (mr.status_code IS NULL OR mr.status_code < 400)
-              )
-            `
-            : sql`ul.request_id IS NULL`;
-
         // repair 必须直接调 fn_compute（mr.success_rate_outcome 列可能存着
         // 旧语义的值，重导的意义就是按当前函数重算）；sync 处理的是刚写入的
         // 尾部行，触发器已用当前函数维护过该列，COALESCE 省一次函数调用。
@@ -138,14 +123,34 @@ async function runBackfillTransaction(mode: LedgerBackfillMode): Promise<Backfil
                 mr.provider_chain
               )`
             : sql`COALESCE(
-              mr.success_rate_outcome,
-              fn_compute_message_request_success_rate_outcome(
-                mr.blocked_by,
-                mr.status_code,
-                mr.error_message,
-                mr.provider_chain
+                mr.success_rate_outcome,
+                fn_compute_message_request_success_rate_outcome(
+                  mr.blocked_by,
+                  mr.status_code,
+                  mr.error_message,
+                  mr.provider_chain
+                )
+              )`;
+
+        // 行选择条件按模式在 TS 侧组装（而不是参数化布尔）：
+        // - sync 只做缺失行 anti-join，查询文本里不出现语义比较条件，
+        //   计划器与执行器都不需要为它求值；
+        // - repair 保留完整语义重导条件。outcome 必须与重算值做 IS DISTINCT FROM
+        //   而不是 IS NULL：fn_compute 对部分行（如 status/error/blocked 全空）
+        //   合法地返回 NULL，"存的就是 NULL"不代表需要修——用 IS NULL 会让
+        //   同一批行被反复选中，while(true) 永不收敛（2026-08-20 集成测试抓到）。
+        const selectionCondition =
+          mode === "repair"
+            ? sql`
+              ul.request_id IS NULL
+              OR ul.success_rate_outcome IS DISTINCT FROM ${outcomeExpression}
+              OR ul.final_provider_id IS DISTINCT FROM resolved.final_provider_id
+              OR ul.is_success IS DISTINCT FROM (
+                (mr.error_message IS NULL OR mr.error_message = '')
+                AND (mr.status_code IS NULL OR mr.status_code < 400)
               )
-            )`;
+            `
+            : sql`ul.request_id IS NULL`;
 
         const batchResult = await tx.execute(sql`
         WITH batch AS (
@@ -188,6 +193,11 @@ async function runBackfillTransaction(mode: LedgerBackfillMode): Promise<Backfil
             mr.ttfb_ms,
             mr.client_ip,
             mr.created_at,
+            (mr.blocked_by IS NULL AND (
+               mr.endpoint IS NULL
+               OR LOWER(REGEXP_REPLACE(mr.endpoint, '/+$', '')) NOT IN
+                  ('/v1/messages/count_tokens', '/v1/responses/compact')
+             )) AS is_billable,
             ul.request_id AS existing_request_id
           FROM message_request mr
           CROSS JOIN LATERAL (
@@ -214,7 +224,7 @@ async function runBackfillTransaction(mode: LedgerBackfillMode): Promise<Backfil
           INSERT INTO usage_ledger (
             request_id, user_id, key, provider_id, final_provider_id,
             model, original_model, actual_response_model, endpoint, api_type, session_id,
-            status_code, is_success, success_rate_outcome, blocked_by,
+            status_code, is_success, success_rate_outcome, blocked_by, is_billable,
             cost_usd, cost_multiplier, group_cost_multiplier, cost_breakdown,
             input_tokens, observed_input_tokens, output_tokens,
             cache_write_tokens_reported, cache_write_accounting,
@@ -240,6 +250,7 @@ async function runBackfillTransaction(mode: LedgerBackfillMode): Promise<Backfil
             batch.is_success,
             batch.success_rate_outcome,
             batch.blocked_by,
+            batch.is_billable,
             batch.cost_usd,
             batch.cost_multiplier,
             batch.group_cost_multiplier,

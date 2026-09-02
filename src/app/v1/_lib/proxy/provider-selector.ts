@@ -559,8 +559,18 @@ export class ProxyProviderResolver {
       return null;
     }
 
-    // 验证 provider 可用性
-    const provider = await findProviderById(providerId);
+    // 验证 provider 可用性：优先从进程内快照解析（30s TTL + pubsub 失效）。
+    // 会话复用是 codex 长会话的主路径，此前每请求一次 findProviderById 直查 DB；
+    // 快照未命中（新建供应商遇上缓存窗口，或测试注入的部分 session double）
+    // 时回退直查，行为不变。
+    let provider: Provider | null = null;
+    if (typeof session.getProvidersSnapshot === "function") {
+      provider =
+        (await session.getProvidersSnapshot()).find((item) => item.id === providerId) ?? null;
+    }
+    if (!provider) {
+      provider = await findProviderById(providerId);
+    }
     if (!provider?.isEnabled) {
       logger.debug("ProviderSelector: Session provider unavailable", {
         sessionId: session.sessionId,

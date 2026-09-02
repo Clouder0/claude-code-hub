@@ -37210,6 +37210,8 @@ export interface operations {
                 startTime?: number | null;
                 /** @description End timestamp in milliseconds. */
                 endTime?: number | null;
+                /** @description Explicitly request the full history instead of the default 7-day window (applies when startTime is absent). */
+                allTime?: "true" | "false" | boolean;
             };
             header?: never;
             path?: never;
@@ -37415,6 +37417,8 @@ export interface operations {
                 startTime?: number | null;
                 /** @description End timestamp in milliseconds. */
                 endTime?: number | null;
+                /** @description Explicitly request the full history instead of the default 7-day window (applies when startTime is absent). */
+                allTime?: "true" | "false" | boolean;
             };
             header?: never;
             path?: never;
@@ -38485,6 +38489,8 @@ export interface operations {
                     startTime?: number | null;
                     /** @description End timestamp in milliseconds. */
                     endTime?: number | null;
+                    /** @description Explicitly request the full history instead of the default 7-day window (applies when startTime is absent). */
+                    allTime?: "true" | "false" | boolean;
                     /**
                      * @description Export format. xlsx is only available asynchronously (Prefer: respond-async).
                      * @default csv

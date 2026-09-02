@@ -273,14 +273,11 @@ describe("stream finalization shared events parity", () => {
 // ---------- 门控行为：无 marker 的事件不做 JSON.parse ----------
 
 describe("parseSSEDataForFinalization marker gating", () => {
-  test("skips JSON.parse for plain delta events", () => {
+  test("plain delta events are dropped entirely (no retention, no parse)", () => {
     const events = parseSSEDataForFinalization(plainDeltas);
-    expect(events.length).toBeGreaterThan(0);
-    for (const event of events) {
-      expect(typeof event.data).toBe("string");
-    }
-    // 事件名保留，消费者的事件类型判断不受影响。
-    expect(events.every((e) => e.event === "response.output_text.delta")).toBe(true);
+    // 增量事件不携带任何 marker：四个消费者对 string data 一律跳过，
+    // 因此不再进入结果数组（finalization 驻留内存与增量字节解耦）。
+    expect(events).toHaveLength(0);
   });
 
   test("parses marker-carrying events, keeps multi-line joining semantics", () => {
@@ -299,11 +296,28 @@ describe("parseSSEDataForFinalization marker gating", () => {
     });
   });
 
-  test("event set is index-aligned with parseSSEData (same count and names)", () => {
+  test("marker events form a multiset-subset of parseSSEData events (identical parsed data)", () => {
     for (const [_name, text] of sseFixtures) {
       const legacy = parseSSEData(text);
       const gated = parseSSEDataForFinalization(text);
-      expect(gated.map((e) => e.event)).toEqual(legacy.map((e) => e.event));
+      // 门控结果是全量解析中"会被消费者实际读取"的那部分：每个门控事件
+      // 都能在 legacy 中找到事件名与 parsed data 完全一致的对应事件（多重集包含，
+      // 对同名不同 data 的流——如 chat.completion.chunk——也成立）。
+      const legacyKeyCounts = new Map<string, number>();
+      for (const event of legacy) {
+        if (typeof event.data === "object") {
+          const key = `${event.event} ${JSON.stringify(event.data)}`;
+          legacyKeyCounts.set(key, (legacyKeyCounts.get(key) ?? 0) + 1);
+        }
+      }
+      for (const event of gated) {
+        expect(typeof event.data).toBe("object");
+        const key = `${event.event} ${JSON.stringify(event.data)}`;
+        const remaining = legacyKeyCounts.get(key) ?? 0;
+        expect(remaining).toBeGreaterThan(0);
+        legacyKeyCounts.set(key, remaining - 1);
+      }
+      expect(gated.length).toBeLessThanOrEqual(legacy.length);
     }
   });
 

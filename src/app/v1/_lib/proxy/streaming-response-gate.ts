@@ -3,6 +3,7 @@ import { detectUpstreamErrorFromSseOrJsonText } from "@/lib/utils/upstream-error
 import {
   type ResponsesStreamCommitMarker,
   type ResponsesStreamGateCaps,
+  type ResponsesStreamGateDiagnostic,
   type ResponsesStreamGateFailureReason,
   type ResponsesStreamGateMode,
   type ResponsesStreamGateResult,
@@ -66,6 +67,8 @@ export type StreamingResponsePrefixInspection =
       semanticDiagnostic?: StreamingResponseSemanticDiagnostic;
       /** 仅当预提交心跳已启动(response 已对下游提交 200)时存在。 */
       precommitHeartbeat?: PrecommitHeartbeatDiagnostic;
+      /** enforce 门成功 commit 的诊断（echo 字节构成等），供 forwarder 做抽样观测 */
+      commitDiagnostic?: ResponsesStreamGateDiagnostic;
     }
   | {
       kind: "fake_200";
@@ -585,6 +588,7 @@ async function inspectResponsesSemanticPrefix(
       kind: "pass",
       response: committedResponse,
       commitMarker: gate.commitMarker,
+      commitDiagnostic: gate.diagnostic,
     };
   }
 

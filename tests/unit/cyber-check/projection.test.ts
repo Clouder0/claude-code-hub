@@ -265,7 +265,10 @@ describe("cyber-check Responses projection", () => {
     expect(packet.coverage.notices).toEqual([
       { code: "unsupported_top_level_field", field: "future_model_visible_field" },
       { code: "unsupported_top_level_field", field: "another_unknown_field" },
-      { code: "unsupported_top_level_field", field: "future_model_visible_field_repeated_via_other_key" },
+      {
+        code: "unsupported_top_level_field",
+        field: "future_model_visible_field_repeated_via_other_key",
+      },
     ]);
     // A repeated field is still deduplicated to one notice.
     const { packet: repeat } = project({

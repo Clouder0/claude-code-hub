@@ -7,6 +7,11 @@ let sdk: NodeSDK | null = null;
 let spanProcessor: LangfuseSpanProcessor | null = null;
 let initialized = false;
 
+/**
+ * 与 emit-proxy-trace 的 isLangfuseTraceEnabled 是同一判定（双钥匙 env 检查）。
+ * 不做静态互相 import：emit-proxy-trace 的调用方（代理热路径）不能因此加载
+ * 本模块的 Langfuse SDK。两处需同步修改。
+ */
 export function isLangfuseEnabled(): boolean {
   return !!(process.env.LANGFUSE_PUBLIC_KEY && process.env.LANGFUSE_SECRET_KEY);
 }

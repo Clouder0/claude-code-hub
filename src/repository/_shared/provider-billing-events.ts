@@ -1,6 +1,6 @@
 import type { SQL } from "drizzle-orm";
 import { sql } from "drizzle-orm";
-import { NON_BILLING_ENDPOINTS } from "@/lib/utils/performance-formatter";
+import { db } from "@/drizzle/db";
 
 export interface ProviderBillingEventQueryOptions {
   providerId?: number;
@@ -25,6 +25,36 @@ const MAX_STORED_COST = "999999999999999.999999999999999";
 function joinConditions(conditions: SQL[]): SQL {
   return sql.join(conditions, sql` AND `);
 }
+
+// Narrow projection consumed by every aggregate surface (winner branch, loser
+// expansion, and outer cost/token/success aggregates). `ledger.*` previously
+// dragged cost_breakdown / special_settings jsonb and a dozen unused columns
+// through the CTE materialization. Extend this list only after checking every
+// embedding surface — the projection-guard unit test enforces that consumers
+// never reference event columns outside the CTE output contract.
+export const LEDGER_EVENT_ROW_COLUMN_NAMES = [
+  "request_id",
+  "created_at",
+  "user_id",
+  "key",
+  "model",
+  "original_model",
+  "success_rate_outcome",
+  "ttfb_ms",
+  "duration_ms",
+  "cost_usd",
+  "input_tokens",
+  "output_tokens",
+  "cache_creation_input_tokens",
+  "cache_read_input_tokens",
+  "final_provider_id",
+  "hedge_losers",
+] as const;
+
+const LEDGER_EVENT_ROW_COLUMNS = sql.join(
+  LEDGER_EVENT_ROW_COLUMN_NAMES.map((name) => sql.raw(`ledger.${name}`)),
+  sql`, `
+);
 
 type ProviderMatchKind = "all" | "winner" | "loser";
 
@@ -195,18 +225,9 @@ function buildLedgerRowConditions(options: ProviderBillingEventQueryOptions): SQ
     throw new Error("Provider billing events accept only one start-time boundary");
   }
 
-  const conditions: SQL[] = [
-    sql`ledger.blocked_by IS NULL`,
-    sql`(
-      ledger.endpoint IS NULL
-      OR LOWER(REGEXP_REPLACE(ledger.endpoint, '/+$', '')) NOT IN (
-        ${sql.join(
-          NON_BILLING_ENDPOINTS.map((endpoint) => sql`${endpoint}`),
-          sql`, `
-        )}
-      )
-    )`,
-  ];
+  // Same stored billable decision the read-side LEDGER_BILLING_CONDITION now
+  // uses (0116): one boolean, partial-index friendly, no per-row regex.
+  const conditions: SQL[] = [sql`ledger.is_billable`];
 
   if (options.startTime) {
     conditions.push(sql`ledger.created_at >= ${options.startTime.toISOString()}::timestamptz`);
@@ -247,14 +268,14 @@ export function buildProviderBillingEventsQuery(
   const ledgerRows = (() => {
     if (options.providerId === undefined) {
       return sql`
-        SELECT ledger.*, 'all'::text AS provider_match_kind
+        SELECT ${LEDGER_EVENT_ROW_COLUMNS}, 'all'::text AS provider_match_kind
         FROM usage_ledger AS ledger
         WHERE ${joinConditions(rowConditions)}
       `;
     }
 
     return sql`
-      SELECT ledger.*, 'winner'::text AS provider_match_kind
+      SELECT ${LEDGER_EVENT_ROW_COLUMNS}, 'winner'::text AS provider_match_kind
       FROM usage_ledger AS ledger
       WHERE ${joinConditions(rowConditions)}
         AND ledger.final_provider_id = ${options.providerId}
@@ -431,4 +452,49 @@ export function buildProviderBillingTotalQuery(options: ProviderBillingTotalQuer
         + provider_loser_total.cost_usd AS total
     FROM winner_total, winner_loser_adjustment, provider_loser_total
   `;
+}
+
+/**
+ * Hedge-loser existence gate for the 'all'-mode fast path.
+ *
+ * The streaming-hedge feature requires a per-provider
+ * firstByteTimeoutStreamingMs > 0 to ever race providers; no provider in
+ * this deployment has it set, so usage_ledger.hedge_losers has never been
+ * non-null (verified against the full ledger). The probe matches the
+ * idx_usage_ledger_winner_hedge_losers partial predicate exactly, so it is
+ * an index-only EXISTS over an effectively empty index (sub-millisecond).
+ *
+ * While no loser row exists, provider aggregates can skip the loser
+ * expansion machinery entirely and read usage_ledger directly. If hedge is
+ * ever enabled, the first billed loser row flips the gate within TTL and
+ * consumers fall back to the full attribution CTE — no manual switch.
+ */
+const HEDGE_LOSER_GATE_TTL_MS = 60 * 1000;
+let hedgeLoserGateCache: { value: boolean; expiresAt: number } | null = null;
+
+export async function anyHedgeLoserRowsExist(): Promise<boolean> {
+  const now = Date.now();
+  if (hedgeLoserGateCache && hedgeLoserGateCache.expiresAt > now) {
+    return hedgeLoserGateCache.value;
+  }
+  const result = await db.execute(sql`
+    SELECT EXISTS (
+      SELECT 1 FROM usage_ledger
+      WHERE blocked_by IS NULL AND hedge_losers IS NOT NULL
+    ) AS has_losers
+  `);
+  const row = (Array.from(result) as Array<{ has_losers: boolean }>)[0];
+  const value = row?.has_losers === true;
+  hedgeLoserGateCache = { value, expiresAt: now + HEDGE_LOSER_GATE_TTL_MS };
+  return value;
+}
+
+/** Test-only: reset the gate cache between cases. */
+export function __resetHedgeLoserGateCacheForTests(): void {
+  hedgeLoserGateCache = null;
+}
+
+/** Test-only: force the cached gate value to exercise both query paths. */
+export function __setHedgeLoserGateCacheForTests(value: boolean): void {
+  hedgeLoserGateCache = { value, expiresAt: Date.now() + HEDGE_LOSER_GATE_TTL_MS };
 }

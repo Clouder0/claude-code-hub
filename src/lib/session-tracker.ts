@@ -653,8 +653,9 @@ export class SessionTracker {
 
     try {
       const key = `session:${sessionId}:concurrent_count`;
-      await redis.incr(key);
-      await redis.expire(key, 600); // 10 分钟 TTL（比 session TTL 长一倍，防止计数泄漏）
+      // INCR 与 EXPIRE 无读依赖，pipeline 成一次往返（原先两次串行 RTT 在
+      // forward 前的关键路径上）
+      await redis.pipeline().incr(key).expire(key, 600).exec();
 
       logger.trace("SessionTracker: Incremented concurrent count", { sessionId });
     } catch (error) {

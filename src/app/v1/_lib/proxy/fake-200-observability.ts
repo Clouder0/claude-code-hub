@@ -68,6 +68,9 @@ export type ResponsesStreamGateDiagnosticLog = {
 
 const buckets = new Map<string, Fake200LogBucket>();
 const streamGateBuckets = new Map<string, Fake200LogBucket>();
+const commitBuckets = new Map<string, Fake200LogBucket>();
+const COMMIT_WINDOW_MS = 600_000;
+const COMMIT_MAX_LOGS_PER_WINDOW = 8;
 
 function truncate(value: string, maxLength: number): string {
   return value.length <= maxLength ? value : value.slice(0, maxLength);
@@ -217,8 +220,76 @@ export function logResponsesStreamGateDiagnostic(
 export function resetFake200SseDiagnosticLogRateLimitForTests(): void {
   buckets.clear();
   streamGateBuckets.clear();
+  commitBuckets.clear();
 }
 
 export function getFake200SseDiagnosticLogRateLimitBucketCountForTests(): number {
-  return buckets.size + streamGateBuckets.size;
+  return buckets.size + streamGateBuckets.size + commitBuckets.size;
+}
+
+export type ResponsesStreamGateCommitObservationLog = {
+  providerId: number;
+  providerName: string;
+  endpointId: number | null;
+  framesSeen: number;
+  bufferedBytes: number;
+  echoExcludedBytes: number;
+  observedEventTypes: readonly string[];
+  eventTypesTruncated: boolean;
+};
+
+/**
+ * enforce 模式成功 commit 的抽样观测。
+ *
+ * 现有 gate 诊断只覆盖失败/divergence 路径，成功流完全静默——既无法回答
+ * "供应商是否在生命周期帧里回显大体积请求"（echoExcludedBytes 分布），也拿
+ * 不到供应商健康的分母。这里按 provider 分桶限流输出成功 commit 的字节构成，
+ * 补上两个盲区；info 级别，10 分钟窗口内每供应商至多 8 条。
+ */
+export function logResponsesStreamGateCommitObservation(
+  observation: ResponsesStreamGateCommitObservationLog
+): void {
+  const now = Date.now();
+  const key = String(observation.providerId);
+  const existing = commitBuckets.get(key);
+  let bucket: Fake200LogBucket;
+  if (existing) {
+    commitBuckets.delete(key);
+    commitBuckets.set(key, existing);
+    if (now - existing.windowStartedAt >= COMMIT_WINDOW_MS) {
+      existing.windowStartedAt = now;
+      existing.emitted = 0;
+    }
+    bucket = existing;
+  } else {
+    if (commitBuckets.size >= MAX_BUCKETS) {
+      const oldestKey = commitBuckets.keys().next().value;
+      if (oldestKey) commitBuckets.delete(oldestKey);
+    }
+    bucket = { windowStartedAt: now, emitted: 0, suppressed: 0 };
+    commitBuckets.set(key, bucket);
+  }
+
+  if (bucket.emitted >= COMMIT_MAX_LOGS_PER_WINDOW) {
+    bucket.suppressed += 1;
+    return;
+  }
+  const suppressedSinceLastEmission = bucket.suppressed;
+  bucket.emitted += 1;
+  bucket.suppressed = 0;
+
+  logger.info("ProxyForwarder: Responses stream gate committed", {
+    event: "proxy.responses_stream_gate_commit",
+    providerId: observation.providerId,
+    providerName: truncate(observation.providerName, MAX_PROVIDER_NAME_LENGTH),
+    endpointId: observation.endpointId,
+    framesSeen: observation.framesSeen,
+    bufferedBytes: observation.bufferedBytes,
+    echoExcludedBytes: observation.echoExcludedBytes,
+    observedEventTypes: observation.observedEventTypes
+      .slice(0, MAX_EVENT_TYPES)
+      .map((eventType) => truncate(eventType, MAX_EVENT_TYPE_LENGTH)),
+    eventTypesTruncated: observation.eventTypesTruncated,
+    ...(suppressedSinceLastEmission > 0 ? { suppressedSinceLastEmission } : {}),
+  });
 }

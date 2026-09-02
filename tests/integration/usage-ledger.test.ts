@@ -23,7 +23,10 @@ import {
 } from "@/repository/statistics";
 import { findReadonlyUsageLogsBatchForKey } from "@/repository/usage-logs";
 import { findDailyProviderLeaderboard } from "@/repository/leaderboard";
-import { getProviderStatistics } from "@/repository/provider";
+import {
+  getProviderStatistics,
+  __resetProviderStatisticsCacheForTests,
+} from "@/repository/provider";
 import type { HedgeLoserBilling, StoredCostBreakdown } from "@/types/cost-breakdown";
 import type { SpecialSetting } from "@/types/special-settings";
 
@@ -1237,7 +1240,9 @@ run("usage ledger integration", () => {
           .set({ successRateOutcome: null })
           .where(eq(usageLedger.requestId, requestId));
 
-        const summary = await backfillUsageLedger();
+        // These rows already exist in the ledger; only repair mode re-derives
+        // them (the default "sync" mode is a missing-row anti-join).
+        const summary = await backfillUsageLedger({ mode: "repair" });
         expect(summary.alreadyExisted).toBeGreaterThanOrEqual(1);
 
         const ledgerRow = await selectLedgerRowByRequestId(requestId);
@@ -1272,14 +1277,14 @@ run("usage ledger integration", () => {
           })
           .where(eq(usageLedger.requestId, requestId));
 
-        const summary = await backfillUsageLedger();
+        const summary = await backfillUsageLedger({ mode: "repair" });
         expect(summary.alreadyExisted).toBeGreaterThanOrEqual(1);
 
         const repaired = await selectLedgerRowByRequestId(requestId);
         expect(repaired?.finalProviderId).toBe(winnerProviderId);
         expect(repaired?.costUsd).toBe("9.876000000000000");
 
-        await backfillUsageLedger();
+        await backfillUsageLedger({ mode: "repair" });
         const afterSecondRun = await selectLedgerRowByRequestId(requestId);
         expect(afterSecondRun?.finalProviderId).toBe(winnerProviderId);
         expect(afterSecondRun?.costUsd).toBe("9.876000000000000");
@@ -1724,6 +1729,329 @@ run("usage ledger integration", () => {
         }),
       ]);
     });
+
+    test("provider leaderboard hedge gate: fast path equals the full attribution CTE", async () => {
+      const winnerProviderId = nextProviderId();
+      const loserProviderId = nextProviderId();
+      const userId = nextUserId();
+      const [vendor] = await db
+        .insert(providerVendors)
+        .values({
+          websiteDomain: `${KEY_PREFIX}-hedge-gate.example`,
+          displayName: "hedge-gate-test",
+        })
+        .returning({ id: providerVendors.id });
+      if (!vendor) throw new Error("failed to insert provider vendor test row");
+
+      await db.insert(providers).values([
+        {
+          id: winnerProviderId,
+          name: `${KEY_PREFIX}-gate-winner`,
+          url: "https://gate-winner.example/v1",
+          key: "sk-gate-winner",
+          providerVendorId: vendor.id,
+          providerType: "claude",
+        },
+        {
+          id: loserProviderId,
+          name: `${KEY_PREFIX}-gate-loser`,
+          url: "https://gate-loser.example/v1",
+          key: "sk-gate-loser",
+          providerVendorId: vendor.id,
+          providerType: "claude",
+        },
+      ]);
+
+      await insertMessageRequestRow({
+        key: nextKey("hedge-gate-plain"),
+        userId,
+        providerId: winnerProviderId,
+        model: "gate-model",
+        statusCode: 200,
+        costUsd: "0.300000000000000",
+        inputTokens: 100,
+        outputTokens: 20,
+        cacheCreationInputTokens: 10,
+        cacheReadInputTokens: 5,
+        createdAt: new Date(),
+      });
+
+      const { __resetHedgeLoserGateCacheForTests, __setHedgeLoserGateCacheForTests } = await import(
+        "@/repository/_shared/provider-billing-events"
+      );
+
+      // Earlier suites in this file may have left hedge-loser rows, so the
+      // GLOBAL gate state is not deterministic here. The contract under test
+      // is routing + equivalence: force each gate value and require both
+      // paths to agree exactly for a provider whose requests carry no losers.
+      __setHedgeLoserGateCacheForTests(false);
+      const fastResult = await findDailyProviderLeaderboard(undefined, true);
+
+      __setHedgeLoserGateCacheForTests(true);
+      try {
+        const fullResult = await findDailyProviderLeaderboard(undefined, true);
+        const pick = (rows: typeof fastResult, id: number) =>
+          rows.find((entry) => entry.providerId === id);
+        const fastWinner = pick(fastResult, winnerProviderId);
+        const fullWinner = pick(fullResult, winnerProviderId);
+        expect(fastWinner).toBeDefined();
+        expect(fullWinner).toBeDefined();
+        expect(fastWinner?.totalRequests).toBe(fullWinner?.totalRequests);
+        expect(fastWinner?.totalCost).toBeCloseTo(fullWinner?.totalCost ?? 0, 12);
+        expect(fastWinner?.totalTokens).toBe(fullWinner?.totalTokens);
+        expect(fastWinner?.modelStats).toEqual(fullWinner?.modelStats);
+      } finally {
+        __resetHedgeLoserGateCacheForTests();
+      }
+
+      // Natural probe: a real billed loser row must be visible to the gate.
+      await db.execute(sql`
+        UPDATE usage_ledger
+        SET hedge_losers = jsonb_build_array(jsonb_build_object(
+          'providerId', ${loserProviderId}::int,
+          'providerName', 'gate-loser',
+          'attemptNumber', 1,
+          'costUsd', '0.100000000000000',
+          'billingStatus', 'settled',
+          'inputTokens', 10,
+          'outputTokens', 5,
+          'cacheCreationInputTokens', 0,
+          'cacheReadInputTokens', 0
+        ))
+        WHERE request_id = (
+          SELECT id FROM message_request
+          WHERE key LIKE ${`${KEY_PREFIX}-hedge-gate-plain%`}
+          ORDER BY id DESC LIMIT 1
+        )
+      `);
+      __resetHedgeLoserGateCacheForTests();
+      try {
+        const { anyHedgeLoserRowsExist } = await import(
+          "@/repository/_shared/provider-billing-events"
+        );
+        // Other suites may also have loser rows; the probe must at minimum
+        // see THIS freshly inserted one.
+        expect(await anyHedgeLoserRowsExist()).toBe(true);
+      } finally {
+        await db.execute(sql`
+          UPDATE usage_ledger SET hedge_losers = NULL
+          WHERE request_id = (
+            SELECT id FROM message_request
+            WHERE key LIKE ${`${KEY_PREFIX}-hedge-gate-plain%`}
+            ORDER BY id DESC LIMIT 1
+          )
+        `);
+        __resetHedgeLoserGateCacheForTests();
+      }
+    });
+
+    test("provider statistics hedge gate: fast path equals the full attribution query", async () => {
+      const activeProviderId = nextProviderId();
+      const idleProviderId = nextProviderId();
+      const userId = nextUserId();
+      const [vendor] = await db
+        .insert(providerVendors)
+        .values({
+          websiteDomain: `${KEY_PREFIX}-stats-gate.example`,
+          displayName: "stats-gate-test",
+        })
+        .returning({ id: providerVendors.id });
+      if (!vendor) throw new Error("failed to insert provider vendor test row");
+
+      await db.insert(providers).values([
+        {
+          id: activeProviderId,
+          name: `${KEY_PREFIX}-stats-active`,
+          url: "https://stats-active.example/v1",
+          key: "sk-stats-active",
+          providerVendorId: vendor.id,
+          providerType: "claude",
+        },
+        {
+          id: idleProviderId,
+          name: `${KEY_PREFIX}-stats-idle`,
+          url: "https://stats-idle.example/v1",
+          key: "sk-stats-idle",
+          providerVendorId: vendor.id,
+          providerType: "claude",
+        },
+      ]);
+
+      // Two billable rows sharing one created_at pin the shared
+      // ORDER BY created_at DESC, request_id DESC tiebreak: the row with the
+      // higher request_id (inserted later) must win latest_call on BOTH paths.
+      const now = new Date();
+      await insertMessageRequestRow({
+        key: nextKey("stats-tie-a"),
+        userId,
+        providerId: activeProviderId,
+        model: "stats-tie-model-a",
+        statusCode: 200,
+        costUsd: "0.300000000000000",
+        createdAt: now,
+      });
+      await insertMessageRequestRow({
+        key: nextKey("stats-tie-b"),
+        userId,
+        providerId: activeProviderId,
+        model: "stats-tie-model-b",
+        statusCode: 200,
+        costUsd: "0.200000000000000",
+        createdAt: now,
+      });
+      // 8 days old: outside both the today window and the 7-day latest_call
+      // window under any timezone offset.
+      await insertMessageRequestRow({
+        key: nextKey("stats-old"),
+        userId,
+        providerId: activeProviderId,
+        model: "stats-old-model",
+        statusCode: 200,
+        costUsd: "0.500000000000000",
+        createdAt: new Date(now.getTime() - 8 * 24 * 60 * 60 * 1000),
+      });
+      // Non-billable endpoint rows must stay excluded on both paths
+      // (is_billable and the legacy regex predicate agree).
+      await insertMessageRequestRow({
+        key: nextKey("stats-count-tokens"),
+        userId,
+        providerId: activeProviderId,
+        model: "stats-count-model",
+        statusCode: 200,
+        costUsd: "0.990000000000000",
+        endpoint: "/v1/messages/count_tokens",
+        createdAt: now,
+      });
+
+      const { __resetHedgeLoserGateCacheForTests, __setHedgeLoserGateCacheForTests } = await import(
+        "@/repository/_shared/provider-billing-events"
+      );
+
+      // The global gate state is not deterministic on the shared DB (other
+      // suites leave loser rows); the contract under test is routing +
+      // equivalence for providers whose requests carry no losers.
+      __setHedgeLoserGateCacheForTests(false);
+      __resetProviderStatisticsCacheForTests();
+      const fastRows = await getProviderStatistics();
+
+      __setHedgeLoserGateCacheForTests(true);
+      let fullRows: Awaited<ReturnType<typeof getProviderStatistics>>;
+      try {
+        __resetProviderStatisticsCacheForTests();
+        fullRows = await getProviderStatistics();
+      } finally {
+        __resetHedgeLoserGateCacheForTests();
+      }
+
+      const pick = (rows: typeof fastRows, id: number) => rows.find((entry) => entry.id === id);
+      const fastActive = pick(fastRows, activeProviderId);
+      const fullActive = pick(fullRows, activeProviderId);
+      const fastIdle = pick(fastRows, idleProviderId);
+      const fullIdle = pick(fullRows, idleProviderId);
+      expect(fastActive).toBeDefined();
+      expect(fullActive).toBeDefined();
+      expect(fastIdle).toBeDefined();
+      expect(fullIdle).toBeDefined();
+
+      expect(fastActive?.today_cost).toBe(fullActive?.today_cost);
+      expect(fastActive?.today_calls).toBe(fullActive?.today_calls);
+      // The raw driver returns timestamptz as string/Date depending on
+      // configuration; normalize both sides to epoch millis for comparison.
+      const epochMillis = (value: unknown) =>
+        value == null ? null : new Date(value as string).getTime();
+
+      expect(epochMillis(fastActive?.last_call_time)).toBe(epochMillis(fullActive?.last_call_time));
+      expect(fastActive?.last_call_model).toBe(fullActive?.last_call_model);
+      expect(fastIdle?.today_cost).toBe(fullIdle?.today_cost);
+      expect(fastIdle?.today_calls).toBe(fullIdle?.today_calls);
+      expect(fastIdle?.last_call_time).toBeNull();
+      expect(fastIdle?.last_call_model).toBeNull();
+
+      // Concrete shared semantics: 0.3 + 0.2 today (count_tokens excluded,
+      // 8-day-old row excluded), tie resolves to the later request_id.
+      expect(fastActive?.today_cost).toBe("0.500000000000000");
+      expect(fastActive?.today_calls).toBe(2);
+      expect(fastActive?.last_call_model).toBe("stats-tie-model-b");
+      expect(fullActive?.today_cost).toBe("0.500000000000000");
+      expect(fullActive?.today_calls).toBe(2);
+      expect(fullActive?.last_call_model).toBe("stats-tie-model-b");
+      expect(fastIdle?.today_cost).toBe("0");
+      expect(fastIdle?.today_calls).toBe(0);
+    });
+
+    test("provider leaderboard merged pass excludes blank models and honors the providerType filter", async () => {
+      const claudeProviderId = nextProviderId();
+      const openaiProviderId = nextProviderId();
+      const userId = nextUserId();
+      const [vendor] = await db
+        .insert(providerVendors)
+        .values({
+          websiteDomain: `${KEY_PREFIX}-grouping-sets.example`,
+          displayName: "grouping-sets-test",
+        })
+        .returning({ id: providerVendors.id });
+      if (!vendor) throw new Error("failed to insert provider vendor test row");
+
+      await db.insert(providers).values([
+        {
+          id: claudeProviderId,
+          name: `${KEY_PREFIX}-claude-type`,
+          url: "https://claude-type.example/v1",
+          key: "sk-claude-type",
+          providerVendorId: vendor.id,
+          providerType: "claude",
+        },
+        {
+          id: openaiProviderId,
+          name: `${KEY_PREFIX}-openai-type`,
+          url: "https://openai-type.example/v1",
+          key: "sk-openai-type",
+          providerVendorId: vendor.id,
+          providerType: "openai-compatible",
+        },
+      ]);
+
+      await insertMessageRequestRow({
+        key: nextKey("grouping-sets-claude"),
+        userId,
+        providerId: claudeProviderId,
+        model: "claude-sonnet-4",
+        statusCode: 200,
+        costUsd: "0.300000000000000",
+        inputTokens: 100,
+        outputTokens: 20,
+        createdAt: new Date(),
+      });
+      // Blank model on the openai-compatible provider: it must still count in
+      // the provider-level grain while producing NO modelStats row
+      // (NULLIF(TRIM(model)) collapses it to NULL).
+      await insertMessageRequestRow({
+        key: nextKey("grouping-sets-blank-model"),
+        userId,
+        providerId: openaiProviderId,
+        model: "   ",
+        statusCode: 200,
+        costUsd: "0.100000000000000",
+        inputTokens: 10,
+        outputTokens: 5,
+        createdAt: new Date(),
+      });
+
+      const leaderboard = await findDailyProviderLeaderboard(undefined, true);
+      const claude = leaderboard.find((entry) => entry.providerId === claudeProviderId);
+      const openai = leaderboard.find((entry) => entry.providerId === openaiProviderId);
+
+      expect(claude).toMatchObject({ totalRequests: 1, totalCost: 0.3 });
+      expect(claude?.modelStats).toHaveLength(1);
+      expect(claude?.modelStats?.[0]?.model).toBe("claude-sonnet-4");
+
+      expect(openai).toMatchObject({ totalRequests: 1, totalCost: 0.1 });
+      expect(openai?.modelStats).toEqual([]);
+
+      const claudeOnly = await findDailyProviderLeaderboard("claude");
+      expect(claudeOnly.find((entry) => entry.providerId === claudeProviderId)).toBeDefined();
+      expect(claudeOnly.find((entry) => entry.providerId === openaiProviderId)).toBeUndefined();
+    });
   });
 
   describe("ledger-only mode", () => {
@@ -1824,5 +2152,52 @@ run("usage ledger integration", () => {
 
     const result = await findUsageLogs({ userId, page: 1, pageSize: 5 });
     expect(Array.isArray(result.logs)).toBe(true);
+  });
+
+  test("usage logs summary/rows split composes identically to findUsageLogsWithDetails", async () => {
+    const key = nextKey("summary-rows-split");
+    const userId = nextUserId();
+    const providerId = nextProviderId();
+
+    await insertMessageRequestRow({
+      key,
+      userId,
+      providerId,
+      model: "split-model",
+      statusCode: 200,
+      costUsd: "0.020000000000000",
+      inputTokens: 30,
+      outputTokens: 10,
+      createdAt: new Date(),
+    });
+    await insertMessageRequestRow({
+      key: nextKey("summary-rows-split-2"),
+      userId,
+      providerId,
+      model: "split-model",
+      statusCode: 500,
+      costUsd: "0.030000000000000",
+      inputTokens: 5,
+      outputTokens: 5,
+      createdAt: new Date(),
+    });
+
+    const { findUsageLogsSummary, findUsageLogsRows, findUsageLogsWithDetails } = await import(
+      "@/repository/usage-logs"
+    );
+
+    const filters = { userId, page: 1, pageSize: 10 } as const;
+    const [summaryPart, rowsPart, combined] = await Promise.all([
+      findUsageLogsSummary(filters),
+      findUsageLogsRows(filters),
+      findUsageLogsWithDetails(filters),
+    ]);
+
+    expect(summaryPart.total).toBe(combined.total);
+    expect(summaryPart.summary).toEqual(combined.summary);
+    expect(rowsPart.logs).toEqual(combined.logs);
+    expect(summaryPart.total).toBeGreaterThanOrEqual(2);
+    expect(summaryPart.summary.totalRequests).toBeGreaterThanOrEqual(2);
+    expect(summaryPart.summary.totalCost).toBeCloseTo(0.05, 10);
   });
 });

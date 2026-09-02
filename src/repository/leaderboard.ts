@@ -11,7 +11,10 @@ import {
   LEDGER_SUCCESS_RATE_COUNTABLE_CONDITION,
   LEDGER_SUCCESS_RATE_SUCCESS_CONDITION,
 } from "./_shared/ledger-conditions";
-import { buildProviderBillingEventsQuery } from "./_shared/provider-billing-events";
+import {
+  anyHedgeLoserRowsExist,
+  buildProviderBillingEventsQuery,
+} from "./_shared/provider-billing-events";
 import { getSystemSettings } from "./system-config";
 
 const clampRatio01 = (value: number | null | undefined) => Math.min(Math.max(value ?? 0, 0), 1);
@@ -346,38 +349,46 @@ async function findLeaderboardWithTimezone(
     whereConditions.push(userFilterCondition);
   }
 
-  const rankings = await db
-    .select({
-      userId: usageLedger.userId,
-      userName: users.name,
-      totalRequests: sql<number>`count(*)::double precision`,
-      totalCost: sql<string>`COALESCE(sum(${usageLedger.costUsd}), 0)`,
-      totalTokens: sql<number>`COALESCE(
-        sum(
-          ${usageLedger.inputTokens} +
-          ${usageLedger.outputTokens} +
-          COALESCE(${usageLedger.cacheCreationInputTokens}, 0) +
-          COALESCE(${usageLedger.cacheReadInputTokens}, 0)
-        )::double precision,
-        0::double precision
-      )`,
-    })
-    .from(usageLedger)
-    .innerJoin(users, and(sql`${usageLedger.userId} = ${users.id}`, isNull(users.deletedAt)))
-    .where(and(...whereConditions))
-    .groupBy(usageLedger.userId, users.name)
-    .orderBy(desc(sql`COALESCE(sum(${usageLedger.costUsd}), 0)`));
+  const usersJoin = and(sql`${usageLedger.userId} = ${users.id}`, isNull(users.deletedAt));
+  const whereClause = and(...whereConditions);
+  const totalRequestsExpr = sql<number>`count(*)::double precision`;
+  const totalCostExpr = sql<string>`COALESCE(sum(${usageLedger.costUsd}), 0)`;
+  const totalTokensExpr = sql<number>`COALESCE(
+    sum(
+      ${usageLedger.inputTokens} +
+      ${usageLedger.outputTokens} +
+      COALESCE(${usageLedger.cacheCreationInputTokens}, 0) +
+      COALESCE(${usageLedger.cacheReadInputTokens}, 0)
+    )::double precision,
+    0::double precision
+  )`;
 
-  const baseEntries: LeaderboardEntry[] = rankings.map((entry) => ({
-    userId: entry.userId,
-    userName: entry.userName,
-    totalRequests: entry.totalRequests,
-    totalCost: parseFloat(entry.totalCost),
-    totalTokens: entry.totalTokens,
-  }));
+  if (!includeModelStats) {
+    const rankings = await db
+      .select({
+        userId: usageLedger.userId,
+        userName: users.name,
+        totalRequests: totalRequestsExpr,
+        totalCost: totalCostExpr,
+        totalTokens: totalTokensExpr,
+      })
+      .from(usageLedger)
+      .innerJoin(users, usersJoin)
+      .where(whereClause)
+      .groupBy(usageLedger.userId, users.name)
+      .orderBy(desc(totalCostExpr));
 
-  if (!includeModelStats) return baseEntries;
+    return rankings.map((entry) => ({
+      userId: entry.userId,
+      userName: entry.userName,
+      totalRequests: entry.totalRequests,
+      totalCost: parseFloat(entry.totalCost),
+      totalTokens: entry.totalTokens,
+    }));
+  }
 
+  // User-level rows (modelGrain = 1) and per-model rows (modelGrain = 0) come
+  // out of ONE GROUPING SETS pass over the ledger instead of two full scans.
   const systemSettings = await getSystemSettings();
   const billingModelSource = systemSettings.billingModelSource;
   const rawModelField =
@@ -385,31 +396,39 @@ async function findLeaderboardWithTimezone(
       ? sql<string>`COALESCE(${usageLedger.originalModel}, ${usageLedger.model})`
       : sql<string>`COALESCE(${usageLedger.model}, ${usageLedger.originalModel})`;
   const modelField = sql<string | null>`NULLIF(TRIM(${rawModelField}), '')`;
+  const modelGrainExpr = sql<number>`GROUPING(${modelField})`;
 
-  const modelRows = await db
+  const rows = await db
     .select({
       userId: usageLedger.userId,
+      userName: users.name,
       model: modelField,
-      totalRequests: sql<number>`count(*)::double precision`,
-      totalCost: sql<string>`COALESCE(sum(${usageLedger.costUsd}), 0)`,
-      totalTokens: sql<number>`COALESCE(
-        sum(
-          ${usageLedger.inputTokens} +
-          ${usageLedger.outputTokens} +
-          COALESCE(${usageLedger.cacheCreationInputTokens}, 0) +
-          COALESCE(${usageLedger.cacheReadInputTokens}, 0)
-        )::double precision,
-        0::double precision
-      )`,
+      modelGrain: modelGrainExpr,
+      totalRequests: totalRequestsExpr,
+      totalCost: totalCostExpr,
+      totalTokens: totalTokensExpr,
     })
     .from(usageLedger)
-    .innerJoin(users, and(sql`${usageLedger.userId} = ${users.id}`, isNull(users.deletedAt)))
-    .where(and(...whereConditions))
-    .groupBy(usageLedger.userId, modelField)
-    .orderBy(desc(sql`COALESCE(sum(${usageLedger.costUsd}), 0)`));
+    .innerJoin(users, usersJoin)
+    .where(whereClause)
+    .groupBy(
+      sql`GROUPING SETS ((${usageLedger.userId}, ${users.name}), (${usageLedger.userId}, ${modelField}))`
+    )
+    .orderBy(desc(modelGrainExpr), desc(totalCostExpr));
 
+  const baseEntries: LeaderboardEntry[] = [];
   const modelStatsByUser = new Map<number, UserModelStat[]>();
-  for (const row of modelRows) {
+  for (const row of rows) {
+    if (row.modelGrain === 1) {
+      baseEntries.push({
+        userId: row.userId,
+        userName: row.userName,
+        totalRequests: row.totalRequests,
+        totalCost: parseFloat(row.totalCost),
+        totalTokens: row.totalTokens,
+      });
+      continue;
+    }
     const stats = modelStatsByUser.get(row.userId) ?? [];
     stats.push({
       model: row.model,
@@ -645,16 +664,41 @@ async function findProviderLeaderboardWithTimezone(
     dateRange,
     sql`ledger.created_at`
   );
-  const providerBillingEvents = sql`(
-    ${buildProviderBillingEventsQuery({ ledgerCreatedAtCondition: ledgerDateCondition })}
-  ) AS provider_billing_event`;
+  // Hedge-loser gate: while no billed loser row exists anywhere in the
+  // ledger (this deployment has never enabled provider racing), the full
+  // attribution CTE degenerates to the ledger rows themselves. The thin
+  // subquery below keeps the exact provider_billing_event shape the outer
+  // aggregate consumes while letting the planner push it into the widened
+  // partial covering index (index-only). The first real loser row flips
+  // the gate within its TTL and this falls back to the full CTE.
+  const providerBillingEvents = (await anyHedgeLoserRowsExist())
+    ? sql`(
+        ${buildProviderBillingEventsQuery({ ledgerCreatedAtCondition: ledgerDateCondition })}
+      ) AS provider_billing_event`
+    : sql`(
+        SELECT
+          ledger.final_provider_id AS provider_id,
+          ledger.created_at,
+          ledger.model,
+          ledger.original_model,
+          ledger.success_rate_outcome,
+          ledger.ttfb_ms,
+          ledger.duration_ms,
+          ledger.cost_usd,
+          COALESCE(ledger.input_tokens, 0) AS input_tokens,
+          COALESCE(ledger.output_tokens, 0) AS output_tokens,
+          COALESCE(ledger.cache_creation_input_tokens, 0) AS cache_creation_input_tokens,
+          COALESCE(ledger.cache_read_input_tokens, 0) AS cache_read_input_tokens
+        FROM usage_ledger AS ledger
+        WHERE ${ledgerDateCondition}
+          AND ledger.is_billable
+      ) AS provider_billing_event`;
   const eventProviderId = sql<number>`provider_billing_event.provider_id`;
   const eventCost = sql<string>`provider_billing_event.cost_usd`;
   const eventInputTokens = sql<number>`provider_billing_event.input_tokens`;
   const eventOutputTokens = sql<number>`provider_billing_event.output_tokens`;
   const eventCacheCreationTokens = sql<number>`provider_billing_event.cache_creation_input_tokens`;
   const eventCacheReadTokens = sql<number>`provider_billing_event.cache_read_input_tokens`;
-  const eventCreatedAt = sql`provider_billing_event.created_at`;
   const eventSuccessRate = sql<number | null>`
     count(CASE WHEN provider_billing_event.success_rate_outcome = 'success' THEN 1 END)::double precision
     / NULLIF(
@@ -680,10 +724,11 @@ async function findProviderLeaderboardWithTimezone(
     )::double precision,
     0::double precision
   )`;
-  const whereConditions = [
-    buildDateCondition(period, timezone, dateRange, eventCreatedAt),
-    providerType ? eq(providers.providerType, providerType) : undefined,
-  ];
+  // The period window is already enforced inside the event CTE via
+  // ledgerCreatedAtCondition; both winner and hedge-loser events inherit the
+  // ledger row's created_at, so re-filtering on event created_at would only
+  // duplicate the predicate on every aggregated row.
+  const whereConditions = [providerType ? eq(providers.providerType, providerType) : undefined];
 
   const totalRequestsExpr = sql<number>`count(*)::double precision`;
   const totalCostExpr = sql<string>`COALESCE(sum(${eventCost}), 0)`;
@@ -702,49 +747,60 @@ async function findProviderLeaderboardWithTimezone(
     avgCostPerMillionTokens: totalTokens > 0 ? (totalCost * 1_000_000) / totalTokens : null,
   });
 
-  const rankings = await db
-    .select({
-      providerId: eventProviderId,
-      providerName: providers.name,
-      totalRequests: totalRequestsExpr,
-      totalCost: totalCostExpr,
-      totalTokens: totalTokensExpr,
-      successRate: eventSuccessRate,
-      avgTtfbMs: eventAvgTtfbMs,
-      avgTokensPerSecond: eventAvgTokensPerSecond,
-    })
-    .from(providerBillingEvents)
-    .innerJoin(
-      providers,
-      and(sql`${eventProviderId} = ${providers.id}`, isNull(providers.deletedAt))
-    )
-    .where(
-      and(...whereConditions.filter((c): c is NonNullable<(typeof whereConditions)[number]> => !!c))
-    )
-    .groupBy(eventProviderId, providers.name)
-    .orderBy(desc(totalCostExpr));
+  const providersJoin = and(sql`${eventProviderId} = ${providers.id}`, isNull(providers.deletedAt));
+  const whereClause = and(
+    ...whereConditions.filter((c): c is NonNullable<(typeof whereConditions)[number]> => !!c)
+  );
 
-  const baseEntries: ProviderLeaderboardEntry[] = rankings.map((entry) => {
+  const mapProviderEntry = (entry: {
+    providerId: number;
+    providerName: string;
+    totalRequests: number;
+    totalCost: string;
+    totalTokens: number;
+    successRate: number | null;
+    avgTtfbMs: number | null;
+    avgTokensPerSecond: number | null;
+  }): ProviderLeaderboardEntry => {
     const totalCost = parseFloat(entry.totalCost);
-    const totalRequests = entry.totalRequests;
-    const totalTokens = entry.totalTokens;
-    const avgCosts = computeAvgCosts(totalCost, totalRequests, totalTokens);
+    const avgCosts = computeAvgCosts(totalCost, entry.totalRequests, entry.totalTokens);
     return {
       providerId: entry.providerId,
       providerName: entry.providerName,
-      totalRequests,
+      totalRequests: entry.totalRequests,
       totalCost,
-      totalTokens,
+      totalTokens: entry.totalTokens,
       successRate: clampRatio01Nullable(entry.successRate),
       avgTtfbMs: entry.avgTtfbMs ?? 0,
       avgTokensPerSecond: entry.avgTokensPerSecond ?? 0,
       ...avgCosts,
     };
-  });
+  };
 
-  if (!includeModelStats) return baseEntries;
+  if (!includeModelStats) {
+    const rankings = await db
+      .select({
+        providerId: eventProviderId,
+        providerName: providers.name,
+        totalRequests: totalRequestsExpr,
+        totalCost: totalCostExpr,
+        totalTokens: totalTokensExpr,
+        successRate: eventSuccessRate,
+        avgTtfbMs: eventAvgTtfbMs,
+        avgTokensPerSecond: eventAvgTokensPerSecond,
+      })
+      .from(providerBillingEvents)
+      .innerJoin(providers, providersJoin)
+      .where(whereClause)
+      .groupBy(eventProviderId, providers.name)
+      .orderBy(desc(totalCostExpr));
 
-  // Model breakdown per provider
+    return rankings.map(mapProviderEntry);
+  }
+
+  // Model breakdown per provider. Provider-level rows (modelGrain = 1) and
+  // per-model rows (modelGrain = 0) come out of ONE GROUPING SETS pass over
+  // the event CTE — the previous shape executed the full CTE twice.
   const systemSettings = await getSystemSettings();
   const billingModelSource = systemSettings.billingModelSource;
   const rawModelField =
@@ -752,11 +808,14 @@ async function findProviderLeaderboardWithTimezone(
       ? sql<string>`COALESCE(provider_billing_event.original_model, provider_billing_event.model)`
       : sql<string>`COALESCE(provider_billing_event.model, provider_billing_event.original_model)`;
   const modelField = sql<string>`NULLIF(TRIM(${rawModelField}), '')`;
+  const modelGrainExpr = sql<number>`GROUPING(${modelField})`;
 
-  const modelRows = await db
+  const rows = await db
     .select({
       providerId: eventProviderId,
+      providerName: providers.name,
       model: modelField,
+      modelGrain: modelGrainExpr,
       totalRequests: totalRequestsExpr,
       totalCost: totalCostExpr,
       totalTokens: totalTokensExpr,
@@ -765,30 +824,31 @@ async function findProviderLeaderboardWithTimezone(
       avgTokensPerSecond: eventAvgTokensPerSecond,
     })
     .from(providerBillingEvents)
-    .innerJoin(
-      providers,
-      and(sql`${eventProviderId} = ${providers.id}`, isNull(providers.deletedAt))
+    .innerJoin(providers, providersJoin)
+    .where(whereClause)
+    .groupBy(
+      sql`GROUPING SETS ((${eventProviderId}, ${providers.name}), (${eventProviderId}, ${modelField}))`
     )
-    .where(
-      and(...whereConditions.filter((c): c is NonNullable<(typeof whereConditions)[number]> => !!c))
-    )
-    .groupBy(eventProviderId, modelField)
-    .orderBy(desc(totalCostExpr), desc(sql`count(*)`));
+    .orderBy(desc(modelGrainExpr), desc(totalCostExpr), desc(sql`count(*)`));
 
+  const baseEntries: ProviderLeaderboardEntry[] = [];
   const modelStatsByProvider = new Map<number, ModelProviderStat[]>();
-  for (const row of modelRows) {
+  const basisDisclosureRequired = billingModelSource !== "original";
+
+  for (const row of rows) {
+    if (row.modelGrain === 1) {
+      baseEntries.push(mapProviderEntry(row));
+      continue;
+    }
     if (!row.model) continue;
     const totalCost = parseFloat(row.totalCost);
-    const totalRequests = row.totalRequests;
-    const totalTokens = row.totalTokens;
-    const avgCosts = computeAvgCosts(totalCost, totalRequests, totalTokens);
+    const avgCosts = computeAvgCosts(totalCost, row.totalRequests, row.totalTokens);
     const stats = modelStatsByProvider.get(row.providerId) ?? [];
-    const basisDisclosureRequired = billingModelSource !== "original";
     stats.push({
       model: row.model,
-      totalRequests,
+      totalRequests: row.totalRequests,
       totalCost,
-      totalTokens,
+      totalTokens: row.totalTokens,
       successRate: basisDisclosureRequired ? null : clampRatio01Nullable(row.successRate),
       avgTtfbMs: row.avgTtfbMs ?? 0,
       avgTokensPerSecond: row.avgTokensPerSecond ?? 0,
@@ -850,10 +910,24 @@ async function findProviderCacheHitRateLeaderboardWithTimezone(
     providerType ? eq(providers.providerType, providerType) : undefined,
   ];
 
-  const rankings = await db
+  // Provider-level rows (modelGrain = 1) and per-model rows (modelGrain = 0)
+  // come out of ONE GROUPING SETS pass over the ledger. The previous shape
+  // unconditionally ran the second model-breakdown scan for every request.
+  const systemSettings = await getSystemSettings();
+  const billingModelSource = systemSettings.billingModelSource;
+  const rawModelField =
+    billingModelSource === "original"
+      ? sql<string>`COALESCE(${usageLedger.originalModel}, ${usageLedger.model})`
+      : sql<string>`COALESCE(${usageLedger.model}, ${usageLedger.originalModel})`;
+  const modelField = sql<string>`NULLIF(TRIM(${rawModelField}), '')`;
+  const modelGrainExpr = sql<number>`GROUPING(${modelField})`;
+
+  const rows = await db
     .select({
       providerId: usageLedger.finalProviderId,
       providerName: providers.name,
+      model: modelField,
+      modelGrain: modelGrainExpr,
       totalRequests: sql<number>`count(*)::double precision`,
       totalCost: sql<string>`COALESCE(sum(${usageLedger.costUsd}), 0)`,
       cacheReadTokens: sumCacheReadTokens,
@@ -869,48 +943,36 @@ async function findProviderCacheHitRateLeaderboardWithTimezone(
     .where(
       and(...whereConditions.filter((c): c is NonNullable<(typeof whereConditions)[number]> => !!c))
     )
-    .groupBy(usageLedger.finalProviderId, providers.name)
-    .orderBy(desc(cacheHitRateExpr), desc(sql`count(*)`));
-
-  // Model-level cache hit breakdown per provider
-  const systemSettings = await getSystemSettings();
-  const billingModelSource = systemSettings.billingModelSource;
-  const rawModelField =
-    billingModelSource === "original"
-      ? sql<string>`COALESCE(${usageLedger.originalModel}, ${usageLedger.model})`
-      : sql<string>`COALESCE(${usageLedger.model}, ${usageLedger.originalModel})`;
-  const modelField = sql<string>`NULLIF(TRIM(${rawModelField}), '')`;
-
-  const modelTotalInput = sql<number>`COALESCE(sum(${totalInputTokensExpr})::double precision, 0::double precision)`;
-  const modelCacheRead = sql<number>`COALESCE(sum(COALESCE(${usageLedger.cacheReadInputTokens}, 0))::double precision, 0::double precision)`;
-  const modelCacheHitRate = sql<number>`COALESCE(
-    ${modelCacheRead} / NULLIF(${modelTotalInput}, 0::double precision),
-    0::double precision
-  )`;
-
-  const modelRows = await db
-    .select({
-      providerId: usageLedger.finalProviderId,
-      model: modelField,
-      totalRequests: sql<number>`count(*)::double precision`,
-      cacheReadTokens: modelCacheRead,
-      totalInputTokens: modelTotalInput,
-      cacheHitRate: modelCacheHitRate,
-    })
-    .from(usageLedger)
-    .innerJoin(
-      providers,
-      and(sql`${usageLedger.finalProviderId} = ${providers.id}`, isNull(providers.deletedAt))
+    .groupBy(
+      sql`GROUPING SETS ((${usageLedger.finalProviderId}, ${providers.name}), (${usageLedger.finalProviderId}, ${modelField}))`
     )
-    .where(
-      and(...whereConditions.filter((c): c is NonNullable<(typeof whereConditions)[number]> => !!c))
-    )
-    .groupBy(usageLedger.finalProviderId, modelField)
-    .orderBy(desc(modelCacheHitRate), desc(sql`count(*)`));
+    .orderBy(desc(modelGrainExpr), desc(cacheHitRateExpr), desc(sql`count(*)`));
 
-  // Group model stats by providerId
+  const rankings: Array<{
+    providerId: number;
+    providerName: string;
+    totalRequests: number;
+    totalCost: string;
+    cacheReadTokens: number;
+    cacheCreationCost: string;
+    totalInputTokens: number;
+    cacheHitRate: number;
+  }> = [];
   const modelStatsByProvider = new Map<number, ModelCacheHitStat[]>();
-  for (const row of modelRows) {
+  for (const row of rows) {
+    if (row.modelGrain === 1) {
+      rankings.push({
+        providerId: row.providerId,
+        providerName: row.providerName,
+        totalRequests: row.totalRequests,
+        totalCost: row.totalCost,
+        cacheReadTokens: row.cacheReadTokens,
+        cacheCreationCost: row.cacheCreationCost,
+        totalInputTokens: row.totalInputTokens,
+        cacheHitRate: row.cacheHitRate,
+      });
+      continue;
+    }
     if (!row.model) continue;
     const stats = modelStatsByProvider.get(row.providerId) ?? [];
     stats.push({
@@ -979,24 +1041,20 @@ async function findUserCacheHitRateLeaderboardWithTimezone(
     whereConditions.push(userFilterCondition);
   }
 
-  const rankings = await db
-    .select({
-      userId: usageLedger.userId,
-      userName: users.name,
-      totalRequests: sql<number>`count(*)::double precision`,
-      totalCost: sql<string>`COALESCE(sum(${usageLedger.costUsd}), 0)`,
-      cacheReadTokens: sumCacheReadTokens,
-      cacheCreationCost: sumCacheCreationCost,
-      totalInputTokens: sumTotalInputTokens,
-      cacheHitRate: cacheHitRateExpr,
-    })
-    .from(usageLedger)
-    .innerJoin(users, and(sql`${usageLedger.userId} = ${users.id}`, isNull(users.deletedAt)))
-    .where(and(...whereConditions))
-    .groupBy(usageLedger.userId, users.name)
-    .orderBy(desc(cacheHitRateExpr), desc(sql`count(*)`), asc(users.name), asc(usageLedger.userId));
+  const usersJoin = and(sql`${usageLedger.userId} = ${users.id}`, isNull(users.deletedAt));
+  const whereClause = and(...whereConditions);
+  const totalRequestsExpr = sql<number>`count(*)::double precision`;
 
-  const baseEntries: UserCacheHitRateLeaderboardEntry[] = rankings.map((entry) => ({
+  const mapBaseEntry = (entry: {
+    userId: number;
+    userName: string;
+    totalRequests: number;
+    totalCost: string;
+    cacheReadTokens: number;
+    cacheCreationCost: string;
+    totalInputTokens: number;
+    cacheHitRate: number;
+  }): UserCacheHitRateLeaderboardEntry => ({
     userId: entry.userId,
     userName: entry.userName,
     totalRequests: entry.totalRequests,
@@ -1006,10 +1064,36 @@ async function findUserCacheHitRateLeaderboardWithTimezone(
     totalInputTokens: entry.totalInputTokens,
     totalTokens: entry.totalInputTokens,
     cacheHitRate: clampRatio01(entry.cacheHitRate),
-  }));
+  });
 
-  if (!includeModelStats) return baseEntries;
+  if (!includeModelStats) {
+    const rankings = await db
+      .select({
+        userId: usageLedger.userId,
+        userName: users.name,
+        totalRequests: totalRequestsExpr,
+        totalCost: sql<string>`COALESCE(sum(${usageLedger.costUsd}), 0)`,
+        cacheReadTokens: sumCacheReadTokens,
+        cacheCreationCost: sumCacheCreationCost,
+        totalInputTokens: sumTotalInputTokens,
+        cacheHitRate: cacheHitRateExpr,
+      })
+      .from(usageLedger)
+      .innerJoin(users, usersJoin)
+      .where(whereClause)
+      .groupBy(usageLedger.userId, users.name)
+      .orderBy(
+        desc(cacheHitRateExpr),
+        desc(sql`count(*)`),
+        asc(users.name),
+        asc(usageLedger.userId)
+      );
 
+    return rankings.map(mapBaseEntry);
+  }
+
+  // User-level rows (modelGrain = 1) and per-model rows (modelGrain = 0) come
+  // out of ONE GROUPING SETS pass over the ledger instead of two full scans.
   const systemSettings = await getSystemSettings();
   const billingModelSource = systemSettings.billingModelSource;
   const rawModelField =
@@ -1017,31 +1101,43 @@ async function findUserCacheHitRateLeaderboardWithTimezone(
       ? sql<string>`COALESCE(${usageLedger.originalModel}, ${usageLedger.model})`
       : sql<string>`COALESCE(${usageLedger.model}, ${usageLedger.originalModel})`;
   const modelField = sql<string | null>`NULLIF(TRIM(${rawModelField}), '')`;
+  const modelGrainExpr = sql<number>`GROUPING(${modelField})`;
 
-  const modelTotalInput = sql<number>`COALESCE(sum(${totalInputTokensExpr})::double precision, 0::double precision)`;
-  const modelCacheRead = sql<number>`COALESCE(sum(COALESCE(${usageLedger.cacheReadInputTokens}, 0))::double precision, 0::double precision)`;
-  const modelCacheHitRate = sql<number>`COALESCE(
-    ${modelCacheRead} / NULLIF(${modelTotalInput}, 0::double precision),
-    0::double precision
-  )`;
-
-  const modelRows = await db
+  const rows = await db
     .select({
       userId: usageLedger.userId,
+      userName: users.name,
       model: modelField,
-      totalRequests: sql<number>`count(*)::double precision`,
-      cacheReadTokens: modelCacheRead,
-      totalInputTokens: modelTotalInput,
-      cacheHitRate: modelCacheHitRate,
+      modelGrain: modelGrainExpr,
+      totalRequests: totalRequestsExpr,
+      totalCost: sql<string>`COALESCE(sum(${usageLedger.costUsd}), 0)`,
+      cacheReadTokens: sumCacheReadTokens,
+      cacheCreationCost: sumCacheCreationCost,
+      totalInputTokens: sumTotalInputTokens,
+      cacheHitRate: cacheHitRateExpr,
     })
     .from(usageLedger)
-    .innerJoin(users, and(sql`${usageLedger.userId} = ${users.id}`, isNull(users.deletedAt)))
-    .where(and(...whereConditions))
-    .groupBy(usageLedger.userId, modelField)
-    .orderBy(desc(modelCacheHitRate), desc(sql`count(*)`), asc(modelField));
+    .innerJoin(users, usersJoin)
+    .where(whereClause)
+    .groupBy(
+      sql`GROUPING SETS ((${usageLedger.userId}, ${users.name}), (${usageLedger.userId}, ${modelField}))`
+    )
+    .orderBy(
+      desc(modelGrainExpr),
+      desc(cacheHitRateExpr),
+      desc(sql`count(*)`),
+      asc(users.name),
+      asc(usageLedger.userId),
+      asc(modelField)
+    );
 
+  const baseEntries: UserCacheHitRateLeaderboardEntry[] = [];
   const modelStatsByUser = new Map<number, UserCacheHitModelStat[]>();
-  for (const row of modelRows) {
+  for (const row of rows) {
+    if (row.modelGrain === 1) {
+      baseEntries.push(mapBaseEntry(row));
+      continue;
+    }
     const stats = modelStatsByUser.get(row.userId) ?? [];
     stats.push({
       model: row.model,

@@ -218,10 +218,12 @@ BEGIN
   IF NEW.blocked_by = 'warmup' THEN
     -- If a ledger row already exists (row was originally non-warmup), mark it as warmup
     -- and sync the latest actual_response_model so audit stays consistent across tables.
+    -- Warmup rows are never billable: clear the stored flag in the same transition.
     UPDATE usage_ledger
     SET blocked_by = 'warmup',
         success_rate_outcome = v_success_rate_outcome,
-        actual_response_model = NEW.actual_response_model
+        actual_response_model = NEW.actual_response_model,
+        is_billable = false
     WHERE request_id = NEW.id;
     RETURN NEW;
   END IF;
@@ -243,7 +245,7 @@ BEGIN
   INSERT INTO usage_ledger (
     request_id, user_id, key, provider_id, final_provider_id,
     model, original_model, actual_response_model, endpoint, api_type, session_id,
-    status_code, is_success, success_rate_outcome, blocked_by,
+    status_code, is_success, success_rate_outcome, blocked_by, is_billable,
     cost_usd, cost_multiplier, group_cost_multiplier,
     cost_breakdown,
     input_tokens, observed_input_tokens, output_tokens,
@@ -257,6 +259,11 @@ BEGIN
     NEW.id, NEW.user_id, NEW.key, NEW.provider_id, v_final_provider_id,
     NEW.model, NEW.original_model, NEW.actual_response_model, NEW.endpoint, NEW.api_type, NEW.session_id,
     NEW.status_code, v_is_success, v_success_rate_outcome, NEW.blocked_by,
+    (NEW.blocked_by IS NULL AND (
+       NEW.endpoint IS NULL
+       OR LOWER(REGEXP_REPLACE(NEW.endpoint, '/+$', '')) NOT IN
+          ('/v1/messages/count_tokens', '/v1/responses/compact')
+     )),
     NEW.cost_usd, NEW.cost_multiplier, NEW.group_cost_multiplier,
     NEW.cost_breakdown,
     NEW.input_tokens, NEW.observed_input_tokens, NEW.output_tokens,
@@ -282,6 +289,7 @@ BEGIN
     is_success = EXCLUDED.is_success,
     success_rate_outcome = EXCLUDED.success_rate_outcome,
     blocked_by = EXCLUDED.blocked_by,
+    is_billable = EXCLUDED.is_billable,
     cost_usd = EXCLUDED.cost_usd,
     cost_multiplier = EXCLUDED.cost_multiplier,
     group_cost_multiplier = EXCLUDED.group_cost_multiplier,
@@ -314,8 +322,55 @@ END;
 $$ LANGUAGE plpgsql;
 
 DROP TRIGGER IF EXISTS trg_upsert_usage_ledger ON message_request;
-
 CREATE TRIGGER trg_upsert_usage_ledger
-AFTER INSERT OR UPDATE ON message_request
+AFTER INSERT ON message_request
 FOR EACH ROW
+EXECUTE FUNCTION fn_upsert_usage_ledger();
+
+-- WHEN guard: UPDATEs fire only when a ledger-consumed column changed, so
+-- soft-deletes (deleted_at), updated_at touches, and error_stack/error_cause
+-- appends no longer rewrite the full ledger row across its 14 indexes.
+-- PostgreSQL WHEN clauses cannot reference TG_OP, hence the INSERT/UPDATE
+-- split. Column set mirrors fn_upsert_usage_ledger()'s NEW.* reads (minus
+-- immutable id/created_at). Keep in sync with drizzle/0115.
+DROP TRIGGER IF EXISTS trg_upsert_usage_ledger_on_update ON message_request;
+CREATE TRIGGER trg_upsert_usage_ledger_on_update
+AFTER UPDATE ON message_request
+FOR EACH ROW
+WHEN (
+  NEW.user_id IS DISTINCT FROM OLD.user_id
+  OR NEW.key IS DISTINCT FROM OLD.key
+  OR NEW.provider_id IS DISTINCT FROM OLD.provider_id
+  OR NEW.model IS DISTINCT FROM OLD.model
+  OR NEW.original_model IS DISTINCT FROM OLD.original_model
+  OR NEW.actual_response_model IS DISTINCT FROM OLD.actual_response_model
+  OR NEW.endpoint IS DISTINCT FROM OLD.endpoint
+  OR NEW.api_type IS DISTINCT FROM OLD.api_type
+  OR NEW.session_id IS DISTINCT FROM OLD.session_id
+  OR NEW.status_code IS DISTINCT FROM OLD.status_code
+  OR NEW.blocked_by IS DISTINCT FROM OLD.blocked_by
+  OR NEW.error_message IS DISTINCT FROM OLD.error_message
+  OR NEW.provider_chain IS DISTINCT FROM OLD.provider_chain
+  OR NEW.cost_usd IS DISTINCT FROM OLD.cost_usd
+  OR NEW.cost_multiplier IS DISTINCT FROM OLD.cost_multiplier
+  OR NEW.group_cost_multiplier IS DISTINCT FROM OLD.group_cost_multiplier
+  OR NEW.cost_breakdown IS DISTINCT FROM OLD.cost_breakdown
+  OR NEW.input_tokens IS DISTINCT FROM OLD.input_tokens
+  OR NEW.observed_input_tokens IS DISTINCT FROM OLD.observed_input_tokens
+  OR NEW.output_tokens IS DISTINCT FROM OLD.output_tokens
+  OR NEW.cache_write_tokens_reported IS DISTINCT FROM OLD.cache_write_tokens_reported
+  OR NEW.cache_write_accounting IS DISTINCT FROM OLD.cache_write_accounting
+  OR NEW.cache_creation_input_tokens IS DISTINCT FROM OLD.cache_creation_input_tokens
+  OR NEW.cache_read_input_tokens IS DISTINCT FROM OLD.cache_read_input_tokens
+  OR NEW.cache_creation_5m_input_tokens IS DISTINCT FROM OLD.cache_creation_5m_input_tokens
+  OR NEW.cache_creation_1h_input_tokens IS DISTINCT FROM OLD.cache_creation_1h_input_tokens
+  OR NEW.cache_ttl_applied IS DISTINCT FROM OLD.cache_ttl_applied
+  OR NEW.context_1m_applied IS DISTINCT FROM OLD.context_1m_applied
+  OR NEW.swap_cache_ttl_applied IS DISTINCT FROM OLD.swap_cache_ttl_applied
+  OR NEW.special_settings IS DISTINCT FROM OLD.special_settings
+  OR NEW.hedge_losers IS DISTINCT FROM OLD.hedge_losers
+  OR NEW.duration_ms IS DISTINCT FROM OLD.duration_ms
+  OR NEW.ttfb_ms IS DISTINCT FROM OLD.ttfb_ms
+  OR NEW.client_ip IS DISTINCT FROM OLD.client_ip
+)
 EXECUTE FUNCTION fn_upsert_usage_ledger();

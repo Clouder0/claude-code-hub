@@ -17,6 +17,8 @@ interface DatabasePoolConfiguration {
   idleTimeout: number;
   connectTimeout: number;
   fetchTypes: false;
+  statementTimeoutMs?: number;
+  lockTimeoutMs?: number;
 }
 
 interface DatabaseState {
@@ -63,6 +65,8 @@ function resolvePoolConfiguration(): DatabasePoolConfiguration {
     // and reaches process.unhandledRejection. CCH does not use native PostgreSQL array columns, so
     // disable the discovery query and keep operational DB failures inside the awaiting request.
     fetchTypes: false,
+    statementTimeoutMs: env.DB_STATEMENT_TIMEOUT_MS,
+    lockTimeoutMs: env.DB_LOCK_TIMEOUT_MS,
   };
 }
 
@@ -78,6 +82,12 @@ function getConfigurationDifferences(
     differences.push("DB_POOL_CONNECT_TIMEOUT");
   }
   if (existing.fetchTypes !== requested.fetchTypes) differences.push("fetch_types");
+  if (existing.statementTimeoutMs !== requested.statementTimeoutMs) {
+    differences.push("DB_STATEMENT_TIMEOUT_MS");
+  }
+  if (existing.lockTimeoutMs !== requested.lockTimeoutMs) {
+    differences.push("DB_LOCK_TIMEOUT_MS");
+  }
   return differences;
 }
 
@@ -110,6 +120,16 @@ function createDatabaseState(configuration: DatabasePoolConfiguration): Database
     idle_timeout: configuration.idleTimeout,
     connect_timeout: configuration.connectTimeout,
     fetch_types: configuration.fetchTypes,
+    // 借鉴上游 #1341：连接级超时让慢 SQL / 锁等待无法无限挂起流终态化
+    // 的持久写（失败进入既有的重试/缓冲回退路径）。仅在显式配置时下发。
+    connection: {
+      ...(configuration.statementTimeoutMs !== undefined
+        ? { statement_timeout: configuration.statementTimeoutMs }
+        : {}),
+      ...(configuration.lockTimeoutMs !== undefined
+        ? { lock_timeout: configuration.lockTimeoutMs }
+        : {}),
+    },
   });
   const state: DatabaseState = {
     client,

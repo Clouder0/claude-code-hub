@@ -1,7 +1,7 @@
 import { ClientVersionChecker } from "@/lib/client-version-checker";
+import { getCachedSystemSettings } from "@/lib/config";
 import { logger } from "@/lib/logger";
 import { getClientTypeDisplayName, parseUserAgent } from "@/lib/ua-parser";
-import { getSystemSettings } from "@/repository/system-config";
 import type { ProxySession } from "./session";
 
 /**
@@ -28,8 +28,10 @@ export class ProxyVersionGuard {
    */
   static async ensure(session: ProxySession): Promise<Response | null> {
     try {
-      // 1. 检查系统配置
-      const settings = await getSystemSettings();
+      // 1. 检查系统配置：走 60s 进程内缓存（与 warmup/session 守卫同源）。
+      // 此前每请求直查 DB，即使功能关闭也要付一次 SELECT——版本开关晚 ≤60s
+      // 生效无实质影响。
+      const settings = await getCachedSystemSettings();
       if (!settings.enableClientVersionCheck) {
         logger.debug("[ProxyVersionGuard] 版本检查功能已关闭");
         return null; // 功能关闭，放行

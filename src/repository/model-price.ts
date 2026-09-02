@@ -6,6 +6,11 @@ import { modelPrices } from "@/drizzle/schema";
 import { logger } from "@/lib/logger";
 import { buildModelNameFallbackCandidates } from "@/lib/utils/model-name-matching";
 import type { ModelPrice, ModelPriceData, ModelPriceSource } from "@/types/model-price";
+import {
+  getCachedLatestPrice,
+  invalidateLatestPriceCache,
+  setCachedLatestPrice,
+} from "./_shared/model-price-cache";
 import { toModelPrice } from "./_shared/transformers";
 
 /**
@@ -40,6 +45,28 @@ export interface PaginatedResult<T> {
  * 3. aliases 命中候选名
  */
 export async function findLatestPriceByModel(modelName: string): Promise<ModelPrice | null> {
+  // 缓存键统一 trim：写侧失效一律传 trim 后的模型名（actions 归一化），
+  // 读侧入参可能带空白（request.model 是客户端输入）——不归一化会让
+  // 未 trim 键下的缓存逃过写失效，最多陈旧一个 TTL 窗口。与 fallback
+  // 查询内部的 trim 语义一致。
+  const cacheKey = modelName.trim();
+  const cached = getCachedLatestPrice(cacheKey);
+  if (cached) {
+    return cached.value;
+  }
+
+  const value = await queryLatestPriceByModel(modelName);
+  if (value === undefined) {
+    // 查询失败：不缓存，下一请求重试
+    return null;
+  }
+
+  setCachedLatestPrice(cacheKey, value);
+  return value;
+}
+
+/** 实际查询。返回 undefined 表示查询异常（区别于"无价格"的 null）。 */
+async function queryLatestPriceByModel(modelName: string): Promise<ModelPrice | null | undefined> {
   try {
     const selection = {
       id: modelPrices.id,
@@ -68,7 +95,7 @@ export async function findLatestPriceByModel(modelName: string): Promise<ModelPr
       modelName,
       error: error instanceof Error ? error.message : String(error),
     });
-    return null;
+    return undefined;
   }
 }
 
@@ -320,6 +347,7 @@ export async function createModelPrice(
       updatedAt: modelPrices.updatedAt,
     });
 
+  invalidateLatestPriceCache(modelName);
   return toModelPrice(price);
 }
 
@@ -333,20 +361,25 @@ export async function upsertModelPrice(
   source: ModelPriceSource = "manual"
 ): Promise<ModelPrice> {
   // 使用事务确保删除和插入的原子性
-  return await db.transaction(async (tx) => {
-    // 先删除该模型的所有旧记录
-    await tx.delete(modelPrices).where(eq(modelPrices.modelName, modelName));
+  return await db
+    .transaction(async (tx) => {
+      // 先删除该模型的所有旧记录
+      await tx.delete(modelPrices).where(eq(modelPrices.modelName, modelName));
 
-    const [price] = await tx
-      .insert(modelPrices)
-      .values({
-        modelName: modelName,
-        priceData: priceData,
-        source: source,
-      })
-      .returning();
-    return toModelPrice(price);
-  });
+      const [price] = await tx
+        .insert(modelPrices)
+        .values({
+          modelName: modelName,
+          priceData: priceData,
+          source: source,
+        })
+        .returning();
+      return toModelPrice(price);
+    })
+    .finally(() => {
+      // 事务结束（无论成败）后失效：失败回滚时缓存仍持有旧值，语义一致
+      invalidateLatestPriceCache(modelName);
+    });
 }
 
 /**
@@ -354,6 +387,7 @@ export async function upsertModelPrice(
  */
 export async function deleteModelPriceByName(modelName: string): Promise<void> {
   await db.delete(modelPrices).where(eq(modelPrices.modelName, modelName));
+  invalidateLatestPriceCache(modelName);
 }
 
 /**
@@ -403,6 +437,8 @@ export async function deleteCloudPricesNotIn(keepModelNames: string[]): Promise<
   `);
   // 驱动可能以 number/string/bigint 报告受影响行数,统一归一化,避免静默回落 0
   const count = Number((result as unknown as { count?: number | bigint | string }).count ?? 0);
+  // 批量删除无法廉价得知被删集合，整表失效（同步低频，代价可忽略）
+  invalidateLatestPriceCache();
   return Number.isFinite(count) ? count : 0;
 }
 

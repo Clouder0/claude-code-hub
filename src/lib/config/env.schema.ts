@@ -43,6 +43,26 @@ export const EnvSchema = z.object({
   DB_POOL_MAX: optionalNumber(
     z.number().int().min(1, "DB_POOL_MAX 不能小于 1").max(200, "DB_POOL_MAX 不能大于 200")
   ),
+  // 连接级语句/锁超时（毫秒，postgres.js connection 参数）。
+  // - DB_LOCK_TIMEOUT_MS：获取行锁等的上限。推荐生产开启（如 5000）：
+  //   流终态化的持久写遇到维护期锁（REINDEX/VACUUM FULL）快速失败进既有
+  //   3 次重试，而不是无限挂起（借鉴上游 #1341）。
+  // - DB_STATEMENT_TIMEOUT_MS：单语句上限。默认不启用：可用性聚合等长查询
+  //   与请求路径共享此池，紧超时会误杀；如启用建议 ≥900000（僵尸语句兜底）。
+  DB_STATEMENT_TIMEOUT_MS: optionalNumber(
+    z
+      .number()
+      .int()
+      .min(500, "DB_STATEMENT_TIMEOUT_MS 不能小于 500")
+      .max(3_600_000, "DB_STATEMENT_TIMEOUT_MS 不能大于 3600000")
+  ),
+  DB_LOCK_TIMEOUT_MS: optionalNumber(
+    z
+      .number()
+      .int()
+      .min(100, "DB_LOCK_TIMEOUT_MS 不能小于 100")
+      .max(600_000, "DB_LOCK_TIMEOUT_MS 不能大于 600000")
+  ),
   // 空闲连接回收（秒）
   DB_POOL_IDLE_TIMEOUT: optionalNumber(
     z

@@ -91,6 +91,7 @@ vi.mock("../../src/app/[locale]/dashboard/logs/_components/usage-logs-stats-pane
 vi.mock("../../src/app/[locale]/dashboard/logs/_utils/logs-query", () => ({
   buildLogsUrlQuery: () => new URLSearchParams(),
   parseLogsUrlFilters: () => ({}),
+  applyDefaultLogsTimeWindow: (filters: unknown) => filters,
 }));
 
 import { UsageLogsViewVirtualized } from "../../src/app/[locale]/dashboard/logs/_components/usage-logs-view-virtualized";

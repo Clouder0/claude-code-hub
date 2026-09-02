@@ -986,6 +986,9 @@ async function _findKeysStatisticsBatchInternal(
   // Step 3: Query last usage for all keys via LATERAL JOIN (1 index probe per key).
   // usage_ledger.created_at is NOT NULL, so adding NULLS LAST here only prevents
   // PostgreSQL from reusing the existing (key, created_at) index for a backward scan.
+  // Billing filter uses the stored is_billable decision (same as Step 2/4) so the
+  // LATERAL is servable by idx_ul_billable_key_time; the legacy blocked_by IS NULL
+  // predicate lost its partial index in the B5 cleanup and would seq-scan per key.
   const keyParams = sql.join(
     keyStrings.map((k) => sql`${k}`),
     sql.raw(", ")
@@ -997,7 +1000,7 @@ async function _findKeysStatisticsBatchInternal(
       SELECT ul.created_at, ul.final_provider_id
       FROM usage_ledger ul
       WHERE ul.key = k.key_val
-        AND ul.blocked_by IS NULL
+        AND ul.is_billable
       ORDER BY ul.created_at DESC
       LIMIT 1
     ) lr ON true

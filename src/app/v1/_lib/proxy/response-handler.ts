@@ -12,7 +12,7 @@ import { getEnvConfig } from "@/lib/config/env.schema";
 import { getCachedSystemSettings } from "@/lib/config/system-settings-cache";
 import { reportProviderPolicyEventBestEffort } from "@/lib/cyber-check/provider-event";
 import { reportCleanRequestOutcomeBestEffort } from "@/lib/cyber-check/request-outcome";
-import { emitProxyLangfuseTrace } from "@/lib/langfuse/emit-proxy-trace";
+import { emitProxyLangfuseTrace, isLangfuseTraceEnabled } from "@/lib/langfuse/emit-proxy-trace";
 import { logger } from "@/lib/logger";
 import { requestCloudPriceTableSync } from "@/lib/price-sync/cloud-price-updater";
 import { ProxyStatusTracker } from "@/lib/proxy-status-tracker";
@@ -59,12 +59,14 @@ import {
 import {
   addMessageRequestHedgeLoserCost,
   type MessageRequestBillingSettlement,
+  type MessageRequestFinalizeOverlay,
   updateMessageRequestCostWithBreakdown,
   updateMessageRequestDetails,
   updateMessageRequestDuration,
   updateMessageRequestUnsupportedBillingSettlement,
   updateMessageRequestWinnerCost,
 } from "@/repository/message";
+import { flushMessageRequestWriteBuffer } from "@/repository/message-write-buffer";
 import type {
   HedgeLoserBilling,
   StoredCostBreakdown,
@@ -92,6 +94,8 @@ const STREAM_STATS_TAIL_BYTES = STREAM_STATS_MAX_BUFFER_BYTES - STREAM_STATS_HEA
 const STREAM_STATS_TAIL_CHUNKS = 8192;
 const STREAM_STATS_TRUNCATED_MARKER = "\n\n: [cch_truncated]\n\n";
 const ALPHA_SEARCH_BASE_COST_USD = new Decimal("0.01");
+// TextEncoder 无状态，模块级共享（Gemini 转换流原先每个事件新建一个）
+const GEMINI_TEXT_ENCODER = new TextEncoder();
 
 type BoundedStreamTextSnapshot = {
   text: string;
@@ -197,7 +201,34 @@ export class BoundedStreamTextAccumulator {
       chunkCount: this.chunksSeen,
     };
 
+    // 快照生成后原始 chunk 字节不再被需要：accumulator 对象会活到整个
+    // finalization 结算 await 链结束，保留 chunk 数组等于让 ≤10MB 字节陪跑。
+    // 计数器（totalBytes/chunksSeen）与快照字段不受影响；finish 后若仍有
+    // 数据到达（异常路径），pushBytes 在清空后的数组上继续累积，语义不变。
+    this.releaseChunkMemory();
+
     return this.finishedSnapshot;
+  }
+
+  /** 释放已快照化的原始 chunk 字节（计数器与 finishedSnapshot 保留）。 */
+  private releaseChunkMemory(): void {
+    this.headChunks.length = 0;
+    this.tailChunks.length = 0;
+    this.tailChunkBytes.length = 0;
+    this.tailHead = 0;
+    this.headBufferedBytes = 0;
+    this.tailBufferedBytes = 0;
+  }
+
+  /**
+   * 释放快照缓存的文本引用。finalization 的文本阶段（cyber/usage/tier/
+   * 缓存键/计费检测）结束后调用，让 ≤10MB 的响应文本在尾部结算 await 链
+   * 期间可被回收。chunkCount 计数器保留（getCollectedChunkCount 回退到
+   * 计数器仍正确）。调用后不得再依赖 finish() 重建快照（现有调用点仅在
+   * finalize 前使用一次）。
+   */
+  releaseRetainedText(): void {
+    this.finishedSnapshot = null;
   }
 
   private createSnapshotText(): string {
@@ -2866,10 +2897,13 @@ export class ProxyResponseHandler {
         });
 
         let buffer = "";
+        // decoder 带 {stream:true} 状态，不能跨流共享，但每流一个即可。
+        // 行为改进（原实现每 chunk 新建 decoder）：跨 chunk 分裂的 UTF-8 序列此前
+        // 会各自解码成 U+FFFD，状态化共享后正确拼接。
+        const geminiDecoder = new TextDecoder();
         const transformStream = new TransformStream<Uint8Array, Uint8Array>({
           transform(chunk, controller) {
-            const decoder = new TextDecoder();
-            const text = decoder.decode(chunk, { stream: true });
+            const text = geminiDecoder.decode(chunk, { stream: true });
             buffer += text;
 
             const lines = buffer.split("\n");
@@ -2885,7 +2919,7 @@ export class ProxyResponseHandler {
                   const geminiResponse = JSON.parse(jsonStr) as GeminiResponse;
                   const openAIChunk = GeminiAdapter.transformResponse(geminiResponse, true);
                   const output = `data: ${JSON.stringify(openAIChunk)}\n\n`;
-                  controller.enqueue(new TextEncoder().encode(output));
+                  controller.enqueue(GEMINI_TEXT_ENCODER.encode(output));
                 } catch {
                   // Ignore parse errors
                 }
@@ -2899,7 +2933,7 @@ export class ProxyResponseHandler {
                 const geminiResponse = JSON.parse(jsonStr) as GeminiResponse;
                 const openAIChunk = GeminiAdapter.transformResponse(geminiResponse, true);
                 const output = `data: ${JSON.stringify(openAIChunk)}\n\n`;
-                controller.enqueue(new TextEncoder().encode(output));
+                controller.enqueue(GEMINI_TEXT_ENCODER.encode(output));
               } catch {}
             }
           },
@@ -2943,6 +2977,11 @@ export class ProxyResponseHandler {
     // 提升 idleTimeoutId 到外部作用域，以便客户端断开时能清除
     let idleTimeoutId: NodeJS.Timeout | null = null;
     let clientAbortDrainTimeoutId: NodeJS.Timeout | null = null;
+    // 上次 idle timer 重置时刻：读循环每个 chunk 都到货时重置一次定时器会产生
+    // 大量 clearTimeout/setTimeout 堆操作，改为仅当距上次重置已过半超时
+    // 周期才重置。代价是实际静默判定下界从 idleTimeoutMs 收紧到
+    // idleTimeoutMs/2（上界不变）——对"分钟级上游停摆"的检测目标无实质影响。
+    let lastIdleResetAt = 0;
     const streamTextAccumulator = new BoundedStreamTextAccumulator();
     let lastStreamTextSnapshot: BoundedStreamTextSnapshot | null = null;
     const getCollectedChunkCount = () =>
@@ -2962,6 +3001,7 @@ export class ProxyResponseHandler {
     const startIdleTimer = () => {
       if (idleTimeoutMs === Infinity) return; // 禁用时跳过
       clearIdleTimer(); // 清除旧的
+      lastIdleResetAt = Date.now();
       idleTimeoutId = setTimeout(() => {
         logger.warn("ResponseHandler: Streaming idle timeout triggered", {
           taskId,
@@ -3091,7 +3131,11 @@ export class ProxyResponseHandler {
         const streamErrorMessage = finalized.errorMessage;
         const providerIdForPersistence = finalized.providerIdForPersistence;
 
-        const streamSnapshot = lastStreamTextSnapshot;
+        let streamSnapshot = lastStreamTextSnapshot;
+        // langfuse 开启时尾部 emit 仍需全量文本（其内部自行截断）；关闭时
+        // 文本阶段结束后即可释放。判定与 emitProxyLangfuseTrace 的入口早退
+        // 共用 isLangfuseTraceEnabled，单一事实源。
+        const retainTextForLangfuse = isLangfuseTraceEnabled();
 
         // 存储响应体到 Redis（5分钟过期）。截断后的统计快照不是完整正文，不能伪装成完整调试正文落盘。
         if (
@@ -3140,7 +3184,6 @@ export class ProxyResponseHandler {
         }
 
         const duration = Date.now() - session.startTime;
-        await updateMessageRequestDuration(messageContext.id, duration);
 
         const tracker = ProxyStatusTracker.getInstance();
         tracker.endRequest(messageContext.user.id, messageContext.id);
@@ -3215,6 +3258,74 @@ export class ProxyResponseHandler {
           allContent
         );
 
+        // Anthropic 流式 thinking signature 模型检测(优先于明文 model 字段)。
+        // 经由 getBillingRequestMessage 读取：高并发模式下请求体已在门控提交后
+        // 释放为投影（投影保留了 thinking 配置），语义与读原树一致。
+        // 这两个检测只读流头部事件且为纯 CPU——上移到结算 await 链之前，
+        // 使全量文本可以在此后统一释放。附带变化：thinking_signature_model_detection
+        // 现在也会进入 billing settlement 的 specialSettings 快照（原先只在最终
+        // details 写入出现），且数组条目顺序改变——审计面更全，无金额影响。
+        const currentRequestedModel = session.getCurrentModel();
+        const thinkingActuallyEnabled = isThinkingEnabled(session.getBillingRequestMessage() ?? {});
+        const anthropicModelDetection = resolveAnthropicStreamActualResponseModel({
+          providerType: provider.providerType,
+          requestedModel: currentRequestedModel,
+          thinkingEnabled: thinkingActuallyEnabled,
+          responseStreamText: allContent,
+        });
+        if (anthropicModelDetection.source) {
+          session.addSpecialSetting({
+            type: "thinking_signature_model_detection",
+            scope: "response",
+            hit: anthropicModelDetection.source === "fallback_no_signature_with_thinking",
+            source: anthropicModelDetection.source,
+            extractedModel: anthropicModelDetection.actualResponseModel,
+            signatureFound: anthropicModelDetection.source === "signature",
+            thinkingEnabled: thinkingActuallyEnabled,
+            requestedModel: currentRequestedModel,
+          });
+        }
+        const finalActualResponseModel = anthropicModelDetection.source
+          ? anthropicModelDetection.actualResponseModel
+          : extractActualResponseModelForProvider(provider.providerType, true, allContent);
+
+        // ★ 文本阶段结束：此后只剩小字段结算与落库。断开全量文本的全部强引用
+        //（frame 绑定 / 快照引用 / accumulator 缓存），让 ≤10MB 文本在尾部
+        // await 链（计费写库、Redis、详情落盘）期间可回收。HC 模式下 Redis
+        // 存储分支已在上方跳过；langfuse 关闭时其 emit 入口直接返回（同一
+        // 环境变量判定），开启时保留文本供其截断消费。
+        // 注意：调用方已内联 flushAndJoin() 使本参数成为唯一源级引用；但 V8
+        // 对未优化（interpreted/baseline）挂起 frame 做保守寄存器扫描，字符串
+        // 是否真能提前回收取决于 JIT 层级——收益以 canary RSS 实测为准，若未
+        // 兑现需将结算尾链拆为不捕获文本的独立任务（P7b 范畴）。
+        if (!retainTextForLangfuse) {
+          allContent = "";
+          streamSnapshot = null;
+          lastStreamTextSnapshot = null;
+          streamTextAccumulator.releaseRetainedText();
+        }
+
+        const finalizeDetailsPayload = {
+          statusCode: effectiveStatusCode,
+          ...buildUsageAuditPersistence(usageForCost),
+          inputTokens: usageForCost?.input_tokens,
+          outputTokens: usageForCost?.output_tokens,
+          ttfbMs: session.ttfbMs,
+          cacheCreationInputTokens: usageForCost?.cache_creation_input_tokens,
+          cacheReadInputTokens: usageForCost?.cache_read_input_tokens,
+          cacheCreation5mInputTokens: usageForCost?.cache_creation_5m_input_tokens,
+          cacheCreation1hInputTokens: usageForCost?.cache_creation_1h_input_tokens,
+          cacheTtlApplied: usageForCost?.cache_ttl ?? null,
+          providerChain: session.getProviderChain(),
+          ...(streamErrorMessage ? { errorMessage: streamErrorMessage } : {}),
+          model: session.getBillingModel() ?? undefined, // 持久化最终发往上游的模型
+          actualResponseModel: finalActualResponseModel,
+          providerId: providerIdForPersistence ?? session.provider?.id, // 更新最终供应商ID（重试切换后）
+          context1mApplied: session.getContext1mApplied(),
+          swapCacheTtlApplied: provider.swapCacheTtlBilling ?? false,
+          specialSettings: session.getSpecialSettings() ?? undefined,
+        };
+
         const billing = sessionBillingInputs(session, provider, priorityServiceTierApplied);
         const costUpdateResult = await updateRequestCostFromUsage(
           messageContext.id,
@@ -3226,7 +3337,8 @@ export class ProxyResponseHandler {
           // an alternative can still be mid-launch when the initial provider commits, so
           // isHedgeWinner may read false even though a loser will bill — using it would
           // let the winner's replacement clobber that loser's additive write.
-          finalized.billHedgeLosers
+          finalized.billHedgeLosers,
+          { ...finalizeDetailsPayload, durationMs: duration }
         );
         if (costUpdateResult.longContextPricingApplied) {
           ensureLongContextPricingAudit(session, costUpdateResult.longContextPricing);
@@ -3341,54 +3453,12 @@ export class ProxyResponseHandler {
           }
         }
 
-        // Anthropic 流式 thinking signature 模型检测(优先于明文 model 字段)。
-        // 经由 getBillingRequestMessage 读取：高并发模式下请求体已在门控提交后
-        // 释放为投影（投影保留了 thinking 配置），语义与读原树一致。
-        const currentRequestedModel = session.getCurrentModel();
-        const thinkingActuallyEnabled = isThinkingEnabled(session.getBillingRequestMessage() ?? {});
-        const anthropicModelDetection = resolveAnthropicStreamActualResponseModel({
-          providerType: provider.providerType,
-          requestedModel: currentRequestedModel,
-          thinkingEnabled: thinkingActuallyEnabled,
-          responseStreamText: allContent,
-        });
-        if (anthropicModelDetection.source) {
-          session.addSpecialSetting({
-            type: "thinking_signature_model_detection",
-            scope: "response",
-            hit: anthropicModelDetection.source === "fallback_no_signature_with_thinking",
-            source: anthropicModelDetection.source,
-            extractedModel: anthropicModelDetection.actualResponseModel,
-            signatureFound: anthropicModelDetection.source === "signature",
-            thinkingEnabled: thinkingActuallyEnabled,
-            requestedModel: currentRequestedModel,
-          });
+        // 终态 details 不再单独落库：folded 进下面的持久 settlement 写（一次 UPDATE）。
+        // 仅当没有 settlement 变体真正持久化（无 usage / 无价格 / 零成本）时走缓冲回退。
+        if (!costUpdateResult.detailsPersisted) {
+          await updateMessageRequestDuration(messageContext.id, duration);
+          await updateMessageRequestDetails(messageContext.id, finalizeDetailsPayload);
         }
-        const finalActualResponseModel = anthropicModelDetection.source
-          ? anthropicModelDetection.actualResponseModel
-          : extractActualResponseModelForProvider(provider.providerType, true, allContent);
-
-        // 保存扩展信息（status code, tokens, provider chain）
-        await updateMessageRequestDetails(messageContext.id, {
-          statusCode: effectiveStatusCode,
-          ...buildUsageAuditPersistence(usageForCost),
-          inputTokens: usageForCost?.input_tokens,
-          outputTokens: usageForCost?.output_tokens,
-          ttfbMs: session.ttfbMs,
-          cacheCreationInputTokens: usageForCost?.cache_creation_input_tokens,
-          cacheReadInputTokens: usageForCost?.cache_read_input_tokens,
-          cacheCreation5mInputTokens: usageForCost?.cache_creation_5m_input_tokens,
-          cacheCreation1hInputTokens: usageForCost?.cache_creation_1h_input_tokens,
-          cacheTtlApplied: usageForCost?.cache_ttl ?? null,
-          providerChain: session.getProviderChain(),
-          ...(streamErrorMessage ? { errorMessage: streamErrorMessage } : {}),
-          model: session.getBillingModel() ?? undefined, // 持久化最终发往上游的模型
-          actualResponseModel: finalActualResponseModel,
-          providerId: providerIdForPersistence ?? session.provider?.id, // 更新最终供应商ID（重试切换后）
-          context1mApplied: session.getContext1mApplied(),
-          swapCacheTtlApplied: provider.swapCacheTtlBilling ?? false,
-          specialSettings: session.getSpecialSettings() ?? undefined,
-        });
 
         emitProxyLangfuseTrace(session, {
           responseHeaders: response.headers,
@@ -3428,15 +3498,22 @@ export class ProxyResponseHandler {
             streamTextAccumulator.pushBytes(value);
             AsyncTaskManager.touch(taskId);
 
-            // 每次收到数据后重置静默期计时器（首次收到数据时启动）
-            startIdleTimer();
-            logger.trace("ResponseHandler: Idle timer reset (data received)", {
-              taskId,
-              providerId: provider.id,
-              chunksCollected: getCollectedChunkCount(),
-              lastChunkSize: chunkSize,
-              idleTimeoutMs: idleTimeoutMs === Infinity ? "disabled" : idleTimeoutMs,
-            });
+            // 每次收到数据后重置静默期计时器（首次收到数据时启动）。
+            // 节流：距上次重置不足半周期时跳过，避免每个 chunk 一对
+            // clearTimeout/setTimeout 堆操作；静默判定下界的收紧见 lastIdleResetAt 声明处。
+            if (idleTimeoutMs !== Infinity && Date.now() - lastIdleResetAt >= idleTimeoutMs / 2) {
+              startIdleTimer();
+              // trace 的参数对象在调用点求值，生产级别下也照常分配——用级别守卫挡掉
+              if (logger.level === "trace") {
+                logger.trace("ResponseHandler: Idle timer reset (data received)", {
+                  taskId,
+                  providerId: provider.id,
+                  chunksCollected: getCollectedChunkCount(),
+                  lastChunkSize: chunkSize,
+                  idleTimeoutMs,
+                });
+              }
+            }
 
             // 流式：读到第一块数据后立即清除响应超时定时器
             if (isFirstChunk) {
@@ -3463,10 +3540,9 @@ export class ProxyResponseHandler {
 
         // 流式读取完成：清除静默期计时器
         clearIdleTimer();
-        const allContent = flushAndJoin();
         const clientAborted = session.clientAbortSignal?.aborted ?? false;
         try {
-          await finalizeStream(allContent, streamEndedNormally, clientAborted);
+          await finalizeStream(flushAndJoin(), streamEndedNormally, clientAborted);
         } catch (finalizeError) {
           logger.error("ResponseHandler: Failed to finalize stream", {
             taskId,
@@ -3519,8 +3595,7 @@ export class ProxyResponseHandler {
 
             // 结算并消费 deferred meta，确保 provider chain/熔断归因完整
             try {
-              const allContent = flushAndJoin();
-              await finalizeStream(allContent, false, false, "STREAM_RESPONSE_TIMEOUT");
+              await finalizeStream(flushAndJoin(), false, false, "STREAM_RESPONSE_TIMEOUT");
             } catch (finalizeError) {
               logger.error("ResponseHandler: Failed to finalize response-timeout stream", {
                 taskId,
@@ -3553,9 +3628,8 @@ export class ProxyResponseHandler {
 
             // 结算并消费 deferred meta，确保 provider chain/熔断归因完整
             try {
-              const allContent = flushAndJoin();
               await finalizeStream(
-                allContent,
+                flushAndJoin(),
                 false,
                 clientAborted,
                 clientAborted ? "CLIENT_ABORTED" : "STREAM_IDLE_TIMEOUT"
@@ -3591,8 +3665,7 @@ export class ProxyResponseHandler {
 
             // 结算并消费 deferred meta，确保 provider chain/熔断归因完整
             try {
-              const allContent = flushAndJoin();
-              await finalizeStream(allContent, false, false, "STREAM_UPSTREAM_ABORTED");
+              await finalizeStream(flushAndJoin(), false, false, "STREAM_UPSTREAM_ABORTED");
             } catch (finalizeError) {
               logger.error("ResponseHandler: Failed to finalize upstream-aborted stream", {
                 taskId,
@@ -3625,8 +3698,7 @@ export class ProxyResponseHandler {
                   : "Client disconnected",
             });
             try {
-              const allContent = flushAndJoin();
-              await finalizeStream(allContent, false, true);
+              await finalizeStream(flushAndJoin(), false, true);
             } catch (finalizeError) {
               logger.error("ResponseHandler: Failed to finalize aborted stream response", {
                 taskId,
@@ -3650,8 +3722,7 @@ export class ProxyResponseHandler {
           });
 
           try {
-            const allContent = flushAndJoin();
-            await finalizeStream(allContent, false, false, "STREAM_UPSTREAM_ABORTED");
+            await finalizeStream(flushAndJoin(), false, false, "STREAM_UPSTREAM_ABORTED");
           } catch (finalizeError) {
             logger.error("ResponseHandler: Failed to finalize transport-error stream", {
               taskId,
@@ -3673,8 +3744,7 @@ export class ProxyResponseHandler {
 
           // 结算并消费 deferred meta，确保 provider chain/熔断归因完整
           try {
-            const allContent = flushAndJoin();
-            await finalizeStream(allContent, false, clientAborted, "STREAM_PROCESSING_ERROR");
+            await finalizeStream(flushAndJoin(), false, clientAborted, "STREAM_PROCESSING_ERROR");
           } catch (finalizeError) {
             logger.error("ResponseHandler: Failed to finalize stream after processing error", {
               taskId,
@@ -4566,13 +4636,21 @@ async function updateRequestCostFromUsage(
   // replacement (cost_usd = winnerCost + SUM(hedge_losers[].costUsd)) so it coexists
   // with losers' concurrent additive writes without clobbering or double-counting.
   // Used for hedge-path winners when billHedgeLosers is on.
-  winnerLoserAware: boolean = false
+  winnerLoserAware: boolean = false,
+  /**
+   * Terminal request facts folded into the durable settlement write (one UPDATE
+   * instead of settlement + buffered details patch). When provided AND a
+   * settlement variant actually persists, the caller must SKIP the ordinary
+   * buffered duration/details writes; detailsPersisted in the result says which.
+   */
+  finalizeOverlay?: MessageRequestFinalizeOverlay
 ): Promise<{
   costUsd: string | null;
   costSettled: boolean;
   resolvedPricing: Awaited<ReturnType<ProxySession["getResolvedPricingByBillingSource"]>> | null;
   longContextPricing: ResolvedLongContextPricing | null;
   longContextPricingApplied: boolean;
+  detailsPersisted: boolean;
 }> {
   const {
     provider,
@@ -4581,6 +4659,20 @@ async function updateRequestCostFromUsage(
     priorityServiceTierApplied,
     groupCostMultiplier,
   } = billing;
+  if (finalizeOverlay) {
+    // 终态 overlay 将以同步 settlement 落库；先把异步写缓冲里同表的历史
+    // patch（如 forwarder 参数覆写的 specialSettings）刷下去，防止缓冲在
+    // settlement 之后 flush、用过期的部分列覆盖终态（旧代码里终态 details
+    // 与它们在同一缓冲内 merge、后写者赢，不存在该窗口）。
+    try {
+      await flushMessageRequestWriteBuffer();
+    } catch (flushError) {
+      logger.warn("[BillingSettlement] Pre-settlement buffer flush failed; continuing", {
+        messageId,
+        error: flushError instanceof Error ? flushError.message : String(flushError),
+      });
+    }
+  }
   if (!usage) {
     logger.warn("[CostCalculation] No usage data, skipping cost update", {
       messageId,
@@ -4591,6 +4683,7 @@ async function updateRequestCostFromUsage(
       resolvedPricing: null,
       longContextPricing: null,
       longContextPricingApplied: false,
+      detailsPersisted: false,
     };
   }
 
@@ -4601,6 +4694,7 @@ async function updateRequestCostFromUsage(
       resolvedPricing: null,
       longContextPricing: null,
       longContextPricingApplied: false,
+      detailsPersisted: false,
     };
   }
 
@@ -4612,6 +4706,7 @@ async function updateRequestCostFromUsage(
       resolvedPricing: null,
       longContextPricing: null,
       longContextPricingApplied: false,
+      detailsPersisted: false,
     };
   }
 
@@ -4626,6 +4721,7 @@ async function updateRequestCostFromUsage(
       resolvedPricing: null,
       longContextPricing: null,
       longContextPricingApplied: false,
+      detailsPersisted: false,
     };
   }
 
@@ -4666,6 +4762,7 @@ async function updateRequestCostFromUsage(
         resolvedPricing: null,
         longContextPricing: null,
         longContextPricingApplied: false,
+        detailsPersisted: false,
       };
     }
 
@@ -4715,12 +4812,19 @@ async function updateRequestCostFromUsage(
 
     if (cost.gt(0)) {
       const persistedCostUsd = winnerLoserAware
-        ? await updateMessageRequestWinnerCost(messageId, cost, storedBreakdown, billingSettlement)
+        ? await updateMessageRequestWinnerCost(
+            messageId,
+            cost,
+            storedBreakdown,
+            billingSettlement,
+            finalizeOverlay
+          )
         : await updateMessageRequestCostWithBreakdown(
             messageId,
             cost,
             storedBreakdown,
-            billingSettlement
+            billingSettlement,
+            finalizeOverlay
           );
       if (persistedCostUsd == null) {
         logger.error("[BillingSettlement] Durable cost write returned no settled value", {
@@ -4732,6 +4836,7 @@ async function updateRequestCostFromUsage(
           resolvedPricing: null,
           longContextPricing,
           longContextPricingApplied: longContextPricing != null,
+          detailsPersisted: false,
         };
       }
       return {
@@ -4740,6 +4845,7 @@ async function updateRequestCostFromUsage(
         resolvedPricing,
         longContextPricing,
         longContextPricingApplied: longContextPricing != null,
+        detailsPersisted: true,
       };
     } else {
       logger.warn("[CostCalculation] Calculated cost is zero or negative", {
@@ -4759,15 +4865,19 @@ async function updateRequestCostFromUsage(
       resolvedPricing,
       longContextPricing,
       longContextPricingApplied: longContextPricing != null,
+      detailsPersisted: false,
     };
   } catch (error) {
     if (error instanceof UnsupportedPricingCombinationError) {
       ensureUnsupportedBillingSettlement(session, usage, error, resolvedPricing);
+      let unsupportedDetailsPersisted = false;
       try {
         await updateMessageRequestUnsupportedBillingSettlement(
           messageId,
-          createBillingSettlement()
+          createBillingSettlement(),
+          finalizeOverlay
         );
+        unsupportedDetailsPersisted = finalizeOverlay !== undefined;
       } catch (settlementError) {
         logger.error("[BillingSettlement] Failed to persist unsupported pricing audit", {
           messageId,
@@ -4788,6 +4898,7 @@ async function updateRequestCostFromUsage(
         resolvedPricing: null,
         longContextPricing: null,
         longContextPricingApplied: false,
+        detailsPersisted: unsupportedDetailsPersisted,
       };
     }
 
@@ -4801,6 +4912,7 @@ async function updateRequestCostFromUsage(
       resolvedPricing: null,
       longContextPricing: null,
       longContextPricingApplied: false,
+      detailsPersisted: false,
     };
   }
 }

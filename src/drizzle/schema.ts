@@ -664,7 +664,7 @@ export const securityEvents = pgTable('security_event', {
     table.type
   ),
   securityEventsCreatedAtIdx: index('idx_security_event_created_at').on(table.createdAt.desc()),
-  // Audit and reporting: per-user policy observations over time
+  // Strike counting: per-user cyber_policy events in a trailing window
   securityEventsUserTypeCreatedAtIdx: index('idx_security_event_user_type_created_at').on(
     table.userId,
     table.type,
@@ -1095,6 +1095,10 @@ export const usageLedger = pgTable('usage_ledger', {
   isSuccess: boolean('is_success').notNull().default(false),
   successRateOutcome: varchar('success_rate_outcome', { length: 16 }),
   blockedBy: varchar('blocked_by', { length: 50 }),
+  // Stored billable decision mirroring the legacy blocked_by+endpoint billing
+  // condition; written by fn_upsert_usage_ledger, backfilled online, readers
+  // flip to it only after the backfill is verified.
+  isBillable: boolean('is_billable'),
   costUsd: numeric('cost_usd', { precision: 21, scale: 15 }).default('0'),
   costMultiplier: numeric('cost_multiplier', { precision: 10, scale: 4 }),
   groupCostMultiplier: numeric('group_cost_multiplier', { precision: 10, scale: 4 }),

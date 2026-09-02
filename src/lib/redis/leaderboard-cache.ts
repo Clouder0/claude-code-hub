@@ -273,6 +273,19 @@ function sleep(ms: number): Promise<void> {
  */
 const LEADERBOARD_LAST_TTL = 30 * 60; // 旧快照保留 30 分钟，仅在刷新窗口内被读取
 
+// 缓存 TTL 按周期分层：ledger 是 append-only 的，monthly / allTime 窗口的
+// 结果只随新写入的行缓慢漂移，600 秒重算周期会让最贵的扫描（allTime 扫全表）
+// 高频重复。daily / weekly / last24h / custom 分钟级在变，维持 600 秒。
+// 锁 TTL 与缓存 TTL 无关（只需覆盖单次查询时长），保持 600 秒不变。
+const PERIOD_CACHE_TTL_SECONDS: Record<LeaderboardPeriod, number> = {
+  daily: 600,
+  last24h: 600,
+  weekly: 600,
+  monthly: 1800,
+  allTime: 3600,
+  custom: 600,
+};
+
 export async function getLeaderboardWithCache(
   period: LeaderboardPeriod,
   currencyDisplay: string,
@@ -318,8 +331,8 @@ export async function getLeaderboardWithCache(
       try {
         const data = await queryDatabase(period, scope, dateRange, filters);
 
-        // 写入缓存（600 秒 TTL；聚合查询耗时可达分钟级，短 TTL 会让缓存永远失效）
-        await redis.setex(cacheKey, 600, JSON.stringify(data));
+        // 写入缓存（TTL 按周期分层；聚合查询耗时可达分钟级，短 TTL 会让缓存永远失效）
+        await redis.setex(cacheKey, PERIOD_CACHE_TTL_SECONDS[period], JSON.stringify(data));
         // 旧快照：供刷新窗口内的等待方瞬时返回
         await redis.setex(lastKey, LEADERBOARD_LAST_TTL, JSON.stringify(data));
 

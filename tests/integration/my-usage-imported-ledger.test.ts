@@ -191,6 +191,9 @@ async function insertLedgerOnlyRow(params: {
     statusCode: 200,
     isSuccess: true,
     blockedBy: null,
+    // Mirror production writers (trigger / ledger-backfill), which always
+    // populate the stored billable decision for recovered/imported rows.
+    isBillable: true,
     costUsd: params.costUsd,
     inputTokens: params.inputTokens,
     outputTokens: params.outputTokens,

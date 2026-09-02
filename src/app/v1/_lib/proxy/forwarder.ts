@@ -94,6 +94,7 @@ import {
 } from "./errors";
 import {
   logFake200SseDiagnostic,
+  logResponsesStreamGateCommitObservation,
   logResponsesStreamGateDiagnostic,
 } from "./fake-200-observability";
 import {
@@ -104,7 +105,10 @@ import {
 } from "./gemini-function-id-rectifier";
 import { ModelRedirector } from "./model-redirector";
 import { nodeStreamToWebStreamSafe } from "./node-stream-to-web";
-import { ensureOpenAIChatStreamUsageOption } from "./openai-chat-usage-options";
+import {
+  ensureOpenAIChatStreamUsageOption,
+  mayInjectOpenAIChatStreamUsage,
+} from "./openai-chat-usage-options";
 import {
   cloneOpenAIImageRequestMetadata,
   sanitizeGenerationsRequestForProvider,
@@ -552,6 +556,21 @@ function buildEndpointAttemptKey(endpointId: number | null, endpointUrl: string)
 // connectTimeout 属于 Dispatcher/Client 配置（已在全局 Agent / ProxyAgent 里处理）。
 
 /**
+ * 记录用请求体大小：字符串取字符长度，二进制取字节数。
+ * 此前用 JSON.stringify(requestBody).length——字符串 body 会为取长度分配整个
+ * 带引号的副本，raw-passthrough 的 Buffer 更会序列化成
+ * {"type":"Buffer","data":[...]}（约 5 倍体积），恰在故障路径上放大内存压力。
+ */
+function logBodySize(body: BodyInit | undefined): number {
+  if (!body) return 0;
+  if (typeof body === "string") return body.length;
+  if (body instanceof Blob) return body.size;
+  if (body instanceof ArrayBuffer) return body.byteLength;
+  if (ArrayBuffer.isView(body)) return (body as Uint8Array).byteLength;
+  return 0;
+}
+
+/**
  * 过滤私有参数（下划线前缀）
  *
  * 目的：防止私有参数（下划线前缀）泄露到上游供应商导致 "Unsupported parameter" 错误
@@ -569,7 +588,6 @@ function filterPrivateParameters(obj: unknown): unknown {
   if (Array.isArray(obj)) {
     return obj.map((item) => filterPrivateParameters(item));
   }
-
   // 对象类型：过滤下划线前缀的键
   const filtered: Record<string, unknown> = {};
   const removedKeys: string[] = [];
@@ -593,6 +611,70 @@ function filterPrivateParameters(obj: unknown): unknown {
   }
 
   return filtered;
+}
+
+/**
+ * 只读扫描：树中任意层级是否存在 "_" 前缀键。
+ * 与 filterPrivateParameters 的判定条件保持一致（仅扫描，不分配）。
+ */
+export function hasPrivateParameters(obj: unknown): boolean {
+  if (typeof obj !== "object" || obj === null) {
+    return false;
+  }
+
+  if (Array.isArray(obj)) {
+    for (const item of obj) {
+      if (hasPrivateParameters(item)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  for (const [key, value] of Object.entries(obj)) {
+    if (key.startsWith("_")) {
+      return true;
+    }
+    if (hasPrivateParameters(value)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * 过滤之后、序列化之前，是否还有步骤会改写请求体。
+ * 改写者清单与 doForward 标准分支的实际顺序一一对应：
+ * claude 元数据注入 / final 阶段请求过滤器 / images 消毒 / openai-chat
+ * stream_options 注入。任一命中即不能按引用透传原始树。
+ */
+async function forwardPreprocessingMayMutateBody(
+  session: ProxySession,
+  provider: Provider,
+  requestPath: string,
+  bypassRequestFilters: boolean
+): Promise<boolean> {
+  if (provider.providerType === "claude" || provider.providerType === "claude-auth") {
+    return true;
+  }
+
+  if (requestPath === "/v1/images/generations") {
+    return true;
+  }
+
+  const message = session.request.message as Record<string, unknown>;
+  if (mayInjectOpenAIChatStreamUsage(provider.providerType, requestPath, message)) {
+    return true;
+  }
+
+  if (!bypassRequestFilters) {
+    const { requestFilterEngine } = await import("@/lib/request-filter-engine");
+    if (await requestFilterEngine.hasFinalBodyFilters(session)) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 type ClaudeMetadataUserIdInjectionResult = {
@@ -2964,10 +3046,24 @@ export class ProxyForwarder {
             });
           }
         } else {
-          const filteredMessage = filterPrivateParameters(session.request.message) as Record<
-            string,
-            unknown
-          >;
+          // scan-first 透传：原实现每次 attempt 都为剥离 "_" 前缀键重建整棵请求树
+          // （多 MB body 下是可观的 CPU+GC 开销，且每次重试/换供应商重付）。
+          // 树中无私有键、且本 attempt 内没有步骤会改写 body 时，用**顶层浅拷贝**
+          // 透传——spread 保持键序，序列化字节与重建路径逐字节一致；嵌套大数组
+          // 按引用共享（不深克隆，收益保留）。浅拷贝隔离的是跨 attempt 的顶层
+          // 改写者（ModelRedirector 在每次 doForward 开头原地写 message.model），
+          // 防止其污染上一个 attempt 已缓存的计费视图。
+          const mayMutateDownstream = await forwardPreprocessingMayMutateBody(
+            session,
+            provider,
+            requestPath,
+            ProxyForwarder.getEndpointPolicy(session).bypassRequestFilters
+          );
+          const filteredMessage = (
+            mayMutateDownstream || hasPrivateParameters(session.request.message)
+              ? filterPrivateParameters(session.request.message)
+              : { ...session.request.message }
+          ) as Record<string, unknown>;
 
           // 将 metadata.user_id 注入放在私有参数过滤之后，避免受过滤逻辑影响。
           let messageToSend: Record<string, unknown> = filteredMessage;
@@ -3693,7 +3789,7 @@ export class ProxyForwarder {
             // 请求上下文
             method: session.method,
             hasBody: !!requestBody,
-            bodySize: requestBody ? JSON.stringify(requestBody).length : 0,
+            bodySize: logBodySize(requestBody),
           });
 
           cleanupCombinedSignal();
@@ -3732,7 +3828,7 @@ export class ProxyForwarder {
           // 请求上下文
           method: session.method,
           hasBody: !!requestBody,
-          bodySize: requestBody ? JSON.stringify(requestBody).length : 0,
+          bodySize: logBodySize(requestBody),
         });
 
         cleanupCombinedSignal();
@@ -3865,6 +3961,21 @@ export class ProxyForwarder {
               }
             : {}),
         });
+        if (inspection.kind === "pass" && inspection.commitDiagnostic) {
+          // 成功 commit 此前完全静默（诊断只覆盖失败路径），导致回显体积分布与
+          // 供应商健康分母不可观测；按 provider 分桶限流补一条抽样观测。
+          const commitDiagnostic = inspection.commitDiagnostic;
+          logResponsesStreamGateCommitObservation({
+            providerId: provider.id,
+            providerName: provider.name,
+            endpointId: endpointAudit?.endpointId ?? null,
+            framesSeen: commitDiagnostic.framesSeen,
+            bufferedBytes: commitDiagnostic.bufferedBytes,
+            echoExcludedBytes: commitDiagnostic.echoExcludedBytes,
+            observedEventTypes: commitDiagnostic.observedEventTypes,
+            eventTypesTruncated: commitDiagnostic.eventTypesTruncated,
+          });
+        }
         if (inspection.kind === "fake_200") {
           const securitySignals = detectSecuritySignalsFromText(inspection.prefixText);
           const rejectedPolicy = firstPolicyRejectionCode(securitySignals);

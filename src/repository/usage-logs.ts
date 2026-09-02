@@ -1,6 +1,6 @@
 import "server-only";
 
-import { and, desc, eq, gte, isNull, lt, sql } from "drizzle-orm";
+import { and, desc, eq, gte, isNull, lt, type SQL, sql } from "drizzle-orm";
 import { db } from "@/drizzle/db";
 import { keys as keysTable, messageRequest, providers, usageLedger, users } from "@/drizzle/schema";
 import type { CacheWriteAccounting } from "@/lib/billing/openai-usage-accounting";
@@ -17,7 +17,6 @@ import { escapeLike } from "./_shared/like";
 import { EXCLUDE_WARMUP_CONDITION } from "./_shared/message-request-conditions";
 import {
   buildActualResponseModelMismatchCondition,
-  buildDefaultHiddenUsageLogEndpointCondition,
   buildUsageLogConditions,
   buildUsageLogEndpointMatchCondition,
   RETRY_COUNT_EXPR,
@@ -33,6 +32,11 @@ export interface UsageLogFilters {
   startTime?: number;
   /** 结束时间戳（毫秒），用于 < 比较 */
   endTime?: number;
+  /**
+   * 显式请求全部时间：action 层在 startTime 缺省时默认只查最近 7 天，
+   * 该标志是绕过默认窗口的唯一途径（供 UI"全部时间"与 API 直调使用）。
+   */
+  allTime?: boolean;
   statusCode?: number;
   /** 排除 200 状态码（筛选所有非 200 的请求，包括 NULL） */
   excludeStatusCode200?: boolean;
@@ -341,14 +345,6 @@ export async function findUsageLogsBatch(
         usageLedger.originalModel
       )
     );
-  }
-
-  const hiddenLedgerEndpointCondition = buildDefaultHiddenUsageLogEndpointCondition(
-    usageLedger.endpoint,
-    filters.endpoint
-  );
-  if (hiddenLedgerEndpointCondition) {
-    ledgerConditions.push(hiddenLedgerEndpointCondition);
   }
 
   if (filters.endpoint?.trim()) {
@@ -775,14 +771,6 @@ function buildKeyLedgerConditions(
         usageLedger.originalModel
       )
     );
-  }
-
-  const hiddenKeyLedgerEndpointCondition = buildDefaultHiddenUsageLogEndpointCondition(
-    usageLedger.endpoint,
-    filters.endpoint
-  );
-  if (hiddenKeyLedgerEndpointCondition) {
-    conditions.push(hiddenKeyLedgerEndpointCondition);
   }
 
   if (filters.endpoint?.trim()) {
@@ -1365,11 +1353,11 @@ export async function getDistinctEndpointsForKey(keyString: string): Promise<str
  * 查询使用日志（支持多种筛选条件和分页）
  */
 
-export async function findUsageLogsWithDetails(filters: UsageLogFilters): Promise<UsageLogsResult> {
-  const { userId, keyId, providerId, page = 1, pageSize = 50 } = filters;
-
-  const safePage = page > 0 ? page : 1;
-  const safePageSize = Math.min(200, Math.max(1, pageSize));
+function buildUsageLogsFilterConditions(filters: UsageLogFilters): {
+  conditions: SQL[];
+  keyId: number | undefined;
+} {
+  const { userId, keyId, providerId } = filters;
 
   const conditions = [isNull(messageRequest.deletedAt)];
 
@@ -1387,7 +1375,17 @@ export async function findUsageLogsWithDetails(filters: UsageLogFilters): Promis
 
   conditions.push(...buildUsageLogConditions(filters));
 
-  const offset = (safePage - 1) * safePageSize;
+  return { conditions, keyId };
+}
+
+/**
+ * 仅执行 summary 聚合（total + 非预热统计），不取分页行。
+ * 供缓存层使用：翻页时复用同一过滤窗口的 summary，避免每次重扫。
+ */
+export async function findUsageLogsSummary(
+  filters: Omit<UsageLogFilters, "page" | "pageSize">
+): Promise<Pick<UsageLogsResult, "total" | "summary">> {
+  const { conditions, keyId } = buildUsageLogsFilterConditions(filters);
 
   // 查询总数和统计数据（仅在需要 keyId 过滤时才 join keysTable，避免无效 join）
   const summaryQuery =
@@ -1425,6 +1423,41 @@ export async function findUsageLogsWithDetails(filters: UsageLogFilters): Promis
           .from(messageRequest)
           .innerJoin(keysTable, eq(messageRequest.key, keysTable.key))
           .where(and(...conditions));
+
+  const summaryResult = (await summaryQuery)[0];
+
+  return {
+    total: summaryResult?.totalRows ?? 0,
+    summary: {
+      totalRequests: summaryResult?.totalRequests ?? 0,
+      totalCost: parseFloat(summaryResult?.totalCost ?? "0"),
+      totalTokens:
+        (summaryResult?.totalInputTokens ?? 0) +
+        (summaryResult?.totalOutputTokens ?? 0) +
+        (summaryResult?.totalCacheCreationTokens ?? 0) +
+        (summaryResult?.totalCacheReadTokens ?? 0),
+      totalInputTokens: summaryResult?.totalInputTokens ?? 0,
+      totalOutputTokens: summaryResult?.totalOutputTokens ?? 0,
+      totalCacheCreationTokens: summaryResult?.totalCacheCreationTokens ?? 0,
+      totalCacheReadTokens: summaryResult?.totalCacheReadTokens ?? 0,
+      totalCacheCreation5mTokens: summaryResult?.totalCacheCreation5mTokens ?? 0,
+      totalCacheCreation1hTokens: summaryResult?.totalCacheCreation1hTokens ?? 0,
+    },
+  };
+}
+
+/**
+ * 仅取分页行（不跑 summary 聚合）。
+ */
+export async function findUsageLogsRows(
+  filters: UsageLogFilters
+): Promise<Pick<UsageLogsResult, "logs">> {
+  const { conditions } = buildUsageLogsFilterConditions(filters);
+  const page = filters.page ?? 1;
+  const pageSize = filters.pageSize ?? 50;
+  const safePage = page > 0 ? page : 1;
+  const safePageSize = Math.min(200, Math.max(1, pageSize));
+  const offset = (safePage - 1) * safePageSize;
 
   // 查询分页数据（使用 LEFT JOIN 以包含被拦截的请求）
   const logsQuery = db
@@ -1478,17 +1511,7 @@ export async function findUsageLogsWithDetails(filters: UsageLogFilters): Promis
     .limit(safePageSize)
     .offset(offset);
 
-  const [summaryRows, results] = await Promise.all([summaryQuery, logsQuery]);
-  const summaryResult = summaryRows[0];
-
-  const total = summaryResult?.totalRows ?? 0;
-  const totalRequests = summaryResult?.totalRequests ?? 0;
-  const totalCost = parseFloat(summaryResult?.totalCost ?? "0");
-  const totalTokens =
-    (summaryResult?.totalInputTokens ?? 0) +
-    (summaryResult?.totalOutputTokens ?? 0) +
-    (summaryResult?.totalCacheCreationTokens ?? 0) +
-    (summaryResult?.totalCacheReadTokens ?? 0);
+  const results = await logsQuery;
 
   const logs: UsageLogRow[] = results.map((row) => {
     const totalRowTokens =
@@ -1529,20 +1552,22 @@ export async function findUsageLogsWithDetails(filters: UsageLogFilters): Promis
     };
   });
 
+  return { logs };
+}
+
+/**
+ * 查询使用日志（支持多种筛选条件和分页）：summary 聚合 + 分页行的组合器。
+ * 行为与拆分前完全一致；需要缓存 summary 或单独取行时直接用拆分函数。
+ */
+export async function findUsageLogsWithDetails(filters: UsageLogFilters): Promise<UsageLogsResult> {
+  const [summaryPart, rowsPart] = await Promise.all([
+    findUsageLogsSummary(filters),
+    findUsageLogsRows(filters),
+  ]);
   return {
-    logs,
-    total,
-    summary: {
-      totalRequests,
-      totalCost,
-      totalTokens,
-      totalInputTokens: summaryResult?.totalInputTokens ?? 0,
-      totalOutputTokens: summaryResult?.totalOutputTokens ?? 0,
-      totalCacheCreationTokens: summaryResult?.totalCacheCreationTokens ?? 0,
-      totalCacheReadTokens: summaryResult?.totalCacheReadTokens ?? 0,
-      totalCacheCreation5mTokens: summaryResult?.totalCacheCreation5mTokens ?? 0,
-      totalCacheCreation1hTokens: summaryResult?.totalCacheCreation1hTokens ?? 0,
-    },
+    logs: rowsPart.logs,
+    total: summaryPart.total,
+    summary: summaryPart.summary,
   };
 }
 
@@ -1798,14 +1823,6 @@ export async function findUsageLogsStats(
         usageLedger.originalModel
       )
     );
-  }
-
-  const hiddenStatsLedgerEndpointCondition = buildDefaultHiddenUsageLogEndpointCondition(
-    usageLedger.endpoint,
-    filters.endpoint
-  );
-  if (hiddenStatsLedgerEndpointCondition) {
-    conditions.push(hiddenStatsLedgerEndpointCondition);
   }
 
   if (filters.endpoint?.trim()) {

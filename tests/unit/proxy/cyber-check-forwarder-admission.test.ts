@@ -14,6 +14,7 @@ const mocks = vi.hoisted(() => ({
   applyFinal: vi.fn(async () => {}),
   delay: vi.fn(async () => undefined),
   getEnvConfig: vi.fn(),
+  hasFinalBodyFilters: vi.fn(async () => false),
 }));
 
 vi.mock("node:timers/promises", () => ({
@@ -38,7 +39,10 @@ vi.mock("@/lib/logger", () => ({
   },
 }));
 vi.mock("@/lib/request-filter-engine", () => ({
-  requestFilterEngine: { applyFinal: mocks.applyFinal },
+  requestFilterEngine: {
+    applyFinal: mocks.applyFinal,
+    hasFinalBodyFilters: mocks.hasFinalBodyFilters,
+  },
 }));
 
 function createProvider(url = "https://codex.example.com/v1"): Provider {
@@ -187,6 +191,8 @@ async function close(server: Server): Promise<void> {
 describe("ProxyForwarder cyber-check admission boundary", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.applyFinal.mockImplementation(async () => {});
+    mocks.hasFinalBodyFilters.mockImplementation(async () => false);
     mocks.getEnvConfig.mockReturnValue({
       CYBER_CHECK_MODE: "enforce",
       CYBER_CHECK_URL: "http://127.0.0.1:8090",
@@ -343,6 +349,7 @@ describe("ProxyForwarder cyber-check admission boundary", () => {
     const session = createSession(message);
     const provider = createProvider();
 
+    mocks.hasFinalBodyFilters.mockImplementation(async () => true);
     mocks.applyFinal.mockImplementation(async (_session, body) => {
       events.push("final_filter");
       (body.input as unknown[]).push({
