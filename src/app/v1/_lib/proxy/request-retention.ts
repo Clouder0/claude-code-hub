@@ -11,14 +11,34 @@ function summarizeDiagnosticString(value: unknown): string | null {
   return value.slice(0, DIAGNOSTIC_STRING_MAX_LENGTH);
 }
 
+// 摄入侧人群（直读原始流 + parse 即丢 buffer + 摘要日志）：仅标准 /v1/responses。
+// /v1/responses/compact 是 raw_passthrough 端点——其转发通货就是 request.buffer，
+// 且契约要求 c.req.raw 保持未消费（bodyUsed=false），不能进本人群。
+const HIGH_CONCURRENCY_CODEX_INTAKE_ENDPOINTS = new Set<string>([
+  V1_ENDPOINT_PATHS.RESPONSES,
+]);
+
+// 释放侧人群（TTFB 释放/资格门控）：compact 一并纳入——它是流式 codex
+// （生产实测 TTFB 1-7s ≪ duration 29-168s），此前因精确匹配错过释放，
+// 树+buffer 持有到整个 compact 生命周期（~4×）。
+const HIGH_CONCURRENCY_CODEX_RELEASE_ENDPOINTS = new Set<string>([
+  V1_ENDPOINT_PATHS.RESPONSES,
+  V1_ENDPOINT_PATHS.RESPONSES_COMPACT,
+]);
+
 export function shouldDirectlyConsumeHighConcurrencyCodexRequest(
   pathname: string,
   options: ProxySessionCreationOptions
 ): boolean {
   return (
     options.highConcurrencyModeEnabled === true &&
-    normalizeEndpointPath(pathname) === V1_ENDPOINT_PATHS.RESPONSES
+    HIGH_CONCURRENCY_CODEX_INTAKE_ENDPOINTS.has(normalizeEndpointPath(pathname))
   );
+}
+
+/** TTFB 释放/资格门控的端点判定：摄入人群是其子集，杜绝两处漂移。 */
+export function isHighConcurrencyCodexReleaseEndpoint(pathname: string): boolean {
+  return HIGH_CONCURRENCY_CODEX_RELEASE_ENDPOINTS.has(normalizeEndpointPath(pathname));
 }
 
 export function shouldUseHighConcurrencyCodexSseRetention(

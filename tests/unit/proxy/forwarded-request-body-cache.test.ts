@@ -29,23 +29,78 @@ function createSession(requestMessage: Record<string, unknown> = {}): ProxySessi
   });
 }
 
-describe("ProxySession forwarded request body cache", () => {
-  test("setForwardedRequestBody seeds the cache so billing never re-parses the string", () => {
+const encoder = new TextEncoder();
+const decoder = new TextDecoder();
+
+describe("ProxySession forwarded request body currency (bytes-as-currency)", () => {
+  test("setForwardedRequestBody stores external bytes and demotes the tree to projection", () => {
     const session = createSession();
     const forwarded = { model: "gpt-5.6-codex", stream: true, service_tier: "priority" };
     const bodyString = JSON.stringify(forwarded);
 
     session.setForwardedRequestBody(bodyString, forwarded);
 
-    expect(session.forwardedRequestBody).toBe(bodyString);
-    // 同一引用即证明没有发生 lazy JSON.parse。
-    expect(session.getBillingRequestMessage()).toBe(forwarded);
+    expect(session.forwardedRequestBody).toBeInstanceOf(Uint8Array);
+    expect(decoder.decode(session.forwardedRequestBody ?? new Uint8Array())).toBe(bodyString);
+    // 树即刻退位为投影：深度字段不可达。
+    expect(session.isRequestMessageProjection()).toBe(true);
+    expect((session.request.message as Record<string, unknown>).input).toBeUndefined();
+    // 计费读取投影标量。
     expect(session.getBillingModel()).toBe("gpt-5.6-codex");
+    expect(session.getBillingRequestMessage()).toMatchObject({
+      model: "gpt-5.6-codex",
+      stream: true,
+      service_tier: "priority",
+    });
   });
 
-  test("legacy direct string assignment still lazily parses (fallback path)", () => {
+  test("getForwardedRequestMessage caches projection only — full tree is never retained", () => {
     const session = createSession();
-    session.forwardedRequestBody = '{"model":"claude-sonnet-4-6","stream":false}';
+    const forwarded = {
+      model: "a",
+      stream: true,
+      input: [{ role: "user", content: "x".repeat(64) }],
+    };
+    session.setForwardedRequestBody(JSON.stringify(forwarded), forwarded);
+
+    const message = session.getForwardedRequestMessage();
+    expect(message).toMatchObject({ model: "a", stream: true });
+    // 投影键集之外的深度字段不进入缓存。
+    expect(message?.input).toBeUndefined();
+    expect(message?.thinking).toBeUndefined();
+  });
+
+  test("rematerializeRequestMessageForRetry restores the full working tree from bytes", () => {
+    const session = createSession();
+    const forwarded = {
+      model: "a",
+      stream: true,
+      input: [{ role: "user", content: "payload" }],
+    };
+    session.setForwardedRequestBody(JSON.stringify(forwarded), forwarded);
+    expect(session.isRequestMessageProjection()).toBe(true);
+
+    expect(session.rematerializeRequestMessageForRetry()).toBe(true);
+    expect(session.isRequestMessageProjection()).toBe(false);
+    expect(session.request.message).toEqual(forwarded);
+    // 重物化后通货仍在（下一次序列化会再次退位）。
+    expect(session.forwardedRequestBody).toBeInstanceOf(Uint8Array);
+  });
+
+  test("rematerialize is a no-op before first send and after release", () => {
+    const fresh = createSession({ model: "a", input: [1] });
+    expect(fresh.rematerializeRequestMessageForRetry()).toBe(false);
+
+    const session = createSession();
+    session.setForwardedRequestBody(JSON.stringify({ model: "a" }), { model: "a" });
+    session.noteRequestBodyReleaseEligible();
+    session.releaseRequestBodyAfterCommit();
+    expect(session.rematerializeRequestMessageForRetry()).toBe(false);
+  });
+
+  test("direct byte assignment still lazily projects (fallback path)", () => {
+    const session = createSession();
+    session.forwardedRequestBody = encoder.encode('{"model":"claude-sonnet-4-6","stream":false}');
 
     expect(session.getBillingRequestMessage()).toEqual({
       model: "claude-sonnet-4-6",
@@ -54,17 +109,7 @@ describe("ProxySession forwarded request body cache", () => {
     expect(session.getBillingModel()).toBe("claude-sonnet-4-6");
   });
 
-  test("direct re-assignment of the string invalidates the seeded cache", () => {
-    const session = createSession();
-    const forwarded = { model: "a", service_tier: "default" };
-    session.setForwardedRequestBody(JSON.stringify(forwarded), forwarded);
-
-    session.forwardedRequestBody = '{"model":"b"}';
-
-    expect(session.getBillingRequestMessage()).toEqual({ model: "b" });
-  });
-
-  test("clearForwardedRequestBody drops string and cached pair", () => {
+  test("clearForwardedRequestBody drops currency and cached projection", () => {
     const session = createSession({ model: "fallback" });
     const forwarded = { model: "a" };
     session.setForwardedRequestBody(JSON.stringify(forwarded), forwarded);
@@ -72,24 +117,37 @@ describe("ProxySession forwarded request body cache", () => {
     session.clearForwardedRequestBody();
 
     expect(session.forwardedRequestBody).toBeNull();
-    // 无 forwarded body 时回退到 session.request.message。
+    // 无 forwarded body 时回退到 session.request.message（本例中已是投影）。
     expect(session.getBillingRequestMessage()).toBe(session.request.message);
+    expect(session.getBillingRequestMessage()).toMatchObject({ model: "a" });
   });
 
-  test("copyForwardedRequestBodyFrom carries string and cached pair (hedge winner sync)", () => {
+  test("copyForwardedRequestBodyFrom carries the currency (hedge winner sync)", () => {
     const source = createSession();
     const forwarded = { model: "a", service_tier: "priority" };
-    const bodyString = JSON.stringify(forwarded);
-    source.setForwardedRequestBody(bodyString, forwarded);
+    source.setForwardedRequestBody(JSON.stringify(forwarded), forwarded);
 
     const target = createSession();
     target.copyForwardedRequestBodyFrom(source);
 
-    expect(target.forwardedRequestBody).toBe(bodyString);
-    expect(target.getBillingRequestMessage()).toBe(forwarded);
+    expect(target.forwardedRequestBody).toBe(source.forwardedRequestBody);
+    expect(target.getBillingRequestMessage()).toMatchObject({
+      model: "a",
+      service_tier: "priority",
+    });
   });
 
-  test("shadow session copy does not leak cached pair after clear", () => {
+  test("setForwardedRequestBodySummary stores bytes without demoting the tree", () => {
+    const session = createSession({ model: "raw", input: [1, 2] });
+    session.setForwardedRequestBodySummary("(raw passthrough summary)");
+
+    expect(session.forwardedRequestBody).toBeInstanceOf(Uint8Array);
+    expect(session.isRequestMessageProjection()).toBe(false);
+    // 摘要非 JSON：投影解析失败回退到完整 request.message。
+    expect(session.getBillingRequestMessage()).toBe(session.request.message);
+  });
+
+  test("shadow session copy does not leak currency after clear", () => {
     const tracking = createSession();
     const forwarded = { model: "a" };
     tracking.setForwardedRequestBody(JSON.stringify(forwarded), forwarded);
@@ -104,6 +162,6 @@ describe("ProxySession forwarded request body cache", () => {
     expect(shadow.forwardedRequestBody).toBeNull();
     expect(shadow.getBillingRequestMessage()).toBe(shadow.request.message);
     // 原 session 不受影响。
-    expect(tracking.getBillingRequestMessage()).toBe(forwarded);
+    expect(tracking.getBillingRequestMessage()).toMatchObject({ model: "a" });
   });
 });

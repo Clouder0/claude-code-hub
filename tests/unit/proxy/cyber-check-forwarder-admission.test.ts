@@ -240,7 +240,8 @@ describe("ProxyForwarder cyber-check admission boundary", () => {
       });
 
     await expect(forward(session, provider)).resolves.toBeInstanceOf(Response);
-    const forwardedBody = session.forwardedRequestBody;
+    // bytes 通货：文本视图即实际出站内容。
+    const forwardedBody = session.getForwardedRequestBodyText();
     expect(forwardedBody).not.toBeNull();
 
     // The final SSE return boundary may release the tracking Session while a shadow
@@ -267,7 +268,7 @@ describe("ProxyForwarder cyber-check admission boundary", () => {
 
     const packet = reviewPacketFrom(reviewFetch.mock.calls[0]);
     expect(packet.source.body_sha256).toBe(
-      createHash("sha256").update(String(forwardedBody)).digest("hex")
+      createHash("sha256").update(forwardedBody ?? "").digest("hex")
     );
   });
 
@@ -378,7 +379,7 @@ describe("ProxyForwarder cyber-check admission boundary", () => {
 
     expect(events).toEqual(["final_filter", "review", "upstream"]);
     expect(typeof upstreamBody).toBe("string");
-    expect(session.forwardedRequestBody).toBe(upstreamBody);
+    expect(session.getForwardedRequestBodyText()).toBe(upstreamBody);
 
     const packet = reviewPacketFrom(reviewFetch.mock.calls[0]);
     expect(packet.items).toEqual(

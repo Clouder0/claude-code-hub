@@ -103,6 +103,10 @@ function createMockSession(overrides: Record<string, unknown> = {}) {
     ttfbMs: 200,
     forwardStartTime: startTime + 5,
     forwardedRequestBody: null,
+    // bytes 通货下的文本视图（mock 以字符串表示通货，视图原样返回）。
+    getForwardedRequestBodyText() {
+      return typeof this.forwardedRequestBody === "string" ? this.forwardedRequestBody : null;
+    },
     getEndpoint: () => "/v1/messages",
     getRequestSequence: () => 3,
     getMessagesLength: () => 1,

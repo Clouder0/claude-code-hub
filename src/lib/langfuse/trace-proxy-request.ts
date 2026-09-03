@@ -100,10 +100,7 @@ export interface TraceContext {
 }
 
 function hasRequestInput(ctx: TraceContext): boolean {
-  if (
-    typeof ctx.session.forwardedRequestBody === "string" &&
-    ctx.session.forwardedRequestBody.trim().length > 0
-  ) {
+  if (ctx.session.forwardedRequestBody !== null) {
     return true;
   }
 
@@ -204,8 +201,9 @@ export async function traceProxyRequest(ctx: TraceContext): Promise<void> {
     }
 
     // Actual request body (forwarded to upstream after all preprocessing) - no truncation
-    const actualRequestBody = session.forwardedRequestBody
-      ? tryParseJsonSafe(session.forwardedRequestBody)
+    const actualRequestBodyText = session.getForwardedRequestBodyText?.() ?? null;
+    const actualRequestBody = actualRequestBodyText
+      ? tryParseJsonSafe(actualRequestBodyText)
       : session.request.message;
 
     // Actual response body - no truncation

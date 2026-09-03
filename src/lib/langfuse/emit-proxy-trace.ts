@@ -58,9 +58,10 @@ function buildLangfuseSessionSnapshot(session: ProxySession): ProxySession {
   const endpoint = session.getEndpoint();
   const requestSequence = session.getRequestSequence();
   const messagesLength = session.getMessagesLength();
+  const forwardedRequestBodyText = session.getForwardedRequestBodyText?.() ?? null;
   const forwardedRequestBody =
-    typeof session.forwardedRequestBody === "string"
-      ? truncateResponseTextForLangfuse(session.forwardedRequestBody)
+    forwardedRequestBodyText !== null
+      ? truncateResponseTextForLangfuse(forwardedRequestBodyText)
       : null;
   const requestMessage = buildRequestMessagePreview(session.getBillingRequestMessage());
 

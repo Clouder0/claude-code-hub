@@ -499,23 +499,27 @@ describe("ProxySession forwarded billing request", () => {
         service_tier: "default",
       },
     });
-    session.forwardedRequestBody = JSON.stringify({
-      model: "gpt-5.6-sol",
-      service_tier: "priority",
-      prompt_cache_options: { mode: "explicit" },
-    });
+    // bytes 通货：直赋也用 bytes；计费视图为投影（标量键集）。
+    session.forwardedRequestBody = new TextEncoder().encode(
+      JSON.stringify({
+        model: "gpt-5.6-sol",
+        service_tier: "priority",
+        prompt_cache_options: { mode: "explicit" },
+      })
+    );
 
     expect(session.getBillingModel()).toBe("gpt-5.6-sol");
     expect(session.getBillingRequestMessage()).toEqual({
       model: "gpt-5.6-sol",
       service_tier: "priority",
-      prompt_cache_options: { mode: "explicit" },
     });
 
-    session.forwardedRequestBody = JSON.stringify({
-      model: "gpt-5.6-terra",
-      service_tier: "default",
-    });
+    session.forwardedRequestBody = new TextEncoder().encode(
+      JSON.stringify({
+        model: "gpt-5.6-terra",
+        service_tier: "default",
+      })
+    );
     expect(session.getBillingModel()).toBe("gpt-5.6-terra");
     expect(session.getBillingRequestMessage()).toEqual({
       model: "gpt-5.6-terra",
@@ -537,7 +541,9 @@ describe("ProxySession forwarded billing request", () => {
       redirectedModel: "routed-model",
       requestMessage: { model: "routed-model" },
     });
-    session.forwardedRequestBody = JSON.stringify({ model: "gpt-5.6-sol" });
+    session.forwardedRequestBody = new TextEncoder().encode(
+      JSON.stringify({ model: "gpt-5.6-sol" })
+    );
 
     const resolved = await session.getResolvedPricingByBillingSource();
 

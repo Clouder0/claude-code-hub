@@ -172,14 +172,14 @@ describe("ProxyForwarder - private parameter scan-first passthrough", () => {
     const captured = await driveDoForward(session, provider);
 
     expect(captured).toBe(JSON.stringify(message));
-    expect(session.forwardedRequestBody).toBe(captured);
+    // bytes 通货：解码后与实际上游出站字节一致。
+    expect(session.getForwardedRequestBodyText()).toBe(captured);
 
     const billingView = session.getBillingRequestMessage() as Record<string, unknown>;
-    // 顶层是浅拷贝（隔离跨 attempt 的 ModelRedirector 顶层 model 改写）
+    // 通货语义：计费视图是投影，深度字段完全不留存（比"浅拷贝共享"更强）。
     expect(billingView).not.toBe(message);
-    // 嵌套结构按引用共享：没有整树深克隆
-    expect(billingView.input).toBe(message.input);
-    // 透传后对原树的顶层改写不影响已缓存的计费视图
+    expect(billingView.input).toBeUndefined();
+    // 透传后对原树的顶层改写不影响已固化的计费投影
     message.model = "mutated-after-forward";
     expect(billingView.model).toBe("gpt-5.6-sol");
   });

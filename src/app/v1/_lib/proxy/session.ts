@@ -204,12 +204,20 @@ export class ProxySession {
   forwardStartTime: number | null = null;
 
   // Actual serialized request body sent to upstream (after all preprocessing).
-  forwardedRequestBody: string | null = null;
+  // bytes 通货：以 Uint8Array（堆外 ArrayBuffer）保存——重试阶梯从 bytes 瞬态重解析，
+  // 不再把完整解析树与序列化串钉到提交点（2026-09-03 午间 OOM：~54MB 均值 × ~20 并发
+  // × 3× 堆内保留打穿 memcg，见 cops notes/2026-09-03-cch-midday-oom-final-root-cause.md）。
+  forwardedRequestBody: Uint8Array | null = null;
 
-  // Lazily decoded view of forwardedRequestBody. The source string guards against direct
-  // assignments made by retries/tests so billing never reuses a snapshot from another attempt.
-  private forwardedRequestMessageSource: string | null = null;
+  // forwardedRequestBody 的惰性投影视图（仅标量 + thinking），永不缓存完整树——
+  // 计费消费者（service_tier/model/thinking/langfuse 预览）全部落在投影键集内。
+  // 源引用比对守卫：直赋（重试/测试）换新 bytes 实例即失效缓存，杜绝陈旧解码。
+  private forwardedRequestMessageSource: Uint8Array | null = null;
   private forwardedRequestMessage: Record<string, unknown> | null = null;
+
+  // request.message 是否已退位为投影（首次发送后）。重试需要完整消息时经
+  // rematerializeRequestMessageForRetry() 从通货 bytes 恢复。
+  private requestMessageIsProjection = false;
 
   // 最终流响应关闭内部重试边界后是否已释放请求体（见 releaseRequestBodyAfterCommit）。
   private requestBodyReleased = false;
@@ -229,10 +237,13 @@ export class ProxySession {
   private workingSetLease: { release(): void } | null = null;
 
   /**
-   * Record the forwarded body together with the object it was serialized from.
-   * Billing reads via getForwardedRequestMessage() then hit the cached object instead of
-   * re-parsing a multi-MB string. Callers must not mutate `message` afterwards (the
-   * forwarder serializes immediately before this call and never touches it again).
+   * Record the forwarded body and demote the parsed tree to its billing projection.
+   *
+   * The serialized bytes become the sole retry currency (heap-external); the caller's
+   * tree dies with its local scope. Retries re-materialize via
+   * rematerializeRequestMessageForRetry()（从上次实际出站瞬态重解析——私有参数已滤、
+   * 每 attempt 的改写在浅层字段上幂等）and re-serialize with the next attempt's
+   * overrides, so per-provider mutation semantics are preserved.
    */
   setForwardedRequestBody(bodyString: string, message: Record<string, unknown>): void {
     if (this.requestBodyReleased) {
@@ -240,28 +251,39 @@ export class ProxySession {
         "setForwardedRequestBody called after releaseRequestBodyAfterCommit: the request body was released at gate commit and no re-forward path may exist"
       );
     }
-    this.forwardedRequestBody = bodyString;
-    this.forwardedRequestMessageSource = bodyString;
-    this.forwardedRequestMessage = message;
+    this.forwardedRequestBody = FORWARD_BODY_ENCODER.encode(bodyString);
+    this.forwardedRequestMessage = null;
+    this.forwardedRequestMessageSource = null;
+    this.request.message = buildRequestBodyProjection(message);
+    this.requestMessageIsProjection = true;
   }
 
   /**
-   * Drop the forwarded body and its cached decode (hedge shadow sessions must not
+   * raw-passthrough / multipart 摘要直赋（小字符串；不换投影——这两条路径的
+   * 重试通货分别是 request.buffer / multipart 元数据，不经 setForwardedRequestBody）。
+   */
+  setForwardedRequestBodySummary(summary: string): void {
+    this.forwardedRequestBody = FORWARD_BODY_ENCODER.encode(summary);
+    this.forwardedRequestMessage = null;
+    this.forwardedRequestMessageSource = null;
+  }
+
+  /**
+   * Drop the forwarded body and its cached projection (hedge shadow sessions must not
    * inherit the tracking session's pair, and should release the retained tree).
    */
   clearForwardedRequestBody(): void {
     this.forwardedRequestBody = null;
-    this.forwardedRequestMessageSource = null;
     this.forwardedRequestMessage = null;
+    this.forwardedRequestMessageSource = null;
   }
 
-  /** Carry the forwarded body and its cached decode across hedge winner sync. */
+  /** Carry the forwarded body currency across hedge winner sync. */
   copyForwardedRequestBodyFrom(source: ProxySession): void {
     this.forwardedRequestBody = source.forwardedRequestBody;
-    this.forwardedRequestMessageSource = source.forwardedRequestMessageSource;
-    this.forwardedRequestMessage = source.forwardedRequestMessage;
+    this.forwardedRequestMessage = null;
     // 正常时序中 winner sync 早于门控提交；若发生 copy 到已释放目标，
-    // 以拷贝来的活跃对为准，解除 released 状态避免 getter 返回过期投影。
+    // 以拷贝来的活跃通货为准，解除 released 状态避免 getter 返回过期投影。
     this.requestBodyReleased = false;
   }
 
@@ -302,9 +324,43 @@ export class ProxySession {
     this.forwardedRequestBody = null;
     this.forwardedRequestMessageSource = null;
     this.forwardedRequestMessage = projection;
+    this.requestMessageIsProjection = false;
     // request 本身是 readonly，但其字段可变：就地清空大对象引用。
     this.request.message = RELEASED_REQUEST_BODY_MESSAGE;
     this.request.buffer = undefined;
+  }
+
+  /**
+   * 重试用：request.message 已退位为投影时，从通货 bytes 瞬态恢复完整工作树。
+   * 树仅在本次 attempt 的准备/序列化期间存活，随下一次 setForwardedRequestBody
+   * 再次退位。提交后（requestBodyReleased）结构上无重试，恒返回 false。
+   */
+  rematerializeRequestMessageForRetry(): boolean {
+    if (!this.requestMessageIsProjection || this.requestBodyReleased) return false;
+    if (!this.forwardedRequestBody) return false;
+    try {
+      const parsed = JSON.parse(FORWARD_BODY_DECODER.decode(this.forwardedRequestBody));
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return false;
+      this.request.message = parsed as Record<string, unknown>;
+      this.requestMessageIsProjection = false;
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  isRequestMessageProjection(): boolean {
+    return this.requestMessageIsProjection;
+  }
+
+  /**
+   * 通货的文本视图，仅供小流量读者（langfuse 预览 / 会话调试快照）使用；
+   * 巨体通货下调用会物化整份字符串，热路径禁止使用。
+   */
+  getForwardedRequestBodyText(): string | null {
+    return this.forwardedRequestBody === null
+      ? null
+      : FORWARD_BODY_DECODER.decode(this.forwardedRequestBody);
   }
 
   /** parse 阶段标记：请求属于高并发 codex SSE 保留人群（见上方两段式注释）。 */
@@ -1043,24 +1099,30 @@ export class ProxySession {
       return this.forwardedRequestMessage;
     }
 
-    const source = this.forwardedRequestBody;
-    if (!source) {
+    if (!this.forwardedRequestBody) {
       return null;
     }
 
-    if (this.forwardedRequestMessageSource === source) {
+    if (
+      this.forwardedRequestMessage !== null &&
+      this.forwardedRequestMessageSource === this.forwardedRequestBody
+    ) {
       return this.forwardedRequestMessage;
     }
 
-    this.forwardedRequestMessageSource = source;
-    try {
-      const parsed = JSON.parse(source);
-      this.forwardedRequestMessage =
-        parsed && typeof parsed === "object" && !Array.isArray(parsed)
-          ? (parsed as Record<string, unknown>)
-          : null;
-    } catch {
-      this.forwardedRequestMessage = null;
+    if (this.forwardedRequestMessageSource !== this.forwardedRequestBody) {
+      // 只缓存投影：消费者（service_tier/model/thinking/langfuse 预览）全部落在
+      // 投影键集内；完整树解完即弃，不被后续读取重新钉住。
+      this.forwardedRequestMessageSource = this.forwardedRequestBody;
+      try {
+        const parsed = JSON.parse(FORWARD_BODY_DECODER.decode(this.forwardedRequestBody));
+        this.forwardedRequestMessage =
+          parsed && typeof parsed === "object" && !Array.isArray(parsed)
+            ? buildRequestBodyProjection(parsed as Record<string, unknown>)
+            : null;
+      } catch {
+        this.forwardedRequestMessage = null;
+      }
     }
     return this.forwardedRequestMessage;
   }
@@ -1112,7 +1174,9 @@ export class ProxySession {
     }
 
     this.request.buffer = new TextEncoder().encode(serialized).buffer;
-    this.request.log = JSON.stringify(optimizeRequestMessage(this.request.message), null, 2);
+    this.request.log = capRequestLogForRetention(
+      JSON.stringify(optimizeRequestMessage(this.request.message), null, 2)
+    );
   }
 
   /**
@@ -1482,6 +1546,17 @@ function optimizeRequestMessage(message: Record<string, unknown>): Record<string
   return optimized;
 }
 
+// 请求日志的驻留上限：诊断可见性契约要求保留结构（含 compact trigger 的
+// input.type、normal-mode 内容预览），但巨体下日志不允许成为 1.2× body 的
+// 常驻副本——序列化后按字符数截断，兼顾两侧。
+const REQUEST_LOG_MAX_CHARS = 64 * 1024;
+
+function capRequestLogForRetention(text: string): string {
+  return text.length > REQUEST_LOG_MAX_CHARS
+    ? `${text.slice(0, REQUEST_LOG_MAX_CHARS)}\n…(request log truncated at ${REQUEST_LOG_MAX_CHARS} chars)`
+    : text;
+}
+
 function resolveSessionManagedEndpoint(
   requestUrl: URL,
   requestMessage: Record<string, unknown>
@@ -1530,6 +1605,11 @@ const LARGE_REQUEST_BODY_BYTES = 10 * 1024 * 1024;
 
 // 摄入路径的 TextDecoder：decode() 不带 stream 选项时每次调用前重置状态，可安全共享
 const INTAKE_TEXT_DECODER = new TextDecoder();
+
+// bytes 通货编解码：encode 产出堆外 ArrayBuffer 视图（脱离 V8 堆），decode 供
+// 重试重解析与计费投影读取的瞬态转换。
+const FORWARD_BODY_ENCODER = new TextEncoder();
+const FORWARD_BODY_DECODER = new TextDecoder();
 
 function parseContentLengthHeader(value: string | undefined): number | null {
   if (!value) return null;
@@ -1662,12 +1742,16 @@ async function parseRequestBody(
       requestBodyLogNote =
         "High-concurrency Codex SSE request body omitted; structural summary retained.";
     } else {
-      requestBodyLog = JSON.stringify(optimizeRequestMessage(parsedMessage), null, 2); // 仅在日志中优化
+      requestBodyLog = capRequestLogForRetention(
+        JSON.stringify(optimizeRequestMessage(parsedMessage), null, 2)
+      ); // 仅在日志中优化，且按驻留上限截断
     }
   } catch {
-    requestMessage = { raw: requestBodyText };
-    requestBodyLog = requestBodyText;
-    requestBodyLogNote = "请求体不是合法 JSON，已记录原始文本。";
+    // 非 JSON 大请求体：原文仅保留前缀（排障够用），避免 message 与 log 双份
+    // 全量字符串驻留整个请求生命周期。原始字节仍完整保留在 requestBodyBuffer。
+    requestMessage = { raw: capRequestLogForRetention(requestBodyText) };
+    requestBodyLog = capRequestLogForRetention(requestBodyText);
+    requestBodyLogNote = "请求体不是合法 JSON，已记录原始文本前缀。";
   }
 
   return {

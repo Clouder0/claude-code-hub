@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildHighConcurrencyCodexRequestSummary,
+  isHighConcurrencyCodexReleaseEndpoint,
   shouldDirectlyConsumeHighConcurrencyCodexRequest,
   shouldUseHighConcurrencyCodexSseRetention,
 } from "@/app/v1/_lib/proxy/request-retention";
@@ -89,5 +90,14 @@ describe("Codex request retention policy", () => {
       receivedBodyBytes: 0,
       decodedBodyBytes: 0,
     });
+  });
+});
+
+describe("high-concurrency codex release endpoint set", () => {
+  it("releases both /v1/responses and /v1/responses/compact at TTFB", () => {
+    expect(isHighConcurrencyCodexReleaseEndpoint("/v1/responses")).toBe(true);
+    expect(isHighConcurrencyCodexReleaseEndpoint("/V1/RESPONSES/COMPACT/")).toBe(true);
+    expect(isHighConcurrencyCodexReleaseEndpoint("/v1/messages")).toBe(false);
+    expect(isHighConcurrencyCodexReleaseEndpoint("/v1/responses/other")).toBe(false);
   });
 });

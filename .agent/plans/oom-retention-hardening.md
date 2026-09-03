@@ -65,7 +65,69 @@ stringify 缓存评估后不做:ModelRedirector 每 attempt 原地改写顶层
 message.model,缓存 key 复杂化不值得(重试占比小,单次 ~2-5ms)。
 字节直方图已并入 Commit 1 的指标循环(charge/window 百分位)。
 
-## 验证
+## Phase 2 — 管道副本清剿(2026-09-03 与 Human 对齐定稿;同日实现完成见文末状态)
+
+背景:午间事故归因(cops `notes/2026-09-03-cch-midday-oom-final-root-cause.md`)证明 Commit 1/2 之外
+的主导项 = **树(~2× body,V8 堆内)从 parse 持有到 TTFB**(codex 巨体 54MB 均值 × 30-120s 窗口 ×
+~20 并发)。方向经多轮对齐收敛:**先做管道内逐点副本清剿(本阶段),admission 保持 env 可选
+(已实现,默认 0=禁用),磁盘 offload 仅作最后手段不实现**。hotpath RAM 优化落在细节;任何门控按
+字节估算 RAM 而非按并发请求计数(槽位信号量方案已否决)。
+
+提交序列(每步独立可测,vitest + 本地合成负载断言 RSS):
+
+1. **树在首次发送时死亡,出站 bytes 成为唯一通货**(2026-09-03 二次复检精化):源码已存
+   `forwardedRequestBody`(完整序列化串,直到释放才 null)+`forwardedRequestMessage`(浅引用树,
+   计费缓存)+`request.message`——正常路径 TTFB 前实存 ≈3×(树 2× + 堆内 string 1×),与实测
+   3.25G 更吻合。修复=改造现有结构而非新机制:①setForwardedRequestBody 时以 Uint8Array 存储
+   通货(堆→堆外,B 的 640M heap 关键);②同时把 request.message 就地换投影(投影机制已在
+   release 中存在,计费"释放后走投影"语义已生产验证);③无变更 attempt 直接复用 bytes
+   (原"缓存不值得"结论是树通货前提下的,bytes 通货下复用免费);有变更才瞬态重解析。
+   净效果 3×(含堆内)→1×(堆外)。
+2. buffer 在 parse 后即死(仅 raw-passthrough 例外)——生产 codex 流式人群**已在 parse 丢弃**
+   (复检确认),本项收窄为 messages/gemini/非流式小流量路径 + **rectifier 例外**:
+   `syncRequestBodyFromMessage`(response-input-rectifier 触发)会重建 buffer(1×)+ 重建**完整**
+   pretty-log(1115 行,input 不截断)——实现时必须核其实际触发频率并纳入 2/3 的处置范围。
+3. pretty-log 惰性化——生产 codex 路径 intake 已摘要化(复检确认),真正残留仅 rectifier 重建
+   路径(见 2)与小流量端点;`input`/`contents` 截断照做。
+4. (并入 1)通货用 Uint8Array 而非 string——不是微小优化,是堆→堆外的类别迁移。
+5. ~~cyber tee 内部分支按字节限界~~ **(2026-09-03 复核降级)**:重读源码证实内部消费已有界——
+   `BoundedStreamTextAccumulator` 只留头+尾快照(STREAM_STATS_HEAD_BYTES 封顶),慢 I/O
+   (cyber 上传/计费/Redis)全在流结束后的 finalize,且 b614eb25 已拆掉上传对树/文本的钉扎。
+   事故中的 TimeoutError 风暴是噪声无内存实害。残留疑点已闭:**生产 langfuse 未启用**
+   (A/B env 与 system_settings 均无 langfuse 配置),全量文本路径不会激活,本项无事可做。
+   compact pathname 补进两处保留判断照旧(现因精确匹配全程 ~4×)。
+6. 摄入阶段客户端断开接线——复检降级:无背压暂停态时,Node http server 在断连时已让请求流
+   error 出清,b614eb25 又已接响应阶段 abort;真正需要它的是 Layer 2 的"暂停中断开"状态,
+   随 Layer 2 一并做。
+7. 流式解压**不做**——先加压缩巨体计数器,有真实流量再议。
+
+admission 使用原则:启用前保留观测(runtime_metrics 已输出 inUseBytes/highWaterBytes),
+"估算 vs 实测 RSS"即生产校准;水位线用实测值回填。磁盘 offload 触发条件(记录不实现):
+管道清剿后仍有 1×bytes × 并发的实测证据超出 memcg 预算。
+
+### 基石提交实现简报(2026-09-03 开工,触点地图)
+
+`session.request.message` 在 forwarder 的读写触点(改前必查):
+- 678:早期读取(发送前,安全);1173:rectifier;
+- **2681-2942:每 attempt 的 body 改写阶段**(model redirect/anthropic override/cache TTL,
+  原地改写 session.request.message——这是树必须活到 commit 的原因,也是 bytes 通货要替代的消费者);
+- 3067/4269:读 stream 标量;3078/5334:hedge shadow structuredClone(生产未启用);
+- **3128-3181:序列化站点**(`{...spread}` 浅拷贝 → 过滤 → JSON.stringify → setForwardedRequestBody);
+- 3380 附近注释:重试改写语义说明。
+session 侧:`forwardedRequestBody: string|null`(计费惰性解码源, getForwardedRequestMessage
+1041-1044 已有 released→投影 分支);`setForwardedRequestBody` 237-246。
+设计落点:①序列化完成后立刻把 request.message 换投影+通货转 Uint8Array(堆外);
+②2681-2942 的每 attempt 改写改为「从 bytes 重解析→浅改→重序列化」(瞬态,仅重试);
+③无变更 attempt 直接复用 bytes;④getForwardedRequestMessage 的惰性解码源改为 bytes。
+**最终落点(已核实)**:改写区+序列化站都在 `doForward(attemptNumber?)` 单函数内、每 attempt
+重入——钩子=doForward 顶部「若 request.message 已是投影且 bytes 在→从 bytes 瞬态重解析为工作树」
++ setForwardedRequestBody 后「换投影+转 Uint8Array」。重解析源=上一次 attempt 的实际出站
+(私有参数已滤,幂等改写安全)。注意:投影须含 `stream` 标量(3067/4269 读它);
+release 的 source 选择 forwardedRequestMessage 优先,不受影响;rectifier(1173)在发送前,
+不受影响。
+计费语义锚点:post-TTFB 计费走投影已是生产验证行为(成功流每天如此)。
+
+## 验证(Phase 1)
 
 - 新增 24 测试(准入计量/释放资格/cyber 作用域/准入守卫/intake 上限/
   deadline 解析)全绿;
@@ -86,3 +148,21 @@ message.model,缓存 key 复杂化不值得(重试占比小,单次 ~2-5ms)。
 3. 启用水位:A `CCH_ADMISSION_MAX_RETAINED_BYTES=2147483648`(2G)、
    B=751619276(0.7G)量级起步,按 runtime_metrics 标定。
 4. TTFB 回归对照:上线前后各取一天 sol p50/p95。
+
+## Phase 2 实现状态(2026-09-03)
+
+已实现并全量验证(worktree zcode/oom-retention-hardening):
+- **bytes 通货**(基石):setForwardedRequestBody 以 Uint8Array 存出站体(堆外),request.message
+  即刻退位为计费投影;重试经 rematerializeRequestMessageForRetry 从 bytes 瞬态重解析(doForward
+  顶部钩子 + hedge 克隆前置重物化);getForwardedRequestMessage 只缓存投影,源引用守卫保留(直赋
+  失效)。计费/诊断消费者经 getForwardedRequestBodyText()(仅 langfuse/调试快照,入口守卫后,
+  langfuse 生产未启用=零边际成本)。TTFB 窗口存留 3×(含堆内)→1×(堆外)。
+- **compact 释放域修正**:compact 是 raw_passthrough 端点(转发通货=request.buffer,bodyUsed=false
+  契约),只纳入 TTFB 释放人群(RELEASE 集合),不进摄入人群(INTAKE 集合仅 /v1/responses)——
+  初版把它放进摄入人群是错误,测试刑讯后纠正。
+- **日志驻留上限**:input/contents 零填充方案被诊断可见性契约(compact trigger 的 type、
+  normal-mode 内容)否决,改为 64KiB 字符截断(capRequestLogForRetention),非 JSON fallback 同限。
+- 验证:全量 7525 passed / 3 failed = 与基线一致(已知 error-rule 时序 + openapi-drift);
+  tsgo/biome 干净;bytes-currency-collectability.test 以 WeakRef+memoryUsage 双证明
+  (树可回收、N 并发仅 ~1×body 外部字节)——需 NODE_OPTIONS=--expose-gtc 运行。
+- 未做(记录):磁盘 offload(最后手段)、摄入背压(Layer 2)、流式解压(计数器先行)。

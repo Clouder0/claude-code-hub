@@ -59,7 +59,6 @@ import type {
   SpecialSetting,
 } from "@/types/special-settings";
 import type { SystemSettings } from "@/types/system-config";
-
 import { GeminiAuth } from "../gemini/auth";
 import { GEMINI_PROTOCOL } from "../gemini/protocol";
 import { HeaderProcessor, resolveAnthropicAuthHeaders } from "../headers";
@@ -117,6 +116,7 @@ import {
   validateOpenAIImageRequest,
 } from "./openai-image-compat";
 import { ProxyProviderResolver } from "./provider-selector";
+import { isHighConcurrencyCodexReleaseEndpoint } from "./request-retention";
 import { finalizeHedgeLoserBilling } from "./response-handler";
 import type { ProxySession } from "./session";
 import { setDeferredStreamingFinalization } from "./stream-finalization";
@@ -1672,7 +1672,7 @@ export class ProxyForwarder {
             // 此处保持原始内联门控（自足,不依赖 doForward 是否被替身接管）,
             // 同时标记资格,使提交后的断开/最终失败路径也能收敛释放。
             if (
-              session.requestUrl.pathname === "/v1/responses" &&
+              isHighConcurrencyCodexReleaseEndpoint(session.requestUrl.pathname) &&
               currentProvider.providerType === "codex" &&
               session.isHighConcurrencyModeEnabled()
             ) {
@@ -2627,13 +2627,18 @@ export class ProxyForwarder {
       throw new Error("Provider is required");
     }
 
+    // bytes 通货：首次发送后 request.message 只剩计费投影；重试 attempt 从上次
+    // 实际出站（私有参数已滤、浅层改写幂等）瞬态重解析为工作树，树在本次
+    // attempt 序列化完成后随 setForwardedRequestBody 再次退位。
+    session.rematerializeRequestMessageForRetry?.();
+
     // 释放资格标记:复刻原提交点门控(/v1/responses × codex × 高并发)。
     // 标记后,成功首字节 / 客户端断开 / 阶梯最终失败三个迁移点都会经
     // releaseRequestBodyIfEligible 收敛释放。可选调用兼容最小面 session 桩。
     if (
       provider.providerType === "codex" &&
       session.isHighConcurrencyModeEnabled?.() === true &&
-      session.requestUrl.pathname === "/v1/responses"
+      isHighConcurrencyCodexReleaseEndpoint(session.requestUrl.pathname)
     ) {
       session.noteRequestBodyReleaseEligible?.();
     }
@@ -3061,7 +3066,7 @@ export class ProxyForwarder {
         ) {
           // Raw passthrough: preserve original request body bytes as-is
           requestBody = session.request.buffer;
-          session.forwardedRequestBody = session.request.log;
+          session.setForwardedRequestBodySummary(session.request.log);
 
           try {
             isStreaming = (session.request.message as Record<string, unknown>).stream === true;
@@ -3097,7 +3102,7 @@ export class ProxyForwarder {
           const serializedMultipart =
             await serializeOpenAIImageMultipartRequest(imageRequestMetadata);
           requestBody = serializedMultipart.body;
-          session.forwardedRequestBody = serializedMultipart.summary;
+          session.setForwardedRequestBodySummary(serializedMultipart.summary);
           isStreaming = serializedMultipart.isStreaming;
 
           if (serializedMultipart.contentType) {
@@ -3227,7 +3232,7 @@ export class ProxyForwarder {
     if (session.shouldPersistSessionDebugArtifacts()) {
       const detailSnapshotSession = session as ProxySessionWithDetailSnapshotRuntime;
       detailSnapshotSession.detailSnapshotRequestAfter = {
-        body: session.forwardedRequestBody ?? null,
+        body: session.getForwardedRequestBodyText(),
         headers: new Headers(processedHeaders),
         meta: {
           clientUrl: null,
@@ -5329,6 +5334,9 @@ export class ProxyForwarder {
       providersSnapshot: Provider[] | null;
     };
 
+    // hedge attempt #2+ 时 tracking session 的 message 可能已退位为投影——
+    // 先从通货 bytes 瞬态恢复完整树再克隆（生产未启用 hedge，语义保真优先）。
+    session.rematerializeRequestMessageForRetry?.();
     shadowState.request = {
       ...session.request,
       message: structuredClone(session.request.message),

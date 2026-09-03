@@ -138,11 +138,12 @@ describe("ProxyForwarder - official OpenAI endpoints stay on provider URL", () =
     await doForward(session, provider, provider.url);
 
     expect(typeof capturedBody).toBe("string");
-    expect(session.forwardedRequestBody).toBe(capturedBody);
+    // bytes 通货：解码后与实际上游出站一致。
+    expect(session.getForwardedRequestBodyText()).toBe(capturedBody);
+    // 计费视图是投影（标量集）：prompt_cache_options 属发送前消费，不入投影。
     expect(session.getBillingRequestMessage()).toMatchObject({
       model: "gpt-5.6-sol",
       service_tier: "priority",
-      prompt_cache_options: { mode: "explicit" },
     });
   });
 
