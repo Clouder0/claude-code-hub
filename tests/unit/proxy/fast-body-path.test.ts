@@ -372,8 +372,10 @@ describe("fast body path integration", () => {
     expect(upstreamBody.model).toBe("gpt-5.2-codex");
     const oracle = JSON.parse(text) as Record<string, unknown>;
     expect(upstreamBody.input).toEqual(oracle.input);
-    // 快速路径已降解。
+    // 快速路径已降解，且降解计数入账。
     expect(session.isFastBodyPathActive()).toBe(false);
+    const { getFastBodyPathStats } = await import("@/app/v1/_lib/proxy/fast-body-path");
+    expect((getFastBodyPathStats().get("degraded_for_attempt") ?? 0) > 0).toBe(true);
   });
 
   it("F5: cyber shadow observation receives byte-accurate packet", async () => {

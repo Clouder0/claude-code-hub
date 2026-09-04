@@ -23,6 +23,9 @@ export type FastBodyRoutingReason =
 
 const routingReasonCounts = new Map<FastBodyRoutingReason, number>();
 let lastAnomalyLogAt = 0;
+// 周期性 info 日志的采样间隔（每 N 次 attempt 合成输出一次累计快照）。
+const ROUTING_STATS_LOG_INTERVAL = 128;
+let routesSinceStatsLog = 0;
 
 function recordRoutingReason(reason: FastBodyRoutingReason): void {
   routingReasonCounts.set(reason, (routingReasonCounts.get(reason) ?? 0) + 1);
@@ -56,6 +59,18 @@ export function noteFastBodyAnomaly(anomaly: string | undefined, pathname: strin
 
 export function noteFastBodyRouted(edited: boolean): void {
   recordRoutingReason(edited ? "fast_edited" : "fast_pass");
+  routesSinceStatsLog += 1;
+  if (routesSinceStatsLog >= ROUTING_STATS_LOG_INTERVAL) {
+    routesSinceStatsLog = 0;
+    logger.info("[FastBodyPath] routing stats", {
+      stats: Object.fromEntries(routingReasonCounts),
+    });
+  }
+}
+
+/** 快速路径存活但本 attempt 降解（非 codex 供应商 / 树改写者 / 私有键）。 */
+export function noteFastBodyAttemptDegraded(): void {
+  recordRoutingReason("degraded_for_attempt");
 }
 
 /**

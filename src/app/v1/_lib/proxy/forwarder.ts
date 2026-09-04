@@ -96,6 +96,7 @@ import {
   logResponsesStreamGateCommitObservation,
   logResponsesStreamGateDiagnostic,
 } from "./fake-200-observability";
+import { noteFastBodyAttemptDegraded } from "./fast-body-path";
 import {
   detectGeminiFunctionIdRectifierTrigger,
   type GeminiFunctionIdRectifierResult,
@@ -2634,8 +2635,9 @@ export class ProxyForwarder {
     // 零变换快速路径 attempt 判定：通货是原始字节时，codex 供应商且本 attempt
     // 无任何树改写者（claude 注入/图片消毒/chat 注入/final body 过滤器）且无私
     // 有键 → 编辑表合成出站；否则经 rematerialize 降解为 legacy 树路径。
+    const sessionWasFastBody = session.isFastBodyPathActive?.() === true;
     const fastBodyAttempt =
-      session.isFastBodyPathActive?.() === true &&
+      sessionWasFastBody &&
       provider.providerType === "codex" &&
       !(await forwardPreprocessingMayMutateBody(
         session,
@@ -2648,6 +2650,9 @@ export class ProxyForwarder {
     if (fastBodyAttempt) {
       session.resetFastBodyAttemptEdits();
     } else {
+      if (sessionWasFastBody) {
+        noteFastBodyAttemptDegraded();
+      }
       session.rematerializeRequestMessageForRetry?.();
     }
 
