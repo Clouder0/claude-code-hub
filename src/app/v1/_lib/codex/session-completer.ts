@@ -30,6 +30,11 @@ type CompleteArgs = {
   headers: Headers;
   requestBody: Record<string, unknown>;
   userAgent: string | null;
+  /**
+   * 快速路径供给的预计算指纹（body-scanner 流式哈希，与
+   * extractInitialMessageTextHash bit-exact）。缺省时走树遍历。
+   */
+  initialMessageTextHash?: string | null;
 };
 
 function getSessionTtlSeconds(): number {
@@ -55,7 +60,11 @@ function extractClientIp(headers: Headers): string | null {
   return realIp ? realIp.trim() : null;
 }
 
-function extractInitialMessageTextHash(requestBody: Record<string, unknown>): string | null {
+/**
+ * 从 input 的前 ≤3 条 message 类条目提取文本指纹（sha256 前 16 hex）。
+ * 导出供 body-scanner 差分对拍作为 oracle——两份实现必须 bit-exact。
+ */
+export function extractInitialMessageTextHash(requestBody: Record<string, unknown>): string | null {
   const input = requestBody.input;
   if (!Array.isArray(input) || input.length === 0) {
     return null;
@@ -135,7 +144,8 @@ export function generateUuidV7(): string {
 function calculateFingerprintHash(args: CompleteArgs): string | null {
   const ip = extractClientIp(args.headers) ?? "unknown";
   const ua = args.userAgent ?? args.headers.get("user-agent") ?? "unknown";
-  const messageHash = extractInitialMessageTextHash(args.requestBody) ?? "unknown";
+  const messageHash =
+    args.initialMessageTextHash ?? extractInitialMessageTextHash(args.requestBody) ?? "unknown";
 
   const fingerprint = `v1|key:${args.keyId}|ip:${ip}|ua:${ua}|m:${messageHash}`;
   return crypto.createHash("sha256").update(fingerprint, "utf8").digest("hex");

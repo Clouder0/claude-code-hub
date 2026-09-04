@@ -17,9 +17,22 @@ import type { Provider, ProviderType } from "@/types/provider";
 import type { SpecialSetting } from "@/types/special-settings";
 import type { BillingModelSource, CodexPriorityBillingSource } from "@/types/system-config";
 import type { User } from "@/types/user";
+import {
+  type BodyEdit,
+  buildModelRedirectEdit,
+  buildPromptCacheKeyEdit,
+  composeBody,
+} from "./body-composer";
+import { type BodyScanResult, scanJsonRequestBody } from "./body-scanner";
 import { isCountTokensEndpointPath, V1_ENDPOINT_PATHS } from "./endpoint-paths";
 import { type EndpointPolicy, resolveEndpointPolicy } from "./endpoint-policy";
 import { ProxyError } from "./errors";
+import {
+  buildFastBodyFacadeMessage,
+  isFastBodyPathEnabled,
+  noteFastBodyAnomaly,
+  noteFastBodyRouted,
+} from "./fast-body-path";
 import type { ClientFormat } from "./format-mapper";
 import {
   buildOpenAIImageLogicalBody,
@@ -38,6 +51,7 @@ import {
 } from "./request-body-codec";
 import {
   buildHighConcurrencyCodexRequestSummary,
+  buildHighConcurrencyCodexRequestSummaryFromScan,
   type ProxySessionCreationOptions,
   shouldDirectlyConsumeHighConcurrencyCodexRequest,
   shouldUseHighConcurrencyCodexSseRetention,
@@ -168,6 +182,8 @@ interface RequestBodyResult {
   imageRequestMetadata?: OpenAIImageRequestMetadata | null;
   /** 高并发 codex SSE 保留人群标记（intake 丢 buffer / 摘要 log / 释放候选）。 */
   highConcurrencyCodexSseRetention?: boolean;
+  /** 零变换快速路径摄入成功时的扫描事实（通货字节 = requestBodyBuffer）。 */
+  fastBodyScan?: BodyScanResult;
   /**
    * 入站请求体实际解压所用的 content-encoding（链）。
    * 非空表示代理已解压请求体，调用方需剥离出站 `content-encoding` 头，
@@ -218,6 +234,16 @@ export class ProxySession {
   // request.message 是否已退位为投影（首次发送后）。重试需要完整消息时经
   // rematerializeRequestMessageForRetry() 从通货 bytes 恢复。
   private requestMessageIsProjection = false;
+
+  // ── 零变换快速路径状态 ──
+  // 摄入扫描事实（只读；含长度/指纹/结构事实，降解与释放后仍供计数查询）。
+  bodyScan: BodyScanResult | null = null;
+  // 快速路径存活标记：摄入建立；任一树消费者 rematerialize 后置 false。
+  private fastBodyPathActive = false;
+  // 请求级编辑（prompt_cache_key 补全）与 attempt 级编辑（model 重定向）。
+  private fastBodyBaseEdits: BodyEdit[] = [];
+  private fastBodyAttemptEdits: BodyEdit[] = [];
+  private fastBodyPromptCacheKey: string | null = null;
 
   // 最终流响应关闭内部重试边界后是否已释放请求体（见 releaseRequestBodyAfterCommit）。
   private requestBodyReleased = false;
@@ -325,6 +351,10 @@ export class ProxySession {
     this.forwardedRequestMessageSource = null;
     this.forwardedRequestMessage = projection;
     this.requestMessageIsProjection = false;
+    // 快速路径编辑表随通货一并丢弃（bodyScan 事实保留供长度/观测查询）。
+    this.fastBodyPathActive = false;
+    this.fastBodyBaseEdits = [];
+    this.fastBodyAttemptEdits = [];
     // request 本身是 readonly，但其字段可变：就地清空大对象引用。
     this.request.message = RELEASED_REQUEST_BODY_MESSAGE;
     this.request.buffer = undefined;
@@ -343,10 +373,100 @@ export class ProxySession {
       if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return false;
       this.request.message = parsed as Record<string, unknown>;
       this.requestMessageIsProjection = false;
+      if (this.fastBodyPathActive) {
+        // 快速路径降解：通货是原始（编辑前）字节，请求级编辑（pck 补全）必须
+        // 回放到工作树；attempt 级编辑（model）由 redirector 在本次 attempt 内
+        // 按树路径重放。此后走纯 legacy 管线。
+        if (this.fastBodyPromptCacheKey != null) {
+          parsed.prompt_cache_key = this.fastBodyPromptCacheKey;
+        }
+        this.fastBodyPathActive = false;
+        this.fastBodyAttemptEdits = [];
+      }
       return true;
     } catch {
       return false;
     }
+  }
+
+  // ───────────────────────── 零变换快速路径 ─────────────────────────
+
+  /** 摄入锚定：通货 = 原始字节视图；门面即投影视图（免二次解析）。 */
+  adoptFastBodyPath(scan: BodyScanResult): void {
+    this.bodyScan = scan;
+    this.fastBodyPathActive = true;
+    this.fastBodyBaseEdits = [];
+    this.fastBodyAttemptEdits = [];
+    this.fastBodyPromptCacheKey = null;
+    this.forwardedRequestBody = scan.bytes;
+    this.forwardedRequestMessage = this.request.message as Record<string, unknown>;
+    this.forwardedRequestMessageSource = scan.bytes;
+    this.requestMessageIsProjection = true;
+  }
+
+  isFastBodyPathActive(): boolean {
+    return this.fastBodyPathActive;
+  }
+
+  hasFastBodyUnderscoreKeys(): boolean {
+    return this.bodyScan?.facts.hasUnderscoreKeys ?? false;
+  }
+
+  getFastBodyFingerprintHash(): string | null {
+    return this.bodyScan?.fingerprintHash ?? null;
+  }
+
+  getFastBodyInputItemCount(): number | null {
+    return this.bodyScan?.facts.inputItemCount ?? null;
+  }
+
+  getFastBodyScan(): BodyScanResult | null {
+    return this.bodyScan;
+  }
+
+  /** attempt 级编辑复位（每次 doForward 开头调用；redirector 随后重放）。 */
+  resetFastBodyAttemptEdits(): void {
+    this.fastBodyAttemptEdits = [];
+  }
+
+  /** model 重定向：门面字段 + attempt splice（不复位 base 编辑）。 */
+  applyFastBodyModelRedirect(redirectedModel: string): void {
+    if (!this.fastBodyPathActive || !this.bodyScan) {
+      throw new Error("fast body path: model redirect on inactive path");
+    }
+    (this.request.message as Record<string, unknown>).model = redirectedModel;
+    this.request.model = redirectedModel;
+    this.fastBodyAttemptEdits = [buildModelRedirectEdit(this.bodyScan, redirectedModel)];
+  }
+
+  /** 供应商切换重置：门面/调度模型回原值，attempt 编辑清空（通货本就携带原值）。 */
+  resetFastBodyModel(originalModel: string): void {
+    if (!this.fastBodyPathActive) return;
+    (this.request.message as Record<string, unknown>).model = originalModel;
+    this.request.model = originalModel;
+    this.fastBodyAttemptEdits = [];
+  }
+
+  /** prompt_cache_key 补全：门面字段 + 请求级 splice（幂等）。 */
+  applyFastBodyPromptCacheKey(sessionId: string): void {
+    if (!this.fastBodyPathActive || !this.bodyScan) return;
+    (this.request.message as Record<string, unknown>).prompt_cache_key = sessionId;
+    if (this.fastBodyPromptCacheKey === sessionId) return;
+    this.fastBodyPromptCacheKey = sessionId;
+    this.fastBodyBaseEdits.push(buildPromptCacheKeyEdit(this.bodyScan, sessionId));
+  }
+
+  /** 本次 attempt 的出站体：通货 ±（base + attempt）编辑表；无编辑零拷贝。 */
+  composeFastBodyForAttempt(): Uint8Array {
+    const currency = this.forwardedRequestBody;
+    if (!currency) {
+      throw new Error("fast body path: currency already released");
+    }
+    const edits = [...this.fastBodyBaseEdits, ...this.fastBodyAttemptEdits].sort(
+      (a, b) => a.start - b.start
+    );
+    noteFastBodyRouted(edits.length > 0);
+    return composeBody(currency, edits);
   }
 
   isRequestMessageProjection(): boolean {
@@ -625,6 +745,9 @@ export class ProxySession {
       clientAbortSignal,
     });
     session.setHighConcurrencyModeEnabled(options.highConcurrencyModeEnabled ?? false);
+    if (bodyResult.fastBodyScan) {
+      session.adoptFastBodyPath(bodyResult.fastBodyScan);
+    }
     session.noteReceivedBodyBytes(bodyResult.actualBodyBytes ?? null);
     if (bodyResult.highConcurrencyCodexSseRetention) {
       session.noteRequestBodyReleaseCandidate();
@@ -865,6 +988,10 @@ export class ProxySession {
    * 获取 messages 数组长度（支持 Claude、Codex 和 Gemini 格式）
    */
   getMessagesLength(): number {
+    // 快速路径：input 数量由扫描事实直接供给（与树长度恒等，降解/释放后不变）。
+    if (this.bodyScan?.facts.inputItemCount != null) {
+      return this.bodyScan.facts.inputItemCount;
+    }
     const msg = this.request.message as Record<string, unknown>;
     // Claude 格式: messages[]
     if (Array.isArray(msg.messages)) {
@@ -1234,6 +1361,11 @@ export class ProxySession {
    * - [{"role":"user","content":"count"}]
    */
   isProbeRequest(): boolean {
+    // 快速路径：单条 "foo"/"count" content 的探测语义由扫描事实复刻
+    // （legacy 对 codex input[0].content 字符串同样拦截）。
+    if (this.bodyScan) {
+      return this.bodyScan.facts.input0ProbeWord;
+    }
     const messages = this.getMessages();
 
     // 必须是单条消息
@@ -1716,6 +1848,7 @@ async function parseRequestBody(
       contentLength,
       actualBodyBytes: receivedBodyBytes,
       imageRequestMetadata,
+      fastBodyScan: undefined,
     };
   }
 
@@ -1723,6 +1856,43 @@ async function parseRequestBody(
   // 使下游模型解析、过滤、计费、日志与转发都基于明文。
   const decodedBody = decodeRequestBody(rawBodyBuffer, contentEncoding);
   const requestBodyBuffer = decodedBody.buffer;
+
+  // 零变换快速路径：验证性单遍扫描替代「解码全文 + JSON.parse 全树」。
+  // 人群与既有保留人群严格重合（高并发 + /v1/responses + stream:true），
+  // 摄入即锚定通货（原始字节），门面（标量 + 小对象）取代 request.message 树。
+  // 任何扫描异常（语法/UTF-8/重复受控键/超限）都落入下方 legacy 路径——
+  // 行为与关闭开关时逐字节等价。
+  if (
+    options.highConcurrencyModeEnabled === true &&
+    isFastBodyPathEnabled() &&
+    shouldDirectlyConsumeHighConcurrencyCodexRequest(pathname, options)
+  ) {
+    const scan = scanJsonRequestBody(
+      new Uint8Array(requestBodyBuffer, 0, requestBodyBuffer.byteLength)
+    );
+    if (!scan.ok) {
+      noteFastBodyAnomaly(scan.anomaly, pathname);
+    } else if (scan.facts.inputIsArray && scan.fields.stream?.value === true) {
+      return {
+        requestMessage: buildFastBodyFacadeMessage(scan),
+        requestBodyLog: buildHighConcurrencyCodexRequestSummaryFromScan(
+          scan,
+          receivedBodyBytes,
+          requestBodyBuffer.byteLength
+        ),
+        requestBodyLogNote:
+          "High-concurrency Codex SSE request body omitted; structural summary retained.",
+        requestBodyBuffer,
+        fastBodyScan: scan,
+        contentLength,
+        actualBodyBytes: receivedBodyBytes,
+        imageRequestMetadata: null,
+        decodedContentEncoding: decodedBody.encoding ?? undefined,
+        highConcurrencyCodexSseRetention: true,
+      };
+    }
+  }
+
   const requestBodyText = INTAKE_TEXT_DECODER.decode(requestBodyBuffer);
 
   try {

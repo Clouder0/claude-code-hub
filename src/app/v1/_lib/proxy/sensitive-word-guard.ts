@@ -34,6 +34,12 @@ export class ProxySensitiveWordGuard {
         return null;
       }
 
+      // 零变换快速路径 × 敏感词库非空：检测需要完整文本树——先降解再检测，
+      // 检测语义（拦截/放行）不得因门面而绕过。
+      if (session.isFastBodyPathActive?.()) {
+        session.rematerializeRequestMessageForRetry();
+      }
+
       // 提取所有需要检测的文本
       const texts = extractTextFromMessages(session.request.message);
 

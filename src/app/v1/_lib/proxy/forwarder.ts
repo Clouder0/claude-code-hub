@@ -2630,7 +2630,26 @@ export class ProxyForwarder {
     // bytes 通货：首次发送后 request.message 只剩计费投影；重试 attempt 从上次
     // 实际出站（私有参数已滤、浅层改写幂等）瞬态重解析为工作树，树在本次
     // attempt 序列化完成后随 setForwardedRequestBody 再次退位。
-    session.rematerializeRequestMessageForRetry?.();
+    //
+    // 零变换快速路径 attempt 判定：通货是原始字节时，codex 供应商且本 attempt
+    // 无任何树改写者（claude 注入/图片消毒/chat 注入/final body 过滤器）且无私
+    // 有键 → 编辑表合成出站；否则经 rematerialize 降解为 legacy 树路径。
+    const fastBodyAttempt =
+      session.isFastBodyPathActive?.() === true &&
+      provider.providerType === "codex" &&
+      !(await forwardPreprocessingMayMutateBody(
+        session,
+        provider,
+        session.requestUrl.pathname,
+        ProxyForwarder.getEndpointPolicy(session).bypassRequestFilters
+      )) &&
+      !session.hasFastBodyUnderscoreKeys();
+
+    if (fastBodyAttempt) {
+      session.resetFastBodyAttemptEdits();
+    } else {
+      session.rematerializeRequestMessageForRetry?.();
+    }
 
     // 释放资格标记:复刻原提交点门控(/v1/responses × codex × 高并发)。
     // 标记后,成功首字节 / 客户端断开 / 阶梯最终失败三个迁移点都会经
@@ -3121,6 +3140,36 @@ export class ProxyForwarder {
               bodyLength: serializedMultipart.body.byteLength,
               isStreaming,
             });
+          }
+        } else if (session.isFastBodyPathActive?.()) {
+          // 零变换快速路径：出站体 = 通货字节 ±（base + attempt）编辑表；
+          // 无编辑时 composeFastBodyForAttempt 返回通货本体（零拷贝直发）。
+          // 本分支只在 attempt 判定为 fast 时可达（否则顶部已 rematerialize 降解）。
+          // undici BodyInit 类型对 ArrayBufferLike 视图较窄；运行时接受 Uint8Array
+          // （raw-passthrough 分支同样直接传递二进制体）。
+          requestBody = session.composeFastBodyForAttempt() as unknown as BodyInit;
+
+          try {
+            isStreaming = (session.request.message as Record<string, unknown>).stream === true;
+          } catch {
+            isStreaming = false;
+          }
+
+          // Cyber Check：字节直供（sha256/容量计量零拷贝；投影序章内惰性解析，
+          // 解析树不进入上传等待期）。
+          const cyberCheckInput = {
+            session,
+            provider,
+            requestPath,
+            message: null,
+            bodyString: null,
+            bodyBytes: requestBody as Uint8Array,
+          };
+          if (getEnvConfig().CYBER_CHECK_MODE === "shadow") {
+            startCyberCheckShadowObservation =
+              prepareFinalResponsesShadowObservation(cyberCheckInput)?.start ?? null;
+          } else {
+            await admitFinalResponsesRequest(cyberCheckInput);
           }
         } else {
           // scan-first 透传：原实现每次 attempt 都为剥离 "_" 前缀键重建整棵请求树
@@ -5336,7 +5385,11 @@ export class ProxyForwarder {
 
     // hedge attempt #2+ 时 tracking session 的 message 可能已退位为投影——
     // 先从通货 bytes 瞬态恢复完整树再克隆（生产未启用 hedge，语义保真优先）。
-    session.rematerializeRequestMessageForRetry?.();
+    // 快速路径例外：通货是原始字节且不可变（编辑表是外置合成），shadow 直接
+    // 继承门面与扫描事实即可，无需为克隆物化全树。
+    if (!session.isFastBodyPathActive?.()) {
+      session.rematerializeRequestMessageForRetry?.();
+    }
     shadowState.request = {
       ...session.request,
       message: structuredClone(session.request.message),

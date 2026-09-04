@@ -562,12 +562,14 @@ export class SessionManager {
    */
   static async getOrCreateSessionId(
     keyId: number,
-    messages: unknown,
+    /** 完整消息数组，或快速路径直接供给的长度（内容哈希分支不可达时足够）。 */
+    messages: unknown | number,
     clientSessionId?: string | null
   ): Promise<string> {
     const redis = getRedisClient();
 
-    const messagesLength = Array.isArray(messages) ? messages.length : 0;
+    const messagesLength =
+      typeof messages === "number" ? messages : Array.isArray(messages) ? messages.length : 0;
 
     logger.trace("SessionManager: getOrCreateSessionId called", {
       keyId,

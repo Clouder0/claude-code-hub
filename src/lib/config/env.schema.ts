@@ -212,6 +212,10 @@ export const EnvSchema = z.object({
 
   // 独立请求审查服务。默认关闭；shadow 仅观察，enforce 才执行本地拒绝。
   CYBER_CHECK_MODE: z.enum(["off", "shadow", "enforce"]).default("off"),
+  // codex /v1/responses 零变换快速路径：验证性字节扫描替代摄入全树解析，
+  // 转发体 = 原始字节 ± 编辑表（model 重定向 / prompt_cache_key 补全）。
+  // 仅作用于高并发模式人群；off 时行为与 legacy 逐字节等价。
+  CCH_CODEX_FAST_BODY_PATH: z.enum(["off", "on"]).default("off"),
   CYBER_CHECK_URL: optionalPreprocessed(
     (value) => (typeof value === "string" && value.trim() === "" ? undefined : value),
     z.string().url()

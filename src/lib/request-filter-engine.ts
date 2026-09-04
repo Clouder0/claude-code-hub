@@ -481,6 +481,18 @@ export class RequestFilterEngine {
     return this.collectFinalFilters(session).length > 0;
   }
 
+  /**
+   * Guard 阶段（global + provider）是否存在 body scope 过滤器。
+   * 零变换快速路径据此降解：body 过滤器需要完整树做 json_path/替换手术。
+   */
+  async hasGuardBodyScopeFilters(): Promise<boolean> {
+    await this.ensureInitialized();
+    return (
+      this.globalGuardFilters.some((filter) => filter.scope === "body") ||
+      this.providerGuardFilters.some((filter) => filter.scope === "body")
+    );
+  }
+
   // ---------------------------------------------------------------------------
   // Guard phase (existing behavior, unchanged API)
   // ---------------------------------------------------------------------------

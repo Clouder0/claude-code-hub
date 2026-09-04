@@ -24,8 +24,10 @@ export interface FinalResponsesAdmissionInput {
   session: ProxySession;
   provider: Pick<Provider, "id" | "providerType">;
   requestPath: string;
-  message: Record<string, unknown>;
-  bodyString: string;
+  /** legacy：最终树 + 序列化串；快速路径：两者为 null 并携带 bodyBytes。 */
+  message: Record<string, unknown> | null;
+  bodyString: string | null;
+  bodyBytes?: Uint8Array | null;
 }
 
 export interface PreparedShadowObservation {
@@ -38,8 +40,9 @@ interface SubmittedReview {
 }
 
 interface FinalResponsesReviewInput {
-  message: Record<string, unknown>;
-  bodyString: string;
+  message: Record<string, unknown> | null;
+  bodyString: string | null;
+  bodyBytes: Uint8Array | null;
   identity: ReviewProjectionIdentity;
   context: ReviewAttemptContext;
 }
@@ -174,7 +177,9 @@ function runShadowObservation(
     return Promise.resolve({ status: "capture_gap" });
   }
 
-  // 作用域纪律:下面的延续只捕获 context/config;input(解析树 + 序列化串)的
+  // 作用域纪律:下面的延续只捕获 context/config;input(解析树 + 序列化串,或
+  // 快速路径下的出站字节——字节与通货同源或为其合成瞬态,上传等待期间保留
+  // 的是 1× 外置字节而非堆内树)的
   // 最后一次使用是传入 submitFinalResponsesReview——其同步序章完成投影后,
   // input 即不可达。此前 async 帧会把 input 保留到上传结束(≤25s 超时 + 轮询),
   // 抵消 forwarder 在首字节处的请求体释放。
@@ -218,8 +223,12 @@ function submitFinalResponsesReview(
   input: FinalResponsesReviewInput,
   config: CyberCheckConfig
 ): Promise<SubmittedReview> {
+  const bodyByteLength =
+    input.bodyBytes != null
+      ? input.bodyBytes.byteLength
+      : Buffer.byteLength(input.bodyString ?? "");
   const encodingLease = cyberCheckEncodingCapacity.tryAcquire(
-    Buffer.byteLength(input.bodyString),
+    bodyByteLength,
     config.maxEncodingBytes
   );
   if (!encodingLease) {
@@ -236,6 +245,7 @@ function submitFinalResponsesReview(
       identity: input.identity,
       message: input.message,
       bodyString: input.bodyString,
+      bodyBytes: input.bodyBytes,
     });
   } catch (error) {
     encodingLease.release();
@@ -284,6 +294,7 @@ function captureFinalResponsesReviewInput({
   provider,
   message,
   bodyString,
+  bodyBytes,
 }: FinalResponsesAdmissionInput): FinalResponsesReviewInput {
   const context = session.messageContext;
   const stableIdentity = session.getStableRequestIdentity?.();
@@ -298,6 +309,7 @@ function captureFinalResponsesReviewInput({
   return {
     message,
     bodyString,
+    bodyBytes: bodyBytes ?? null,
     identity,
     context: {
       requestId: identity.requestId || null,

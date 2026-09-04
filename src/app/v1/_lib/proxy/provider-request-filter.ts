@@ -20,6 +20,14 @@ export class ProxyProviderRequestFilter {
       return;
     }
 
+    // 与 guard 期全局过滤器同一降解规则：provider 绑定的 body 手术需要完整树。
+    if (
+      session.isFastBodyPathActive?.() &&
+      (await requestFilterEngine.hasGuardBodyScopeFilters())
+    ) {
+      session.rematerializeRequestMessageForRetry();
+    }
+
     try {
       await requestFilterEngine.applyForProvider(session);
     } catch (error) {

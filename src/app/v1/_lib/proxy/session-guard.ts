@@ -5,7 +5,10 @@ import { resolveKeyUserConcurrentSessionLimits } from "@/lib/rate-limit/concurre
 import { headersToSanitizedObject, SessionManager } from "@/lib/session-manager";
 import { SessionTracker } from "@/lib/session-tracker";
 import { completeCodexSessionIdentifiers } from "../codex/session-completer";
-import { extractCodexAlphaSearchSessionId } from "../codex/session-extractor";
+import {
+  extractCodexAlphaSearchSessionId,
+  normalizeCodexSessionId,
+} from "../codex/session-extractor";
 import { isAlphaSearchEndpointPath } from "./endpoint-paths";
 import { ProxyError } from "./errors";
 import type { ProxySession } from "./session";
@@ -102,10 +105,17 @@ export class ProxySessionGuard {
 
       // Codex Session ID 补全：在提取 clientSessionId 之前触发，避免落入不稳定的降级方案
       const codexCompletionEnabled = systemSettings.enableCodexSessionIdCompletion ?? true;
+      // 快速路径 × 补全关闭：无补全时 clientSessionId 可能为空，getOrCreateSessionId
+      // 的内容哈希降级分支需要完整树——此处降解为 legacy，会话语义保真优先。
+      if (session.isFastBodyPathActive?.() && !codexCompletionEnabled) {
+        session.rematerializeRequestMessageForRetry();
+      }
       const claudeMetadataCompletionEnabled =
         systemSettings.enableClaudeMetadataUserIdInjection ?? true;
       const requestMessage = session.request.message as Record<string, unknown>;
-      const isCodexRequest = Array.isArray(requestMessage.input);
+      // 快速路径摄入谓词已保证 inputIsArray（门面 input:[] 仅作门控标记）。
+      const isCodexRequest =
+        session.isFastBodyPathActive?.() || Array.isArray(requestMessage.input);
       const isAlphaSearchRequest = isAlphaSearchEndpointPath(session.getManagedEndpoint());
 
       if (
@@ -114,12 +124,26 @@ export class ProxySessionGuard {
         codexCompletionEnabled &&
         isCodexRequest
       ) {
+        // 快速路径：指纹用扫描期哈希（bit-exact）；pck 体内的补全改写为编辑表
+        // splice，completer 对门面的直接写仅更新门面字段。
+        const fastBodyActive = session.isFastBodyPathActive?.() ?? false;
+        const promptCacheKeyWasMissing = fastBodyActive
+          ? !normalizeCodexSessionId(requestMessage.prompt_cache_key)
+          : false;
+
         const completion = await completeCodexSessionIdentifiers({
           keyId,
           headers: session.headers,
           requestBody: requestMessage,
           userAgent: session.userAgent,
+          ...(fastBodyActive
+            ? { initialMessageTextHash: session.getFastBodyFingerprintHash?.() ?? null }
+            : {}),
         });
+
+        if (fastBodyActive && promptCacheKeyWasMissing) {
+          session.applyFastBodyPromptCacheKey?.(completion.sessionId);
+        }
 
         if (completion.applied && completion.action !== "none") {
           session.addSpecialSetting({
@@ -158,7 +182,13 @@ export class ProxySessionGuard {
       const messages = session.getMessages();
 
       // 3. 获取或创建 session_id
-      const sessionId = await SessionManager.getOrCreateSessionId(keyId, messages, clientSessionId);
+      // 快速路径：传扫描计数（补全开启时 clientSessionId 必非空——completer 会
+      // 写 header session_id——内容哈希分支结构上不可达，长度足够）。
+      const sessionId = await SessionManager.getOrCreateSessionId(
+        keyId,
+        session.isFastBodyPathActive?.() ? (session.getFastBodyInputItemCount() ?? 0) : messages,
+        clientSessionId
+      );
 
       // 4. 设置到 session 对象
       session.setSessionId(sessionId);

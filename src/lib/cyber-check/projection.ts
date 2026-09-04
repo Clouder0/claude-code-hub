@@ -54,8 +54,12 @@ export interface ReviewProjectionIdentity {
 
 export interface ReviewProjectionInput {
   identity: ReviewProjectionIdentity;
-  message: Record<string, unknown>;
-  bodyString: string;
+  /** legacy 调用方传入的最终树；快速路径可缺省（从 bodyBytes 惰性解析）。 */
+  message?: Record<string, unknown> | null;
+  /** legacy 调用方传入的最终序列化串。 */
+  bodyString?: string | null;
+  /** 快速路径：最终出站字节。存在时 sha256/byteLength 直接计量，message 惰性解析。 */
+  bodyBytes?: Uint8Array | null;
 }
 
 export class ReviewProjectionError extends Error {
@@ -72,16 +76,33 @@ interface ProjectionState {
   noticeKeys: Set<string>;
 }
 
+const PROJECTION_DECODER = new TextDecoder();
+
 export function projectFinalResponsesRequest({
   identity,
-  message,
+  message: messageInput,
   bodyString,
+  bodyBytes,
 }: ReviewProjectionInput): ReviewRequestEnvelope {
+  // 快速路径：字节直供（零额外字符串物化），树按需惰性解析——解析发生在
+  // 投影序章（本函数）内，返回后即不可达，与既有作用域纪律一致。
+  let message = messageInput ?? null;
+  if (message === null && bodyBytes != null && bodyBytes.byteLength > 0) {
+    try {
+      message = JSON.parse(PROJECTION_DECODER.decode(bodyBytes)) as Record<string, unknown>;
+    } catch {
+      throw new ReviewProjectionError("final Responses request body is not valid JSON");
+    }
+  }
+  const hasBody = (bodyBytes != null && bodyBytes.byteLength > 0) || !!bodyString;
+  if (!message || typeof message !== "object") {
+    throw new ReviewProjectionError("final Responses request has no parsable body");
+  }
   const model = asNonEmptyString(message.model);
   if (!model) {
     throw new ReviewProjectionError("final Responses request has no model");
   }
-  if (!bodyString) {
+  if (!hasBody) {
     throw new ReviewProjectionError("final Responses request body is empty");
   }
   if (!Number.isSafeInteger(identity.sequence) || identity.sequence <= 0) {
@@ -131,7 +152,12 @@ export function projectFinalResponsesRequest({
   }
   if (message.prompt !== undefined && message.prompt !== null) references.push("prompt_template");
 
-  const bodySha256 = createHash("sha256").update(bodyString).digest("hex");
+  const bodySha256 =
+    bodyBytes != null
+      ? createHash("sha256").update(bodyBytes).digest("hex")
+      : createHash("sha256")
+          .update(bodyString ?? "")
+          .digest("hex");
   const clientInstanceId = extractClientInstanceId(message.client_metadata);
   return {
     schema_version: "cyber-check.request-review.v1",
@@ -149,7 +175,7 @@ export function projectFinalResponsesRequest({
       context_state:
         references.length === 0 ? { type: "self_contained" } : { type: "referenced", references },
       body_sha256: bodySha256,
-      body_bytes: Buffer.byteLength(bodyString),
+      body_bytes: bodyBytes != null ? bodyBytes.byteLength : Buffer.byteLength(bodyString ?? ""),
     },
     instructions,
     items: state.items,

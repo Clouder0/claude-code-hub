@@ -110,12 +110,18 @@ export class ModelRedirector {
       }
     }
 
-    // multipart 图片请求不能伪装成 JSON；模型改写写回 sidecar metadata。
-    const imageRequestMetadata = session.getOpenAIImageRequestMetadata();
-    if (isOpenAIImageMultipartRequest(imageRequestMetadata) && imageRequestMetadata) {
-      setOpenAIImageMultipartModel(imageRequestMetadata, redirectedModel);
-      session.request.message.model = redirectedModel;
-      session.request.model = redirectedModel;
+    // 零变换快速路径：model 改写为编辑表 splice（门面 + 调度字段同步），
+    // 不再对全树 stringify 重建整个 buffer——通货保持原始字节。
+    if (session.isFastBodyPathActive?.()) {
+      session.applyFastBodyModelRedirect(redirectedModel);
+    } else if (isOpenAIImageMultipartRequest(session.getOpenAIImageRequestMetadata())) {
+      // multipart 图片请求不能伪装成 JSON；模型改写写回 sidecar metadata。
+      const imageRequestMetadata = session.getOpenAIImageRequestMetadata();
+      if (imageRequestMetadata) {
+        setOpenAIImageMultipartModel(imageRequestMetadata, redirectedModel);
+        session.request.message.model = redirectedModel;
+        session.request.model = redirectedModel;
+      }
     } else {
       // 修改 message 对象中的模型（对 Claude/OpenAI 有效，对 Gemini 无效但不影响）
       session.request.message.model = redirectedModel;
@@ -195,6 +201,12 @@ export class ModelRedirector {
     originalModel: string,
     provider: Provider
   ): void {
+    // 零变换快速路径：清空 attempt 编辑即回到原始模型（通货未改写）。
+    if (session.isFastBodyPathActive?.()) {
+      session.resetFastBodyModel(originalModel);
+      return;
+    }
+
     // 重置 request.model 和 request.message.model / multipart sidecar
     session.request.model = originalModel;
     const imageRequestMetadata = session.getOpenAIImageRequestMetadata();
