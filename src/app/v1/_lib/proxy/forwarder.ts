@@ -2651,7 +2651,14 @@ export class ProxyForwarder {
       session.resetFastBodyAttemptEdits();
     } else {
       if (sessionWasFastBody) {
-        noteFastBodyAttemptDegraded();
+        // 降解成因（精确键入计数）：供应商类型 / 私有键 / 其余树改写者。
+        const degradeReason =
+          provider.providerType !== "codex"
+            ? `non_codex_provider:${provider.providerType ?? "null"}`
+            : session.hasFastBodyUnderscoreKeys()
+              ? "underscore_keys"
+              : "may_mutate_other";
+        noteFastBodyAttemptDegraded(degradeReason);
       }
       session.rematerializeRequestMessageForRetry?.();
     }

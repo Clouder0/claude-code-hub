@@ -375,7 +375,10 @@ describe("fast body path integration", () => {
     // 快速路径已降解，且降解计数入账。
     expect(session.isFastBodyPathActive()).toBe(false);
     const { getFastBodyPathStats } = await import("@/app/v1/_lib/proxy/fast-body-path");
-    expect((getFastBodyPathStats().get("degraded_for_attempt") ?? 0) > 0).toBe(true);
+    const degraded = [...getFastBodyPathStats().keys()].filter((k) =>
+      k.startsWith("degraded_for_attempt:")
+    );
+    expect(degraded.length > 0).toBe(true);
   });
 
   it("F5: cyber shadow observation receives byte-accurate packet", async () => {

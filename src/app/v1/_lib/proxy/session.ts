@@ -31,6 +31,7 @@ import {
   buildFastBodyFacadeMessage,
   isFastBodyPathEnabled,
   noteFastBodyAnomaly,
+  noteFastBodyIntake,
   noteFastBodyRouted,
 } from "./fast-body-path";
 import type { ClientFormat } from "./format-mapper";
@@ -1872,7 +1873,12 @@ async function parseRequestBody(
     );
     if (!scan.ok) {
       noteFastBodyAnomaly(scan.anomaly, pathname);
-    } else if (scan.facts.inputIsArray && scan.fields.stream?.value === true) {
+    } else if (!scan.facts.inputIsArray) {
+      noteFastBodyIntake("intake_input_not_array");
+    } else if (scan.fields.stream?.value !== true) {
+      noteFastBodyIntake("intake_stream_not_true");
+    } else {
+      noteFastBodyIntake("intake_fast");
       return {
         requestMessage: buildFastBodyFacadeMessage(scan),
         requestBodyLog: buildHighConcurrencyCodexRequestSummaryFromScan(

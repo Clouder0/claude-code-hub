@@ -13,27 +13,33 @@ import { getEnvConfig } from "@/lib/config/env.schema";
 import { logger } from "@/lib/logger";
 
 export type FastBodyRoutingReason =
-  | "disabled"
-  | "wrong_endpoint"
+  | "intake_fast"
+  | "intake_stream_not_true"
+  | "intake_input_not_array"
   | "intake_scan_rejected"
-  | "input_not_array"
   | "fast_pass"
   | "fast_edited"
-  | "degraded_for_attempt";
+  /** 动态键：non_codex_provider:<type> / underscore_keys / may_mutate_other。 */
+  | `degraded_for_attempt:${string}`;
 
-const routingReasonCounts = new Map<FastBodyRoutingReason, number>();
+const routingReasonCounts = new Map<string, number>();
 let lastAnomalyLogAt = 0;
 // 周期性 info 日志的采样间隔（每 N 次 attempt 合成输出一次累计快照）。
-const ROUTING_STATS_LOG_INTERVAL = 128;
+const ROUTING_STATS_LOG_INTERVAL = 32;
 let routesSinceStatsLog = 0;
 
-function recordRoutingReason(reason: FastBodyRoutingReason): void {
+function recordRoutingReason(reason: string): void {
   routingReasonCounts.set(reason, (routingReasonCounts.get(reason) ?? 0) + 1);
 }
 
 /** 观测快照（测试与运维日志用；不引入 metrics 依赖）。 */
-export function getFastBodyPathStats(): ReadonlyMap<FastBodyRoutingReason, number> {
+export function getFastBodyPathStats(): ReadonlyMap<string, number> {
   return routingReasonCounts;
+}
+
+/** 摄入结局计数（fast 人群内：fast / stream 非 true / input 非数组 / 扫描拒绝）。 */
+export function noteFastBodyIntake(reason: FastBodyRoutingReason): void {
+  recordRoutingReason(reason);
 }
 
 export function isFastBodyPathEnabled(): boolean {
@@ -68,9 +74,9 @@ export function noteFastBodyRouted(edited: boolean): void {
   }
 }
 
-/** 快速路径存活但本 attempt 降解（非 codex 供应商 / 树改写者 / 私有键）。 */
-export function noteFastBodyAttemptDegraded(): void {
-  recordRoutingReason("degraded_for_attempt");
+/** 快速路径存活但本 attempt 降解；reason 给出精确成因。 */
+export function noteFastBodyAttemptDegraded(reason: string): void {
+  recordRoutingReason(`degraded_for_attempt:${reason}`);
 }
 
 /**
