@@ -42,38 +42,46 @@ function createSession(requestMessage: Record<string, unknown> = {}): ProxySessi
 }
 
 describe("bytes-currency collectability", () => {
-  maybeTest("tree is collectable after setForwardedRequestBody; currency bytes remain", async () => {
-    const gc = (globalThis as { gc?: () => void }).gc ?? (() => {});
-    // 树在独立 async 任务内创建并序列化；await 弹掉其栈帧、setImmediate 让
-    // 事件循环复用该栈区，避免保守栈扫描把陈旧槽位当强引用。
-    const prepare = async (): Promise<{ treeRef: WeakRef<object>; bodyString: string }> => {
-      const filler = "x".repeat(64 * 1024);
-      const tree: Record<string, unknown> = {
-        model: "gpt-5.6-codex",
-        stream: true,
-        input: Array.from({ length: 128 }, (_, i) => ({ role: "user", content: `${i}${filler}` })),
+  maybeTest(
+    "tree is collectable after setForwardedRequestBody; currency bytes remain",
+    async () => {
+      const gc = (globalThis as { gc?: () => void }).gc ?? (() => {});
+      // 树在独立 async 任务内创建并序列化；await 弹掉其栈帧、setImmediate 让
+      // 事件循环复用该栈区，避免保守栈扫描把陈旧槽位当强引用。
+      const prepare = async (): Promise<{ treeRef: WeakRef<object>; bodyString: string }> => {
+        const filler = "x".repeat(64 * 1024);
+        const tree: Record<string, unknown> = {
+          model: "gpt-5.6-codex",
+          stream: true,
+          input: Array.from({ length: 128 }, (_, i) => ({
+            role: "user",
+            content: `${i}${filler}`,
+          })),
+        };
+        const session = createSession();
+        const bodyString = JSON.stringify(tree);
+        expect(bodyString.length).toBeGreaterThan(4 * 1024 * 1024);
+        session.setForwardedRequestBody(bodyString, tree);
+        expect(session.isRequestMessageProjection()).toBe(true);
+        (globalThis as { sessionUnderObservation?: ProxySession }).sessionUnderObservation =
+          session;
+        return { treeRef: new WeakRef(tree), bodyString };
       };
-      const session = createSession();
-      const bodyString = JSON.stringify(tree);
-      expect(bodyString.length).toBeGreaterThan(4 * 1024 * 1024);
-      session.setForwardedRequestBody(bodyString, tree);
-      expect(session.isRequestMessageProjection()).toBe(true);
-      (globalThis as { sessionUnderObservation?: ProxySession }).sessionUnderObservation = session;
-      return { treeRef: new WeakRef(tree), bodyString };
-    };
 
-    const { treeRef, bodyString } = await prepare();
-    await new Promise((resolve) => setImmediate(resolve));
-    gc();
-    gc();
-    expect(treeRef.deref()).toBeUndefined();
+      const { treeRef, bodyString } = await prepare();
+      await new Promise((resolve) => setImmediate(resolve));
+      gc();
+      gc();
+      expect(treeRef.deref()).toBeUndefined();
 
-    // 回收后通货与投影读取不受影响。
-    const session = (globalThis as { sessionUnderObservation: ProxySession }).sessionUnderObservation;
-    expect(session.getBillingModel()).toBe("gpt-5.6-codex");
-    expect(session.getForwardedRequestBodyText()).toBe(bodyString);
-    delete (globalThis as { sessionUnderObservation?: ProxySession }).sessionUnderObservation;
-  });
+      // 回收后通货与投影读取不受影响。
+      const session = (globalThis as { sessionUnderObservation: ProxySession })
+        .sessionUnderObservation;
+      expect(session.getBillingModel()).toBe("gpt-5.6-codex");
+      expect(session.getForwardedRequestBodyText()).toBe(bodyString);
+      delete (globalThis as { sessionUnderObservation?: ProxySession }).sessionUnderObservation;
+    }
+  );
 
   maybeTest("N concurrent simulated requests retain ~1×body external bytes, not ~3× heap", () => {
     const gc = (globalThis as { gc: () => void }).gc;

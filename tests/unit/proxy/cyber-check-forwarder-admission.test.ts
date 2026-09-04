@@ -268,7 +268,9 @@ describe("ProxyForwarder cyber-check admission boundary", () => {
 
     const packet = reviewPacketFrom(reviewFetch.mock.calls[0]);
     expect(packet.source.body_sha256).toBe(
-      createHash("sha256").update(forwardedBody ?? "").digest("hex")
+      createHash("sha256")
+        .update(forwardedBody ?? "")
+        .digest("hex")
     );
   });
 

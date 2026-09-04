@@ -2645,7 +2645,8 @@ export class ProxyForwarder {
         session.requestUrl.pathname,
         ProxyForwarder.getEndpointPolicy(session).bypassRequestFilters
       )) &&
-      !session.hasFastBodyUnderscoreKeys();
+      // 下划线成员已由摄入期删除编辑承载（游程合并）；仅病态超限（截断）才降解。
+      !(session.fastBodyUnderscoreDeletionsIncomplete?.() ?? false);
 
     if (fastBodyAttempt) {
       session.resetFastBodyAttemptEdits();
@@ -2655,8 +2656,8 @@ export class ProxyForwarder {
         const degradeReason =
           provider.providerType !== "codex"
             ? `non_codex_provider:${provider.providerType ?? "null"}`
-            : session.hasFastBodyUnderscoreKeys()
-              ? "underscore_keys"
+            : (session.fastBodyUnderscoreDeletionsIncomplete?.() ?? false)
+              ? "underscore_keys_truncated"
               : "may_mutate_other";
         noteFastBodyAttemptDegraded(degradeReason);
       }

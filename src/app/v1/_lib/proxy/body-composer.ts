@@ -57,6 +57,23 @@ export function composeBody(source: Uint8Array, edits: readonly BodyEdit[]): Uin
   return out;
 }
 
+const EMPTY_REPLACEMENT = new Uint8Array(0);
+
+/**
+ * 下划线成员删除编辑（游程已按对象聚合、互不重叠、与顶层受控键不相交）。
+ * 截断（病态超限）时返回空并保持旧语义：调用方谓词据此降解。
+ */
+export function buildUnderscoreDeletionEdits(
+  scan: import("./body-scanner").BodyScanResult
+): BodyEdit[] {
+  if (scan.facts.underscoreDeletionsTruncated) return [];
+  return scan.facts.underscoreDeletionRanges.map((range) => ({
+    start: range.start,
+    end: range.end,
+    replacement: EMPTY_REPLACEMENT,
+  }));
+}
+
 /** model 重定向：替换整个 model value token（含引号）。 */
 export function buildModelRedirectEdit(scan: BodyScanResult, redirectedModel: string): BodyEdit {
   const field = scan.fields.model;

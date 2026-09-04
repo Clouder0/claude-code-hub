@@ -21,6 +21,7 @@ import {
   type BodyEdit,
   buildModelRedirectEdit,
   buildPromptCacheKeyEdit,
+  buildUnderscoreDeletionEdits,
   composeBody,
 } from "./body-composer";
 import { type BodyScanResult, scanJsonRequestBody } from "./body-scanner";
@@ -396,7 +397,14 @@ export class ProxySession {
   adoptFastBodyPath(scan: BodyScanResult): void {
     this.bodyScan = scan;
     this.fastBodyPathActive = true;
-    this.fastBodyBaseEdits = [];
+    // 下划线成员删除是请求级编辑（body 属性，与 attempt 无关），摄入即入 base 表。
+    this.fastBodyBaseEdits = buildUnderscoreDeletionEdits(scan);
+    if (this.fastBodyBaseEdits.length > 0) {
+      logger.debug("[FastBodyPath] stripped private parameters", {
+        keys: scan.facts.underscoreKeyNames,
+        runs: this.fastBodyBaseEdits.length,
+      });
+    }
     this.fastBodyAttemptEdits = [];
     this.fastBodyPromptCacheKey = null;
     this.forwardedRequestBody = scan.bytes;
@@ -411,6 +419,11 @@ export class ProxySession {
 
   hasFastBodyUnderscoreKeys(): boolean {
     return this.bodyScan?.facts.hasUnderscoreKeys ?? false;
+  }
+
+  /** 下划线删除编辑是否完整（截断=病态超限 → 必须按旧语义降解）。 */
+  fastBodyUnderscoreDeletionsIncomplete(): boolean {
+    return this.bodyScan?.facts.underscoreDeletionsTruncated ?? false;
   }
 
   getFastBodyFingerprintHash(): string | null {
@@ -464,7 +477,8 @@ export class ProxySession {
       throw new Error("fast body path: currency already released");
     }
     const edits = [...this.fastBodyBaseEdits, ...this.fastBodyAttemptEdits].sort(
-      (a, b) => a.start - b.start
+      // 同起点时零宽插入（pck @1）必须先于删除区间，否则区间算术错乱。
+      (a, b) => a.start - b.start || a.end - a.start - (b.end - b.start)
     );
     noteFastBodyRouted(edits.length > 0);
     return composeBody(currency, edits);

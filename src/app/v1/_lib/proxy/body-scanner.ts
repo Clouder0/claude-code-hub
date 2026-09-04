@@ -74,6 +74,16 @@ export interface BodyScanFacts {
   topLevelHasKeys: boolean;
   /** 任意深度存在 "_" 前缀键（filterPrivateParameters 的判定面）。 */
   hasUnderscoreKeys: boolean;
+  /**
+   * 下划线成员的游程合并删除区间（按对象聚合，相邻连续 `_` 成员并为单区间，
+   * 恰好吃掉一个边界逗号）。与 filterPrivateParameters 的递归剥除语义等价：
+   * 成员级整删，被删成员内部的嵌套 `_` 键随之外消（区间已在产出时吞并）。
+   */
+  underscoreDeletionRanges: ByteRange[];
+  /** 区间数超上限（病态输入）：true 时调用方必须按旧语义降解。 */
+  underscoreDeletionsTruncated: boolean;
+  /** 观测样本：前若干个下划线键名（与 legacy removedKeys 调试钩子对齐）。 */
+  underscoreKeyNames: string[];
 }
 
 export interface BodyScanResult {
@@ -100,6 +110,10 @@ const SMALL_OBJECT_LIMIT = 2048;
 /** input item 的 type 值解码上限（正常为短字符串；超限属病态输入）。 */
 const TYPE_VALUE_LIMIT = 256;
 const MAX_FINGERPRINT_TEXTS = 3;
+/** 下划线删除游程上限：__schema 类客户端一次 ~25 个相邻键合并为 1 游程；超限属病态。 */
+const MAX_UNDERSCORE_DELETION_RANGES = 128;
+/** 观测键名样本上限（与 legacy removedKeys 调试面同级）。 */
+const MAX_UNDERSCORE_KEY_NAME_SAMPLES = 32;
 
 // 容器栈帧角色（决定指纹收集与事实提取的上下文）。
 const ROLE_OTHER = 0;
@@ -201,6 +215,9 @@ export function scanJsonRequestBody(bytes: Uint8Array): BodyScanResult {
     hasInstructions: false,
     topLevelHasKeys: false,
     hasUnderscoreKeys: false,
+    underscoreDeletionRanges: [],
+    underscoreDeletionsTruncated: false,
+    underscoreKeyNames: [],
   };
   const fields: Partial<Record<TrackedFieldName, ScannedField>> = {};
   let thinkingRange: ByteRange | null = null;
@@ -233,6 +250,14 @@ export function scanJsonRequestBody(bytes: Uint8Array): BodyScanResult {
   const keyCountOf = new Int32Array(DEPTH_LIMIT + 1);
   const keyStartOf = new Int32Array(DEPTH_LIMIT + 1); // 各帧 pending key 区间
   const keyEndOf = new Int32Array(DEPTH_LIMIT + 1);
+  // 下划线删除游程状态（按对象帧）：相邻 `_` 成员合并为单区间，恰好吃一个边界逗号。
+  const runOpenOf = new Uint8Array(DEPTH_LIMIT + 1);
+  const runHasPredOf = new Uint8Array(DEPTH_LIMIT + 1);
+  const runStartKeyOf = new Int32Array(DEPTH_LIMIT + 1); // 首成员键引号位
+  const runStartMemberOf = new Int32Array(DEPTH_LIMIT + 1); // 首成员起始（前成员值结束处）
+  const runEndOf = new Int32Array(DEPTH_LIMIT + 1); // 末成员值结束
+  const prevValueEndOf = new Int32Array(DEPTH_LIMIT + 1);
+  const pendingKeyIsUnderscoreOf = new Uint8Array(DEPTH_LIMIT + 1);
 
   // —— 顶层受控键的重复检测 ——
   const seenTopKeys = new Set<string>();
@@ -260,6 +285,63 @@ export function scanJsonRequestBody(bytes: Uint8Array): BodyScanResult {
 
   let i = 0;
   let top = -1; // 栈顶帧下标
+
+  /** 在 [from, to) 定位成员分隔逗号（JSON 文法保证恰好一个；缺失按防御性截断）。 */
+  function findSeparatorComma(from: number, to: number): number {
+    for (let p = from; p < to; p++) {
+      if (bytes[p] === 0x2c) return p;
+    }
+    return -1;
+  }
+
+  /**
+   * 产出一条游程删除区间：
+   * - 有前驱成员：吃前逗号 [comma, runEnd)；
+   * - 无前驱有后继：吃后逗号 [firstKey, comma+1)；
+   * - 唯一成员：[firstKey, runEnd)。
+   * 恰好吃一个逗号 ⇒ 产物恒为合法 JSON，且与 filterPrivateParameters 的键集等价。
+   * 嵌套吞并：被本区间完全包含的既有区间（来自已删成员内部）丢弃，杜绝重叠。
+   */
+  function emitRun(frame: number, successorKeyQuote: number | null): void {
+    if (
+      facts.underscoreDeletionsTruncated ||
+      facts.underscoreDeletionRanges.length >= MAX_UNDERSCORE_DELETION_RANGES
+    ) {
+      facts.underscoreDeletionsTruncated = true;
+      return;
+    }
+    const firstKey = runStartKeyOf[frame];
+    let start: number;
+    let end: number;
+    if (runHasPredOf[frame] === 1) {
+      const comma = findSeparatorComma(runStartMemberOf[frame], firstKey);
+      if (comma < 0) {
+        facts.underscoreDeletionsTruncated = true;
+        return;
+      }
+      start = comma;
+      end = runEndOf[frame];
+    } else {
+      start = firstKey;
+      if (successorKeyQuote == null) {
+        end = runEndOf[frame];
+      } else {
+        const comma = findSeparatorComma(runEndOf[frame], successorKeyQuote);
+        if (comma < 0) {
+          facts.underscoreDeletionsTruncated = true;
+          return;
+        }
+        end = comma + 1;
+      }
+    }
+    const range = { start, end };
+    if (facts.underscoreDeletionRanges.length > 0) {
+      facts.underscoreDeletionRanges = facts.underscoreDeletionRanges.filter(
+        (r) => !(r.start >= range.start && r.end <= range.end)
+      );
+    }
+    facts.underscoreDeletionRanges.push(range);
+  }
 
   const resetItemState = (): void => {
     itemTypeSeen = false;
@@ -321,6 +403,14 @@ export function scanJsonRequestBody(bytes: Uint8Array): BodyScanResult {
     kind: ScannedField["kind"],
     arrayItemCount: number
   ): FastBodyAnomalyReason | null => {
+    // 下划线删除游程：对象成员值完成点记账（供后续成员 memberStart 与游程末端）。
+    if (parentFrame >= 0 && kindOf[parentFrame] === CONTAINER_OBJECT) {
+      prevValueEndOf[parentFrame] = valueEnd;
+      if (pendingKeyIsUnderscoreOf[parentFrame] === 1 && runOpenOf[parentFrame] === 1) {
+        runEndOf[parentFrame] = valueEnd;
+      }
+      pendingKeyIsUnderscoreOf[parentFrame] = 0;
+    }
     const parentRole = roleOf[parentFrame];
     const inObject = kindOf[parentFrame] === CONTAINER_OBJECT;
     const keyStart = inObject ? keyStartOf[parentFrame] : -1;
@@ -712,6 +802,9 @@ export function scanJsonRequestBody(bytes: Uint8Array): BodyScanResult {
       startOf[top] = i;
       itemCountOf[top] = 0;
       keyCountOf[top] = 0;
+      runOpenOf[top] = 0;
+      pendingKeyIsUnderscoreOf[top] = 0;
+      prevValueEndOf[top] = -1;
       i += 1;
       return null;
     }
@@ -801,6 +894,9 @@ export function scanJsonRequestBody(bytes: Uint8Array): BodyScanResult {
   startOf[top] = i;
   itemCountOf[top] = 0;
   keyCountOf[top] = 0;
+  runOpenOf[top] = 0;
+  pendingKeyIsUnderscoreOf[top] = 0;
+  prevValueEndOf[top] = -1;
   i += 1;
 
   while (top >= 0) {
@@ -818,6 +914,10 @@ export function scanJsonRequestBody(bytes: Uint8Array): BodyScanResult {
           if (roleOf[frame] === ROLE_ITEM_OBJ) finalizeItem();
           if (roleOf[frame] === ROLE_PART_OBJ) finishPart();
           if (roleOf[frame] === ROLE_TOP) facts.topLevelHasKeys = keyCountOf[frame] > 0;
+          if (runOpenOf[frame] === 1) {
+            emitRun(frame, null);
+            runOpenOf[frame] = 0;
+          }
           const reason = onValueComplete(frame - 1, startOf[frame], i, "object", 0);
           if (reason) return anomaly(reason);
           top -= 1;
@@ -825,6 +925,7 @@ export function scanJsonRequestBody(bytes: Uint8Array): BodyScanResult {
           continue;
         }
         if (b !== 0x22) return anomaly("invalid_json");
+        const keyQuote = i;
         const keyClose = scanStringContent(i);
         if (typeof keyClose !== "number") return anomaly(keyClose);
         const innerStart = i + 1;
@@ -834,6 +935,24 @@ export function scanJsonRequestBody(bytes: Uint8Array): BodyScanResult {
         }
         if (innerEnd > innerStart && bytes[innerStart] === 0x5f) {
           facts.hasUnderscoreKeys = true;
+          if (facts.underscoreKeyNames.length < MAX_UNDERSCORE_KEY_NAME_SAMPLES) {
+            facts.underscoreKeyNames.push(
+              RAW_DECODER.decode(bytes.subarray(innerStart, Math.min(innerEnd, innerStart + 64)))
+            );
+          }
+          if (runOpenOf[frame] === 0) {
+            runOpenOf[frame] = 1;
+            runHasPredOf[frame] = keyCountOf[frame] > 0 ? 1 : 0;
+            runStartKeyOf[frame] = keyQuote;
+            runStartMemberOf[frame] = prevValueEndOf[frame];
+          }
+          pendingKeyIsUnderscoreOf[frame] = 1;
+        } else {
+          if (runOpenOf[frame] === 1) {
+            emitRun(frame, keyQuote);
+            runOpenOf[frame] = 0;
+          }
+          pendingKeyIsUnderscoreOf[frame] = 0;
         }
         keyStartOf[frame] = innerStart;
         keyEndOf[frame] = innerEnd;

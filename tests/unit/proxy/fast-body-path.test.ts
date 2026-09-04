@@ -432,6 +432,49 @@ describe("fast body path integration", () => {
     expect(packet.instructions.length).toBe(1);
   });
 
+  it("F8: underscore-carrying body stays on the fast path with deletion edits", async () => {
+    // 模拟 __schema 类客户端：input item 上相邻游程 + 顶层无 pck（补全编辑同场）。
+    const schemaTail: Record<string, unknown> = {};
+    for (let k = 0; k < 5; k++) schemaTail[`__schema${k}`] = { type: "object", properties: {} };
+    const parsed = JSON.parse(codexBody()) as Record<string, unknown>;
+    delete parsed.prompt_cache_key;
+    (parsed.input as unknown[]).push({
+      type: "message",
+      role: "user",
+      content: [{ type: "input_text", text: "schema-client" }],
+      ...schemaTail,
+      _codex_executed_tool_call_truncated: true,
+    });
+    const text = JSON.stringify(parsed);
+
+    const session = createSession({});
+    adopt(session, text);
+    session.applyFastBodyPromptCacheKey(SESSION_ID);
+    expect(session.getFastBodyScan()?.facts.underscoreDeletionsTruncated).toBe(false);
+    expect(session.getFastBodyScan()?.facts.underscoreDeletionRanges.length).toBeGreaterThan(0);
+    upstreamUrl = await listen(server);
+
+    await forward(session, createProvider(upstreamUrl));
+
+    // 快速路径全程存活（未降解）。
+    expect(session.isFastBodyPathActive()).toBe(true);
+    expect(capture.body).not.toBeNull();
+    const upstreamBody = JSON.parse(new TextDecoder().decode(capture.body!)) as Record<
+      string,
+      unknown
+    >;
+    // oracle：filterPrivateParameters（生产语义镜像）+ pck 补全。
+    const filtered = JSON.parse(
+      JSON.stringify(parsed, (key, value) =>
+        key.startsWith("_") && key !== "" ? undefined : value
+      )
+    ) as Record<string, unknown>;
+    filtered.prompt_cache_key = SESSION_ID;
+    expect(upstreamBody).toEqual(filtered);
+    // `_` 键在出站体中不存在（序列化后不含 "__schema"）。
+    expect(new TextDecoder().decode(capture.body!)).not.toContain("__schema");
+  });
+
   it("F6: completer hash override is bit-exact with the tree-walk oracle", async () => {
     const text = codexBody();
     const parsed = JSON.parse(text) as Record<string, unknown>;
